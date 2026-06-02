@@ -1,0 +1,38 @@
+# Large local datasets and generated artifacts
+data/
+data-test/
+annotations/
+outputs/
+*.duckdb
+*.parquet
+*.hdf5
+*.mp4
+*.blend
+*.obj
+*.mtl
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.gz
+
+# Download/extraction logs and transient states
+*.out
+*_state.json
+retry_*.log
+download_*.log
+logs/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
