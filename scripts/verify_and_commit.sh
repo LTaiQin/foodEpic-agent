@@ -21,12 +21,12 @@ else
   fi
 fi
 
-if git diff --quiet && git diff --cached --quiet; then
+git add -A
+
+if git diff --cached --quiet; then
   echo "[commit] no changes"
   exit 0
 fi
 
-git add -A
 git commit -m "$message"
 echo "[commit] created: $message"
-
