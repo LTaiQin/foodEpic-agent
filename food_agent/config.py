@@ -34,3 +34,31 @@ class ProjectConfig:
             output_root=output_root,
         )
 
+
+@dataclass(frozen=True)
+class ModelConfig:
+    """OpenAI-compatible model endpoint configuration."""
+
+    model: str
+    api_key: str
+    base_url: str
+
+    @classmethod
+    def from_env(cls) -> "ModelConfig":
+        return cls(
+            model=os.environ.get("FOOD_AGENT_MODEL", "gpt-5.4"),
+            api_key=os.environ.get("OPENAI_API_KEY", ""),
+            base_url=os.environ.get("OPENAI_BASE_URL", "https://www.cctq.ai/v1"),
+        )
+
+
+def load_env_file(path: Path) -> None:
+    """Load KEY=VALUE pairs into os.environ without overriding existing values."""
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip())
