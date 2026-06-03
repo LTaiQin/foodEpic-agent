@@ -54,6 +54,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--task-family", default=None)
     parser.add_argument("--task-family-group", choices=sorted(TASK_FAMILY_GROUPS), default=None)
     parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--run-suffix", default=None)
     return parser.parse_args()
 
 
@@ -128,7 +129,10 @@ def main() -> int:
     spatial_store = SpatialContextStore(args.index_dir)
     samples = load_selected_samples(args.index_dir, limit=args.limit, task_family=args.task_family, task_family_group=args.task_family_group)
     baselines = [item.strip() for item in args.baselines.split(",") if item.strip()]
-    run_name = args.task_family_group or args.task_family or "mixed"
+    run_base = args.task_family_group or args.task_family or "mixed"
+    run_name = f"{run_base}_limit{args.limit}"
+    if args.run_suffix:
+        run_name = f"{run_name}_{args.run_suffix}"
     run_out_dir = args.out_dir / run_name
     run_out_dir.mkdir(parents=True, exist_ok=True)
     food_metrics = read_json(Path("outputs/results/food_state_metrics.json"))

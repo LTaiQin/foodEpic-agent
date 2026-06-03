@@ -33,7 +33,7 @@ def append_agent_comparison(lines: list[str], output_root: Path) -> None:
     comparison_root = output_root / "results" / "agent_comparison"
     if not comparison_root.exists():
         return
-    run_dirs = sorted(path for path in comparison_root.iterdir() if path.is_dir())
+    run_dirs = sorted((path for path in comparison_root.iterdir() if path.is_dir()), key=lambda p: p.name)
     if not run_dirs:
         return
     lines += ["## Agent Comparison", ""]
