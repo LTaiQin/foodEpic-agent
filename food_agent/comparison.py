@@ -13,6 +13,24 @@ from .vqa import VQASample, parse_choice_prediction
 
 
 TIME_PATTERN = re.compile(r"(\d+):(\d+):(\d+(?:\.\d+)?)")
+JSON_BLOCK_PATTERN = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+EVIDENCE_LINE_PATTERN = re.compile(r"(?:event_id|evidence_ids?)\s*[:=]\s*([^\n]+)", re.IGNORECASE)
+EVIDENCE_TOKEN_PATTERN = re.compile(r"[A-Za-z]+[A-Za-z0-9:_/\-]*")
+
+TASK_SPECIALIZATION = {
+    "ingredient_ingredient_retrieval": "ingredient",
+    "ingredient_exact_ingredient_recognition": "ingredient",
+    "ingredient_ingredient_recognition": "ingredient",
+    "ingredient_ingredients_order": "ingredient",
+    "ingredient_ingredient_weight": "ingredient",
+    "recipe_step_recognition": "recipe",
+    "recipe_recipe_recognition": "recipe",
+    "recipe_following_activity_recognition": "recipe",
+    "recipe_multi_step_localization": "recipe",
+    "nutrition_nutrition_change": "nutrition",
+    "nutrition_video_nutrition_estimation": "nutrition",
+    "nutrition_image_nutrition_estimation": "nutrition",
+}
 
 
 @dataclass(frozen=True)
@@ -87,6 +105,9 @@ def collect_evidence(
             event_id = row.get("event_id")
             if event_id:
                 evidence_ids.append(event_id)
+        for event_id in nutrition.evidence_ids[:2]:
+            if event_id and event_id not in evidence_ids:
+                evidence_ids.append(event_id)
     return {
         "context": ctx,
         "recipe": recipe,
@@ -102,7 +123,6 @@ def build_messages(
     baseline: str,
     evidence: dict[str, Any],
 ) -> list[dict[str, str]]:
-    ctx = evidence["context"]
     base = (
         "你是一个厨房视频问答助手。"
         "请只从给定信息中回答，输出最终选项编号。"
@@ -124,10 +144,14 @@ def build_messages(
         return [{"role": "system", "content": base}, {"role": "user", "content": content}]
 
     if baseline == "ours-foodevidence":
+        specialization = infer_specialization(sample.task_family)
         content = (
             question
-            + "\n\n你必须依据证据回答。如果证据不足，选择最符合证据的选项，并给出简短理由。"
-            + "\n输出 JSON：{\"choice\": <编号>, \"reason\": \"...\", \"evidence_ids\": [\"...\"]}"
+            + "\n\n"
+            + _specialized_instruction(specialization)
+            + "\n你必须依据证据回答。优先引用给定的 suggested_evidence_ids。"
+            + "\n如果证据不足，也必须选择最符合证据的选项，且 evidence_ids 至少填写 1 个最相关证据。"
+            + "\n只输出 JSON，不要输出 Markdown。格式：{\"choice\": <编号>, \"reason\": \"...\", \"evidence_ids\": [\"...\"]}"
             + "\n\nEvidence block：\n"
             + _ours_evidence_text(evidence)
         )
@@ -140,12 +164,19 @@ def parse_model_output(text: str, sample: VQASample, baseline: str) -> tuple[int
     evidence_ids: list[str] = []
     if baseline == "ours-foodevidence":
         try:
-            payload = json.loads(text)
+            payload = _extract_json_payload(text)
             evidence_ids = [str(item) for item in payload.get("evidence_ids", [])]
-            return int(payload.get("choice", 0)), evidence_ids, None
+            choice = payload.get("choice", 0)
+            if isinstance(choice, str) and not choice.isdigit():
+                choice_idx = parse_choice_prediction(choice, sample.choices)
+            else:
+                choice_idx = int(choice)
+            return choice_idx, evidence_ids, None
         except Exception:
             idx = parse_choice_prediction(text, sample.choices)
-            return idx, evidence_ids, "format_error"
+            recovered_ids = _extract_evidence_ids_from_text(text)
+            failure = "format_error" if idx == 0 and not recovered_ids else None
+            return idx, recovered_ids, failure
     idx = parse_choice_prediction(text, sample.choices)
     return idx, evidence_ids, None
 
@@ -163,6 +194,28 @@ def _direct_evidence_text(evidence: dict[str, Any]) -> str:
     if spatial:
         parts.append("recent_audio=" + json.dumps(spatial.audio_events[:3], ensure_ascii=False))
     return "\n".join(parts)
+
+
+def infer_specialization(task_family: str) -> str:
+    return TASK_SPECIALIZATION.get(task_family, "general")
+
+
+def _specialized_instruction(specialization: str) -> str:
+    if specialization == "ingredient":
+        return (
+            "这是食材题。优先根据 added_ingredients、pending_ingredients、ingredient.added 和 recipe 步骤判断"
+            " 哪个食材被加入、未加入、或数量最匹配。"
+        )
+    if specialization == "recipe":
+        return (
+            "这是菜谱步骤题。优先根据 active_steps、completed_recent、next_steps 和高层 activity 语义"
+            " 判断当前或对应时间段最匹配的步骤/菜谱。"
+        )
+    if specialization == "nutrition":
+        return (
+            "这是营养变化题。优先根据 nutrition.delta 和最近新增食材判断热量、脂肪、碳水、蛋白质变化。"
+        )
+    return "这是厨房任务题。优先根据结构化证据判断最符合的选项。"
 
 
 def _food_state_text(evidence: dict[str, Any]) -> str:
@@ -203,3 +256,28 @@ def _ours_evidence_text(evidence: dict[str, Any]) -> str:
     blocks.append("suggested_evidence_ids=" + json.dumps(evidence.get("evidence_ids", []), ensure_ascii=False))
     return "\n".join(blocks)
 
+
+def _extract_json_payload(text: str) -> dict[str, Any]:
+    stripped = text.strip()
+    if stripped.startswith("{") and stripped.endswith("}"):
+        return json.loads(stripped)
+    match = JSON_BLOCK_PATTERN.search(text)
+    if match:
+        return json.loads(match.group(1))
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return json.loads(text[start : end + 1])
+    raise ValueError("no json payload found")
+
+
+def _extract_evidence_ids_from_text(text: str) -> list[str]:
+    seen: list[str] = []
+    for match in EVIDENCE_LINE_PATTERN.finditer(text):
+        raw = match.group(1)
+        for evidence_id in EVIDENCE_TOKEN_PATTERN.findall(raw):
+            if ":" not in evidence_id:
+                continue
+            if evidence_id not in seen:
+                seen.append(evidence_id)
+    return seen

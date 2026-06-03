@@ -72,13 +72,20 @@ def run_one_baseline(
     predictions: list[VQAPrediction] = []
     for sample in samples:
         evidence = collect_evidence(sample, state_store, spatial_store)
-        messages = build_messages(sample, baseline, evidence)
-        response = model_client.complete(messages, temperature=temperature)
-        pred_idx, answer_evidence_ids, parse_failure = parse_model_output(response.content, sample, baseline)
-        evidence_ids = answer_evidence_ids or list(evidence.get("evidence_ids", [] if baseline == "textonly" else evidence.get("evidence_ids", [])))
+        default_evidence_ids = list(evidence.get("evidence_ids", []))
         tool_calls = []
         if baseline in {"directevidence", "foodstate", "ours-foodevidence"}:
             tool_calls = ["state_store", "spatial_store"]
+        try:
+            messages = build_messages(sample, baseline, evidence)
+            response = model_client.complete(messages, temperature=temperature)
+            pred_idx, answer_evidence_ids, parse_failure = parse_model_output(response.content, sample, baseline)
+            evidence_ids = answer_evidence_ids or ([] if baseline == "textonly" else default_evidence_ids[:2])
+            failure_type = parse_failure if parse_failure else (None if pred_idx == sample.correct_idx else "reasoning_error")
+        except Exception as exc:
+            pred_idx = 0
+            evidence_ids = [] if baseline == "textonly" else default_evidence_ids[:2]
+            failure_type = f"model_error:{type(exc).__name__}"
         predictions.append(
             VQAPrediction(
                 sample_id=sample.vqa_id,
@@ -92,7 +99,7 @@ def run_one_baseline(
                 correct=pred_idx == sample.correct_idx,
                 evidence_ids=evidence_ids if baseline != "textonly" else [],
                 tool_calls=tool_calls,
-                failure_type=parse_failure if parse_failure else (None if pred_idx == sample.correct_idx else "reasoning_error"),
+                failure_type=failure_type,
             )
         )
     return predictions

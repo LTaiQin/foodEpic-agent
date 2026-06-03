@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 from typing import Any
 
-from openai import OpenAI
+from openai import APIConnectionError, APIStatusError, InternalServerError, OpenAI
 
 from .config import ModelConfig
 
@@ -30,10 +31,24 @@ class OpenAICompatibleModelClient:
         self.client = OpenAI(api_key=self.config.api_key, base_url=self.config.base_url)
 
     def complete(self, messages: list[dict[str, str]], temperature: float = 0.0) -> ModelResponse:
-        response = self.client.chat.completions.create(
-            model=self.config.model,
-            messages=messages,
-            temperature=temperature,
-        )
-        return ModelResponse(content=response.choices[0].message.content or "", raw=response)
-
+        last_error: Exception | None = None
+        for attempt in range(self.config.max_retries + 1):
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.config.model,
+                    messages=messages,
+                    temperature=temperature,
+                )
+                return ModelResponse(content=response.choices[0].message.content or "", raw=response)
+            except (APIConnectionError, InternalServerError) as exc:
+                last_error = exc
+            except APIStatusError as exc:
+                last_error = exc
+                if exc.status_code not in {408, 409, 429, 500, 502, 503, 504}:
+                    raise
+            if attempt >= self.config.max_retries:
+                break
+            time.sleep(self.config.retry_backoff_seconds * (attempt + 1))
+        raise RuntimeError(
+            f"model request failed after {self.config.max_retries + 1} attempts for model={self.config.model}: {last_error}"
+        ) from last_error
