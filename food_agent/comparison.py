@@ -246,6 +246,8 @@ def _rank_ingredient_choices(sample: VQASample, evidence: dict[str, Any]) -> lis
     pending_text = " ".join(_row_text(row) for row in getattr(ingredient, "pending", []))
     recipe = evidence.get("recipe")
     recipe_text = " ".join(_row_text(row) for row in getattr(recipe, "active_steps", []) + getattr(recipe, "completed_steps", [])[-3:])
+    spatial = evidence.get("spatial")
+    audio_text = " ".join(_row_text(row) for row in getattr(spatial, "audio_events", []))
     hints: list[ChoiceHint] = []
     for idx, choice in enumerate(sample.choices):
         score = 0.0
@@ -257,6 +259,9 @@ def _rank_ingredient_choices(sample: VQASample, evidence: dict[str, Any]) -> lis
         if norm_choice and norm_choice in recipe_text.lower():
             score += 1.5
             reasons.append("match_recipe")
+        if any(word in audio_text.lower() for word in ["pour", "rustle", "clink", "glass"]) and norm_choice in added_text.lower():
+            score += 0.5
+            reasons.append("audio_support")
         if "not used" in sample.question.lower() and norm_choice not in added_text.lower() and norm_choice not in recipe_text.lower():
             score += 2.0
             reasons.append("absent_support")
@@ -272,6 +277,9 @@ def _rank_recipe_choices(sample: VQASample, evidence: dict[str, Any]) -> list[Ch
     active_text = " ".join(_row_text(row) for row in getattr(recipe, "active_steps", []))
     completed_text = " ".join(_row_text(row) for row in getattr(recipe, "completed_steps", [])[-3:])
     next_text = " ".join(_row_text(row) for row in getattr(recipe, "next_steps", [])[:3])
+    spatial = evidence.get("spatial")
+    object_text = " ".join(_row_text(row) for row in getattr(spatial, "object_tracks", []))
+    audio_text = " ".join(_row_text(row) for row in getattr(spatial, "audio_events", []))
     hints: list[ChoiceHint] = []
     for idx, choice in enumerate(sample.choices):
         score = 0.0
@@ -282,12 +290,18 @@ def _rank_recipe_choices(sample: VQASample, evidence: dict[str, Any]) -> list[Ch
         score += overlap_active * 3.0
         score += overlap_completed * 2.0
         score += overlap_next * 1.0
+        score += _token_overlap_score(choice, object_text) * 0.5
+        score += _token_overlap_score(choice, audio_text) * 0.5
         if overlap_active:
             reasons.append("match_active")
         if overlap_completed:
             reasons.append("match_completed")
         if overlap_next:
             reasons.append("match_next")
+        if _token_overlap_score(choice, object_text):
+            reasons.append("match_object")
+        if _token_overlap_score(choice, audio_text):
+            reasons.append("match_audio")
         hints.append(ChoiceHint(idx, choice, score, ",".join(reasons) or "weak_match"))
     return sorted(hints, key=lambda item: (-item.score, item.choice_idx))
 
@@ -399,4 +413,3 @@ def _extract_evidence_ids_from_text(text: str) -> list[str]:
             if evidence_id not in seen:
                 seen.append(evidence_id)
     return seen
-

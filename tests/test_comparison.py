@@ -165,6 +165,7 @@ def test_rank_choice_hints_ingredient() -> None:
     evidence = {
         "ingredient": type("Ingredient", (), {"added": [{"label": "capsule"}], "pending": []})(),
         "recipe": type("Recipe", (), {"active_steps": [], "completed_steps": []})(),
+        "spatial": type("Spatial", (), {"audio_events": []})(),
     }
     hints = rank_choice_hints(sample, evidence, "ingredient")
     assert hints[0].choice_text == "capsule"
