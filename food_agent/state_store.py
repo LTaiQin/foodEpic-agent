@@ -1,4 +1,4 @@
-"""State queries for recipe, ingredient, nutrition, and simple anomalies."""
+"""State queries for recipe, ingredient, nutrition, activities, and simple anomalies."""
 
 from __future__ import annotations
 
@@ -43,6 +43,14 @@ class NutritionDelta:
 
 
 @dataclass(frozen=True)
+class ActivityWindow:
+    video_id: str
+    start_time: float
+    end_time: float
+    activities: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
 class Anomaly:
     anomaly_type: str
     severity: str
@@ -56,6 +64,7 @@ class FoodStateStore:
     def __init__(self, index_dir: Path | None = None):
         paths = ProjectPaths.from_env()
         self.index_dir = index_dir or paths.output_root / "event_index"
+        self.annotation_root = paths.annotation_root
         self._cache: dict[str, pd.DataFrame] = {}
 
     def _table(self, name: str) -> pd.DataFrame:
@@ -65,6 +74,23 @@ class FoodStateStore:
                 raise FileNotFoundError(f"missing index table: {path}")
             self._cache[name] = pd.read_parquet(path)
         return self._cache[name]
+
+    def _activities(self) -> pd.DataFrame:
+        if "activities_csv" not in self._cache:
+            activity_dir = self.annotation_root / "high-level" / "activities"
+            frames = []
+            for csv_path in sorted(activity_dir.glob("*_recipe_timestamps.csv")):
+                frame = pd.read_csv(csv_path)
+                if frame.empty:
+                    continue
+                frame = frame.copy()
+                frame["start_time"] = pd.to_numeric(frame["start_time"], errors="coerce")
+                frame["end_time"] = pd.to_numeric(frame["end_time"], errors="coerce")
+                frame["event_id"] = [f"activity:{row.video_id}:{idx}" for idx, row in frame.reset_index(drop=True).iterrows()]
+                frame["text"] = frame["high_level_activity_label"]
+                frames.append(frame)
+            self._cache["activities_csv"] = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        return self._cache["activities_csv"]
 
     def recipe_state(self, video_id: str, time: float, horizon: float = 120.0) -> RecipeState:
         steps = self._table("recipe_steps")
@@ -114,6 +140,55 @@ class FoodStateStore:
             & (ingredients["start_time"].fillna(float("-inf")) <= float(end_time))
         ].copy()
         subset = subset.sort_values(["start_time", "end_time"])
+        return _records(subset)
+
+    def recipe_catalog(self, video_ids: list[str]) -> list[dict[str, Any]]:
+        if not video_ids:
+            return []
+        steps = self._table("recipe_steps")
+        recipes = self._table("recipes")
+        subset = steps[steps["video_id"].isin(video_ids)].copy()
+        if subset.empty:
+            return []
+        subset["recipe_id"] = subset["payload_json"].apply(lambda raw: json.loads(raw).get("recipe_id") if raw else None)
+        recipe_ids = [recipe_id for recipe_id in subset["recipe_id"].dropna().unique().tolist() if recipe_id]
+        if not recipe_ids:
+            return []
+        recipe_rows = recipes[recipes["recipe_id"].isin(recipe_ids)].copy()
+        recipe_map = {row["recipe_id"]: row for row in recipe_rows.to_dict(orient="records")}
+        results = []
+        for recipe_id in recipe_ids:
+            meta = recipe_map.get(recipe_id, {})
+            recipe_videos = subset[subset["recipe_id"] == recipe_id]["video_id"].dropna().unique().tolist()
+            results.append(
+                {
+                    "recipe_id": recipe_id,
+                    "name": meta.get("name"),
+                    "participant_id": meta.get("participant_id"),
+                    "video_ids": recipe_videos,
+                    "step_count": int(meta.get("step_count") or 0),
+                }
+            )
+        return results
+
+    def activity_window(self, video_id: str, start_time: float, end_time: float) -> ActivityWindow:
+        activities = self._activities()
+        subset = activities[
+            (activities["video_id"] == video_id)
+            & (activities["end_time"].fillna(float("inf")) >= float(start_time))
+            & (activities["start_time"].fillna(float("-inf")) <= float(end_time))
+        ].copy()
+        subset = subset.sort_values(["start_time", "end_time"])
+        return ActivityWindow(
+            video_id=video_id,
+            start_time=float(start_time),
+            end_time=float(end_time),
+            activities=_records(subset),
+        )
+
+    def all_video_activities(self, video_id: str) -> list[dict[str, Any]]:
+        activities = self._activities()
+        subset = activities[activities["video_id"] == video_id].copy().sort_values(["start_time", "end_time"])
         return _records(subset)
 
     def nutrition_delta(self, video_id: str, time: float) -> NutritionDelta:

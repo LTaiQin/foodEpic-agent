@@ -50,6 +50,7 @@ class SampleContext:
     start_time: float | None
     end_time: float | None
     object_name: str | None = None
+    video_ids: list[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -72,14 +73,17 @@ def parse_hms(text: str) -> float | None:
 
 def extract_sample_context(sample: VQASample) -> SampleContext:
     video_id = sample.primary_video_id
+    video_ids: list[str] = []
     time_point = None
     start_time = None
     end_time = None
     for value in sample.inputs.values():
         if not isinstance(value, dict):
             continue
-        if not video_id and value.get("id"):
-            video_id = value["id"]
+        if value.get("id"):
+            video_ids.append(value["id"])
+            if not video_id:
+                video_id = value["id"]
         if value.get("time") and time_point is None:
             time_point = parse_hms(str(value["time"]))
         if value.get("start_time"):
@@ -107,6 +111,7 @@ def extract_sample_context(sample: VQASample) -> SampleContext:
         time_point=time_point,
         start_time=start_time,
         end_time=end_time,
+        video_ids=video_ids or ([video_id] if video_id else []),
     )
 
 
@@ -124,7 +129,12 @@ def collect_evidence(
         return {"context": ctx, "events": [], "recipe": None, "ingredient": None, "nutrition": None, "spatial": None}
     recipe = ingredient = nutrition = spatial = None
     ingredient_interval = []
+    recipe_catalog = []
+    activity_window = None
+    video_activities: list[dict[str, Any]] = []
     evidence_ids: list[str] = []
+    if ctx.video_ids:
+        recipe_catalog = state_store.recipe_catalog(ctx.video_ids)
     if ctx.time_point is not None:
         recipe = state_store.recipe_state(ctx.video_id, ctx.time_point)
         ingredient = state_store.ingredient_state(ctx.video_id, ctx.time_point)
@@ -139,15 +149,26 @@ def collect_evidence(
                 evidence_ids.append(event_id)
     if ctx.video_id and ctx.start_time is not None and ctx.end_time is not None:
         ingredient_interval = state_store.ingredient_interval(ctx.video_id, ctx.start_time, ctx.end_time)
+        activity_window = state_store.activity_window(ctx.video_id, ctx.start_time, ctx.end_time)
         for row in ingredient_interval[:3]:
             event_id = row.get("event_id")
             if event_id and event_id not in evidence_ids:
                 evidence_ids.append(event_id)
+        if activity_window:
+            for row in activity_window.activities[:3]:
+                event_id = row.get("event_id")
+                if event_id and event_id not in evidence_ids:
+                    evidence_ids.append(event_id)
+    if ctx.video_id:
+        video_activities = state_store.all_video_activities(ctx.video_id)
     return {
         "context": ctx,
         "recipe": recipe,
         "ingredient": ingredient,
         "ingredient_interval": ingredient_interval,
+        "recipe_catalog": recipe_catalog,
+        "activity_window": activity_window,
+        "video_activities": video_activities,
         "nutrition": nutrition,
         "spatial": spatial,
         "evidence_ids": evidence_ids,
@@ -308,6 +329,10 @@ def _rank_recipe_choices(sample: VQASample, evidence: dict[str, Any]) -> list[Ch
     active_text = " ".join(_row_text(row) for row in getattr(recipe, "active_steps", []))
     completed_text = " ".join(_row_text(row) for row in getattr(recipe, "completed_steps", [])[-3:])
     next_text = " ".join(_row_text(row) for row in getattr(recipe, "next_steps", [])[:3])
+    activity_window = evidence.get("activity_window")
+    activity_text = " ".join(_row_text(row) for row in getattr(activity_window, "activities", []))
+    video_activity_text = " ".join(_row_text(row) for row in evidence.get("video_activities", [])[:20])
+    recipe_names = [str(item.get("name", "")) for item in evidence.get("recipe_catalog", [])]
     spatial = evidence.get("spatial")
     object_text = " ".join(_row_text(row) for row in getattr(spatial, "object_tracks", []))
     audio_text = " ".join(_row_text(row) for row in getattr(spatial, "audio_events", []))
@@ -318,9 +343,15 @@ def _rank_recipe_choices(sample: VQASample, evidence: dict[str, Any]) -> list[Ch
         overlap_active = _token_overlap_score(choice, active_text)
         overlap_completed = _token_overlap_score(choice, completed_text)
         overlap_next = _token_overlap_score(choice, next_text)
+        overlap_activity = _token_overlap_score(choice, activity_text)
+        overlap_video_activity = _token_overlap_score(choice, video_activity_text)
+        recipe_match = max((_token_overlap_score(choice, name) for name in recipe_names), default=0.0)
         score += overlap_active * 3.0
         score += overlap_completed * 2.0
         score += overlap_next * 1.0
+        score += overlap_activity * 3.0
+        score += overlap_video_activity * 1.5
+        score += recipe_match * 4.0
         score += _token_overlap_score(choice, object_text) * 0.5
         score += _token_overlap_score(choice, audio_text) * 0.5
         if overlap_active:
@@ -329,6 +360,12 @@ def _rank_recipe_choices(sample: VQASample, evidence: dict[str, Any]) -> list[Ch
             reasons.append("match_completed")
         if overlap_next:
             reasons.append("match_next")
+        if overlap_activity:
+            reasons.append("match_activity_window")
+        if overlap_video_activity:
+            reasons.append("match_video_activity")
+        if recipe_match:
+            reasons.append("match_recipe_name")
         if _token_overlap_score(choice, object_text):
             reasons.append("match_object")
         if _token_overlap_score(choice, audio_text):
@@ -361,6 +398,10 @@ def _food_state_text(evidence: dict[str, Any]) -> str:
     if recipe:
         parts.append("active_steps=" + json.dumps(recipe.active_steps, ensure_ascii=False))
         parts.append("next_steps=" + json.dumps(recipe.next_steps[:3], ensure_ascii=False))
+    if evidence.get("recipe_catalog"):
+        parts.append("recipe_catalog=" + json.dumps(evidence["recipe_catalog"], ensure_ascii=False))
+    if evidence.get("activity_window"):
+        parts.append("activity_window=" + json.dumps(evidence["activity_window"].activities[:5], ensure_ascii=False))
     if ingredient:
         parts.append("added_ingredients=" + json.dumps(ingredient.added[-5:], ensure_ascii=False))
         parts.append("pending_ingredients=" + json.dumps(ingredient.pending[:5], ensure_ascii=False))
@@ -379,6 +420,12 @@ def _ours_evidence_text(evidence: dict[str, Any]) -> str:
     if recipe:
         blocks.append("recipe.active=" + json.dumps(recipe.active_steps, ensure_ascii=False))
         blocks.append("recipe.completed_recent=" + json.dumps(recipe.completed_steps[-3:], ensure_ascii=False))
+    if evidence.get("recipe_catalog"):
+        blocks.append("recipe.catalog=" + json.dumps(evidence["recipe_catalog"], ensure_ascii=False))
+    if evidence.get("activity_window"):
+        blocks.append("activity.window=" + json.dumps(evidence["activity_window"].activities[:5], ensure_ascii=False))
+    if evidence.get("video_activities"):
+        blocks.append("activity.video_recent=" + json.dumps(evidence["video_activities"][:8], ensure_ascii=False))
     if ingredient:
         blocks.append("ingredient.added=" + json.dumps(ingredient.added[-5:], ensure_ascii=False))
         blocks.append("ingredient.pending=" + json.dumps(ingredient.pending[:5], ensure_ascii=False))

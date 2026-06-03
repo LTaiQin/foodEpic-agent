@@ -60,6 +60,24 @@ def test_extract_sample_context_from_question_times() -> None:
     assert ctx.time_point == 15.0
 
 
+def test_extract_sample_context_keeps_all_video_ids() -> None:
+    sample = VQASample(
+        vqa_id="multi",
+        task_family="recipe_recipe_recognition",
+        primary_video_id="P01-20240202-110250",
+        participant_id="P01",
+        question="Which recipe was carried out?",
+        choices=["A", "B"],
+        correct_idx=0,
+        inputs={
+            "video 1": {"id": "P01-20240202-110250"},
+            "video 2": {"id": "P01-20240202-120000"},
+        },
+    )
+    ctx = extract_sample_context(sample)
+    assert ctx.video_ids == ["P01-20240202-110250", "P01-20240202-120000"]
+
+
 def test_parse_model_output_json() -> None:
     idx, evidence_ids, failure = parse_model_output('{"choice": 1, "evidence_ids": ["a"]}', make_sample(), "ours-foodevidence")
     assert idx == 1
@@ -162,6 +180,9 @@ def test_run_one_baseline_continues_on_model_error() -> None:
     state_store.recipe_state = lambda *args, **kwargs: dummy_state
     state_store.ingredient_state = lambda *args, **kwargs: dummy_state
     state_store.ingredient_interval = lambda *args, **kwargs: []
+    state_store.recipe_catalog = lambda *args, **kwargs: []
+    state_store.activity_window = lambda *args, **kwargs: type("ActivityWindow", (), {"activities": []})()
+    state_store.all_video_activities = lambda *args, **kwargs: []
     state_store.nutrition_delta = lambda *args, **kwargs: dummy_state
     spatial_store = DummySpatialStore()
     spatial_store.combined_context = lambda *args, **kwargs: dummy_state
@@ -193,6 +214,28 @@ def test_rank_choice_hints_ingredient() -> None:
     }
     hints = rank_choice_hints(sample, evidence, "ingredient")
     assert hints[0].choice_text == "capsule"
+
+
+def test_rank_choice_hints_recipe_uses_recipe_catalog() -> None:
+    sample = VQASample(
+        vqa_id="recipe",
+        task_family="recipe_recipe_recognition",
+        primary_video_id="P01-20240202-110250",
+        participant_id="P01",
+        question="Which recipe was carried out?",
+        choices=["Coffee", "Soup"],
+        correct_idx=0,
+        inputs={"video 1": {"id": "P01-20240202-110250"}},
+    )
+    evidence = {
+        "recipe": type("Recipe", (), {"active_steps": [], "completed_steps": [], "next_steps": []})(),
+        "recipe_catalog": [{"recipe_id": "P01_R01", "name": "Coffee", "video_ids": ["P01-20240202-110250"], "step_count": 3}],
+        "activity_window": None,
+        "video_activities": [],
+        "spatial": type("Spatial", (), {"object_tracks": [], "audio_events": []})(),
+    }
+    hints = rank_choice_hints(sample, evidence, "recipe")
+    assert hints[0].choice_text == "Coffee"
 
 
 def test_ingredient_match_score_alias() -> None:
