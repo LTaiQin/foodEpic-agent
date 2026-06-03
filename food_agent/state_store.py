@@ -51,6 +51,13 @@ class ActivityWindow:
 
 
 @dataclass(frozen=True)
+class RecipeStepLookup:
+    video_id: str
+    step_text: str
+    matches: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
 class Anomaly:
     anomaly_type: str
     severity: str
@@ -169,12 +176,18 @@ class FoodStateStore:
             recipe_videos = subset[subset["recipe_id"] == recipe_id]["video_id"].dropna().unique().tolist()
             recipe_json = complete_recipes.get(recipe_id, {})
             capture_ingredients = []
+            ingredient_amounts = []
             for capture in recipe_json.get("captures", []):
-                capture_ingredients.extend(
-                    ingredient.get("name")
-                    for ingredient in capture.get("ingredients", {}).values()
-                    if ingredient.get("name")
-                )
+                for ingredient in capture.get("ingredients", {}).values():
+                    if ingredient.get("name"):
+                        capture_ingredients.append(ingredient.get("name"))
+                        ingredient_amounts.append(
+                            {
+                                "name": ingredient.get("name"),
+                                "amount": ingredient.get("amount"),
+                                "amount_unit": ingredient.get("amount_unit"),
+                            }
+                        )
             results.append(
                 {
                     "recipe_id": recipe_id,
@@ -182,7 +195,9 @@ class FoodStateStore:
                     "participant_id": meta.get("participant_id"),
                     "video_ids": recipe_videos,
                     "step_count": int(meta.get("step_count") or 0),
+                    "steps": recipe_json.get("steps", {}),
                     "ingredients": sorted({str(name) for name in capture_ingredients}),
+                    "ingredient_amounts": ingredient_amounts,
                 }
             )
         return results
@@ -201,6 +216,30 @@ class FoodStateStore:
             end_time=float(end_time),
             activities=_records(subset),
         )
+
+    def recipe_step_matches(self, video_id: str, step_text: str, min_score: float = 0.6) -> RecipeStepLookup:
+        steps = self._table("recipe_steps")
+        complete_recipes = self._complete_recipes()
+        subset = steps[steps["video_id"] == video_id].copy()
+        if subset.empty or not step_text:
+            return RecipeStepLookup(video_id=video_id, step_text=step_text, matches=[])
+        matches: list[dict[str, Any]] = []
+        query = _normalize_text(step_text)
+        for record in _records(subset.sort_values(["start_time", "end_time"])):
+            payload = json.loads(record.get("payload_json") or "{}")
+            recipe_id = payload.get("recipe_id")
+            step_id = payload.get("step_id")
+            recipe_json = complete_recipes.get(recipe_id or "", {})
+            resolved_text = str(recipe_json.get("steps", {}).get(step_id, ""))
+            score = _token_overlap(query, _normalize_text(resolved_text))
+            if score < min_score:
+                continue
+            enriched = dict(record)
+            enriched["resolved_step_text"] = resolved_text
+            enriched["match_score"] = score
+            matches.append(enriched)
+        matches.sort(key=lambda row: (float(row.get("match_score") or 0.0), float(row.get("start_time") or -1.0)))
+        return RecipeStepLookup(video_id=video_id, step_text=step_text, matches=matches)
 
     def all_video_activities(self, video_id: str) -> list[dict[str, Any]]:
         activities = self._activities()
@@ -270,6 +309,18 @@ def _to_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _normalize_text(text: str) -> str:
+    return " ".join(str(text).lower().replace("-", " ").split())
+
+
+def _token_overlap(a: str, b: str) -> float:
+    a_tokens = {token for token in a.split() if token}
+    b_tokens = {token for token in b.split() if token}
+    if not a_tokens or not b_tokens:
+        return 0.0
+    return len(a_tokens & b_tokens) / len(a_tokens)
 
 
 def state_to_json(state: Any) -> str:

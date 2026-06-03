@@ -4,9 +4,11 @@ from food_agent.comparison import (
     _extract_json_payload,
     _extract_evidence_ids_from_text,
     _ingredient_match_score,
+    _extract_question_recipe_step_name,
     _normalize_ingredient_text,
     _token_overlap_score,
     build_messages,
+    collect_evidence,
     extract_sample_context,
     infer_specialization,
     parse_hms,
@@ -288,6 +290,119 @@ def test_rank_choice_hints_ingredient_membership_uses_target_recipe_catalog() ->
     }
     hints = rank_choice_hints(sample, evidence, "ingredient")
     assert hints[0].choice_text == "kale"
+
+
+def test_rank_choice_hints_exact_ingredient_quantity_uses_recipe_amounts() -> None:
+    sample = VQASample(
+        vqa_id="exact_quantity",
+        task_family="ingredient_exact_ingredient_recognition",
+        primary_video_id="P08-20240617-184909",
+        participant_id="P08",
+        question="What was the exact quantity of garlic used in Fish Cakes and Vegetables",
+        choices=["6 g", "5 g", "7 g", "3 g", "4 g"],
+        correct_idx=1,
+        inputs={"video 1": {"id": "P08-20240617-184909"}},
+    )
+    evidence = {
+        "recipe_catalog": [
+            {
+                "recipe_id": "P08_R07",
+                "name": "Fish Cakes and Vegetables",
+                "video_ids": ["P08-20240617-184909"],
+                "step_count": 11,
+                "ingredients": ["garlic"],
+                "ingredient_amounts": [{"name": "garlic", "amount": 5, "amount_unit": "g"}],
+            }
+        ],
+        "ingredient": type("Ingredient", (), {"added": [], "pending": [], "weighed": []})(),
+        "ingredient_interval": [],
+        "recipe": type("Recipe", (), {"active_steps": [], "completed_steps": []})(),
+        "spatial": type("Spatial", (), {"audio_events": []})(),
+    }
+    hints = rank_choice_hints(sample, evidence, "ingredient")
+    assert hints[0].choice_text == "5 g"
+
+
+def test_extract_question_recipe_step_name() -> None:
+    question = (
+        "Which high-level activity did the participant do while completing recipe step "
+        "Add the onions and chopped garlic and brown slowly until tender and golden, about 5 minutes in this video?"
+    )
+    assert _extract_question_recipe_step_name(question) == (
+        "Add the onions and chopped garlic and brown slowly until tender and golden, about 5 minutes"
+    )
+
+
+def test_collect_evidence_uses_step_focus_for_following_activity() -> None:
+    sample = VQASample(
+        vqa_id="follow",
+        task_family="recipe_following_activity_recognition",
+        primary_video_id="P02-20240209-184316",
+        participant_id="P02",
+        question=(
+            "Which high-level activity did the participant do while completing recipe step "
+            "Add the onions and chopped garlic and brown slowly until tender and golden, about 5 minutes in this video?"
+        ),
+        choices=["a", "b"],
+        correct_idx=0,
+        inputs={"video 1": {"id": "P02-20240209-184316"}},
+    )
+
+    class DummyStateStore:
+        def recipe_catalog(self, video_ids):
+            return []
+
+        def recipe_step_matches(self, video_id, step_text):
+            return type(
+                "StepLookup",
+                (),
+                {
+                    "matches": [
+                        {
+                            "event_id": "recipe_step:P02_R01:P02_R01_S03:0:8",
+                            "start_time": 1418.964,
+                            "end_time": 1420.644,
+                        }
+                    ]
+                },
+            )()
+
+        def recipe_state(self, video_id, time):
+            return type("Recipe", (), {"active_steps": [], "completed_steps": [], "next_steps": []})()
+
+        def ingredient_state(self, video_id, time):
+            return type("Ingredient", (), {"added": [], "pending": [], "weighed": []})()
+
+        def nutrition_delta(self, video_id, time):
+            return type("Nutrition", (), {"totals": {}, "unknown_count": 0, "evidence_ids": []})()
+
+        def activity_window(self, video_id, start_time, end_time):
+            return type(
+                "ActivityWindow",
+                (),
+                {
+                    "activities": [
+                        {
+                            "event_id": "activity:P02-20240209-184316:24",
+                            "text": "Continue stirring mushrooms with tomato and season",
+                        }
+                    ]
+                },
+            )()
+
+        def all_video_activities(self, video_id):
+            return []
+
+    class DummySpatialStore:
+        def combined_context(self, video_id, time=None, object_name=None):
+            return type("Spatial", (), {"audio_events": [], "gaze_priming": [], "object_tracks": []})()
+
+    evidence = collect_evidence(sample, DummyStateStore(), DummySpatialStore())
+    assert evidence["step_focus"]["event_id"] == "recipe_step:P02_R01:P02_R01_S03:0:8"
+    assert evidence["activity_window"].activities[0]["event_id"] == "activity:P02-20240209-184316:24"
+    assert "recipe_step:P02_R01:P02_R01_S03:0:8" in evidence["evidence_ids"]
+
+
 
 
 def test_ingredient_match_score_alias() -> None:

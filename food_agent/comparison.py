@@ -131,6 +131,7 @@ def collect_evidence(
     ingredient_interval = []
     recipe_catalog = []
     activity_window = None
+    step_focus = None
     video_activities: list[dict[str, Any]] = []
     evidence_ids: list[str] = []
     if ctx.video_ids:
@@ -159,6 +160,32 @@ def collect_evidence(
                 event_id = row.get("event_id")
                 if event_id and event_id not in evidence_ids:
                     evidence_ids.append(event_id)
+    if (
+        sample.task_family == "recipe_following_activity_recognition"
+        and ctx.video_id
+        and activity_window is None
+    ):
+        target_step = _extract_question_recipe_step_name(sample.question)
+        if target_step:
+            step_lookup = state_store.recipe_step_matches(ctx.video_id, target_step)
+            if step_lookup.matches:
+                step_focus = step_lookup.matches[-1]
+                focus_start = float(step_focus.get("start_time") or 0.0)
+                focus_end = float(step_focus.get("end_time") or focus_start)
+                focus_time = (focus_start + focus_end) / 2
+                recipe = state_store.recipe_state(ctx.video_id, focus_time)
+                ingredient = state_store.ingredient_state(ctx.video_id, focus_time)
+                nutrition = state_store.nutrition_delta(ctx.video_id, focus_time)
+                spatial = spatial_store.combined_context(ctx.video_id, time=focus_time, object_name=ctx.object_name)
+                activity_window = state_store.activity_window(ctx.video_id, focus_start, focus_end)
+                step_event_id = step_focus.get("event_id")
+                if step_event_id and step_event_id not in evidence_ids:
+                    evidence_ids.append(step_event_id)
+                if activity_window:
+                    for row in activity_window.activities[:3]:
+                        event_id = row.get("event_id")
+                        if event_id and event_id not in evidence_ids:
+                            evidence_ids.append(event_id)
     if ctx.video_id:
         video_activities = state_store.all_video_activities(ctx.video_id)
     return {
@@ -168,6 +195,7 @@ def collect_evidence(
         "ingredient_interval": ingredient_interval,
         "recipe_catalog": recipe_catalog,
         "activity_window": activity_window,
+        "step_focus": step_focus,
         "video_activities": video_activities,
         "nutrition": nutrition,
         "spatial": spatial,
@@ -263,6 +291,8 @@ def infer_specialization(task_family: str) -> str:
 
 def rank_choice_hints(sample: VQASample, evidence: dict[str, Any], specialization: str) -> list[ChoiceHint]:
     if specialization == "ingredient":
+        if sample.task_family == "ingredient_exact_ingredient_recognition":
+            return _rank_exact_ingredient_quantity_choices(sample, evidence)
         if sample.task_family == "ingredient_ingredient_recognition":
             return _rank_recipe_ingredient_membership_choices(sample, evidence)
         return _rank_ingredient_choices(sample, evidence)
@@ -351,6 +381,41 @@ def _rank_recipe_ingredient_membership_choices(sample: VQASample, evidence: dict
     return sorted(hints, key=lambda item: (-item.score, item.choice_idx))
 
 
+def _rank_exact_ingredient_quantity_choices(sample: VQASample, evidence: dict[str, Any]) -> list[ChoiceHint]:
+    recipe_catalog = evidence.get("recipe_catalog", [])
+    target_recipe = _select_target_recipe(sample.question, recipe_catalog)
+    target_ingredient = _extract_question_ingredient_name(sample.question)
+    amount_rows = target_recipe.get("ingredient_amounts", []) if target_recipe else []
+    target_amount = None
+    target_unit = None
+    if target_ingredient:
+        for row in amount_rows:
+            name = str(row.get("name", ""))
+            if _token_overlap_score(target_ingredient, name) >= 0.5 or _token_overlap_score(name, target_ingredient) >= 0.5:
+                target_amount = row.get("amount")
+                target_unit = row.get("amount_unit")
+                break
+    hints: list[ChoiceHint] = []
+    for idx, choice in enumerate(sample.choices):
+        score = 0.0
+        reasons = []
+        quantity = _parse_choice_quantity(choice)
+        if quantity and target_amount is not None:
+            choice_value, choice_unit = quantity
+            if str(choice_unit).lower() == str(target_unit).lower():
+                score += 2.0
+                reasons.append("match_unit")
+            if _numeric_equal(choice_value, target_amount):
+                score += 5.0
+                reasons.append("match_exact_amount")
+            else:
+                diff = abs(float(choice_value) - float(target_amount))
+                score += max(0.0, 2.0 - diff)
+                reasons.append("near_amount")
+        hints.append(ChoiceHint(idx, choice, score, ",".join(reasons) or "weak_match"))
+    return sorted(hints, key=lambda item: (-item.score, item.choice_idx))
+
+
 def _rank_recipe_choices(sample: VQASample, evidence: dict[str, Any]) -> list[ChoiceHint]:
     recipe = evidence.get("recipe")
     active_text = " ".join(_row_text(row) for row in getattr(recipe, "active_steps", []))
@@ -429,6 +494,8 @@ def _food_state_text(evidence: dict[str, Any]) -> str:
         parts.append("recipe_catalog=" + json.dumps(evidence["recipe_catalog"], ensure_ascii=False))
     if evidence.get("activity_window"):
         parts.append("activity_window=" + json.dumps(evidence["activity_window"].activities[:5], ensure_ascii=False))
+    if evidence.get("step_focus"):
+        parts.append("step_focus=" + json.dumps(evidence["step_focus"], ensure_ascii=False))
     if ingredient:
         parts.append("added_ingredients=" + json.dumps(ingredient.added[-5:], ensure_ascii=False))
         parts.append("pending_ingredients=" + json.dumps(ingredient.pending[:5], ensure_ascii=False))
@@ -463,6 +530,8 @@ def _ours_evidence_text(sample: VQASample, evidence: dict[str, Any]) -> str:
         blocks.append("recipe.target=" + json.dumps(target_recipe, ensure_ascii=False))
     if evidence.get("activity_window"):
         blocks.append("activity.window=" + json.dumps(evidence["activity_window"].activities[:5], ensure_ascii=False))
+    if evidence.get("step_focus"):
+        blocks.append("recipe.step_focus=" + json.dumps(evidence["step_focus"], ensure_ascii=False))
     if task_family in {"recipe_following_activity_recognition", "recipe_step_recognition"} and evidence.get("video_activities"):
         blocks.append("activity.video_recent=" + json.dumps(evidence["video_activities"][:8], ensure_ascii=False))
     if ingredient:
@@ -547,6 +616,34 @@ def _ingredient_name_list_match(choice: str, names: list[str]) -> tuple[float, s
     return 0.0, "no_recipe_ingredient_match"
 
 
+def _extract_question_ingredient_name(question: str) -> str | None:
+    match = re.search(r"quantity of (.+?) used in", question.lower())
+    if not match:
+        return None
+    return match.group(1).strip()
+
+
+def _extract_question_recipe_step_name(question: str) -> str | None:
+    match = re.search(r"recipe step (.+?) in this video\\?", question, flags=re.IGNORECASE)
+    if not match:
+        return None
+    return match.group(1).strip().rstrip(".")
+
+
+def _parse_choice_quantity(choice: str) -> tuple[float, str] | None:
+    match = re.search(r"(\d+(?:\.\d+)?)\s*([a-zA-Z]+)", choice.strip())
+    if not match:
+        return None
+    return float(match.group(1)), match.group(2).lower()
+
+
+def _numeric_equal(a: float, b: Any) -> bool:
+    try:
+        return abs(float(a) - float(b)) < 1e-6
+    except (TypeError, ValueError):
+        return False
+
+
 def _select_target_recipe(question: str, recipe_catalog: list[dict[str, Any]]) -> dict[str, Any] | None:
     question_text = question.lower()
     best_recipe = None
@@ -560,6 +657,8 @@ def _select_target_recipe(question: str, recipe_catalog: list[dict[str, Any]]) -
             best_score = score
             best_recipe = recipe
     return best_recipe
+
+
 
 
 def _normalize_ingredient_text(text: str) -> str:
