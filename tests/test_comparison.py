@@ -3,6 +3,8 @@ from pathlib import Path
 from food_agent.comparison import (
     _extract_json_payload,
     _extract_evidence_ids_from_text,
+    _ingredient_match_score,
+    _normalize_ingredient_text,
     _token_overlap_score,
     build_messages,
     extract_sample_context,
@@ -28,6 +30,19 @@ def make_sample() -> VQASample:
     )
 
 
+def make_question_time_sample() -> VQASample:
+    return VQASample(
+        vqa_id="sample_q",
+        task_family="ingredient_ingredient_retrieval",
+        primary_video_id="P01-20240202-110250",
+        participant_id="P01",
+        question="Between <TIME 00:00:10.000 video 1> and <TIME 00:00:20.000 video 1>, which ingredient was added?",
+        choices=["water", "milk", "capsule"],
+        correct_idx=2,
+        inputs={"video 1": {"id": "P01-20240202-110250"}},
+    )
+
+
 def test_parse_hms() -> None:
     assert parse_hms("00:03:1.8") == 181.8
 
@@ -35,6 +50,13 @@ def test_parse_hms() -> None:
 def test_extract_sample_context() -> None:
     ctx = extract_sample_context(make_sample())
     assert ctx.video_id == "P01-20240202-110250"
+    assert ctx.time_point == 15.0
+
+
+def test_extract_sample_context_from_question_times() -> None:
+    ctx = extract_sample_context(make_question_time_sample())
+    assert ctx.start_time == 10.0
+    assert ctx.end_time == 20.0
     assert ctx.time_point == 15.0
 
 
@@ -139,6 +161,7 @@ def test_run_one_baseline_continues_on_model_error() -> None:
     state_store = DummyStateStore()
     state_store.recipe_state = lambda *args, **kwargs: dummy_state
     state_store.ingredient_state = lambda *args, **kwargs: dummy_state
+    state_store.ingredient_interval = lambda *args, **kwargs: []
     state_store.nutrition_delta = lambda *args, **kwargs: dummy_state
     spatial_store = DummySpatialStore()
     spatial_store.combined_context = lambda *args, **kwargs: dummy_state
@@ -163,9 +186,20 @@ def test_token_overlap_score() -> None:
 def test_rank_choice_hints_ingredient() -> None:
     sample = make_sample()
     evidence = {
+        "ingredient_interval": [{"label": "capsule"}],
         "ingredient": type("Ingredient", (), {"added": [{"label": "capsule"}], "pending": []})(),
         "recipe": type("Recipe", (), {"active_steps": [], "completed_steps": []})(),
         "spatial": type("Spatial", (), {"audio_events": []})(),
     }
     hints = rank_choice_hints(sample, evidence, "ingredient")
     assert hints[0].choice_text == "capsule"
+
+
+def test_ingredient_match_score_alias() -> None:
+    score, reason = _ingredient_match_score("cinnamon sticks", [{"label": "cinnamon", "text": "add cinnamon"}])
+    assert score > 0
+    assert reason in {"match_interval_added", "partial_alias_match"}
+
+
+def test_normalize_ingredient_text() -> None:
+    assert _normalize_ingredient_text("Extra-Virgin Olive Oil") == "extra virgin olive oil"

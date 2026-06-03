@@ -105,6 +105,17 @@ class FoodStateStore:
             pending=_records(pending.sort_values(["start_time", "end_time"])),
         )
 
+    def ingredient_interval(self, video_id: str, start_time: float, end_time: float) -> list[dict[str, Any]]:
+        ingredients = self._table("ingredients")
+        subset = ingredients[
+            (ingredients["video_id"] == video_id)
+            & (ingredients["event_type"] == "ingredient_add")
+            & (ingredients["end_time"].fillna(float("inf")) >= float(start_time))
+            & (ingredients["start_time"].fillna(float("-inf")) <= float(end_time))
+        ].copy()
+        subset = subset.sort_values(["start_time", "end_time"])
+        return _records(subset)
+
     def nutrition_delta(self, video_id: str, time: float) -> NutritionDelta:
         state = self.ingredient_state(video_id, time)
         totals = {key: 0.0 for key in NUTRIENT_KEYS}
@@ -174,4 +185,3 @@ def state_to_json(state: Any) -> str:
     if isinstance(state, list):
         return json.dumps([asdict(item) if hasattr(item, "__dataclass_fields__") else item for item in state], ensure_ascii=False, indent=2)
     return json.dumps(asdict(state), ensure_ascii=False, indent=2)
-

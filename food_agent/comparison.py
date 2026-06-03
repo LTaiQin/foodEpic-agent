@@ -13,9 +13,11 @@ from .vqa import VQASample, parse_choice_prediction
 
 
 TIME_PATTERN = re.compile(r"(\d+):(\d+):(\d+(?:\.\d+)?)")
+QUESTION_TIME_PATTERN = re.compile(r"<TIME\s+(\d+:\d+:\d+(?:\.\d+)?)")
 JSON_BLOCK_PATTERN = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 EVIDENCE_LINE_PATTERN = re.compile(r"(?:event_id|evidence_ids?)\s*[:=]\s*([^\n]+)", re.IGNORECASE)
 EVIDENCE_TOKEN_PATTERN = re.compile(r"[A-Za-z]+[A-Za-z0-9:_/\-]*")
+TOKEN_PATTERN = re.compile(r"[a-zA-Z]+")
 
 TASK_SPECIALIZATION = {
     "ingredient_ingredient_retrieval": "ingredient",
@@ -30,6 +32,14 @@ TASK_SPECIALIZATION = {
     "nutrition_nutrition_change": "nutrition",
     "nutrition_video_nutrition_estimation": "nutrition",
     "nutrition_image_nutrition_estimation": "nutrition",
+}
+
+INGREDIENT_ALIASES = {
+    "cinnamon sticks": ["cinnamon"],
+    "spring onions": ["spring onion", "scallion", "scallions"],
+    "red onions": ["red onion"],
+    "peas": ["green peas"],
+    "olive oil": ["extra virgin olive oil"],
 }
 
 
@@ -78,6 +88,16 @@ def extract_sample_context(sample: VQASample) -> SampleContext:
             end_time = parse_hms(str(value["end_time"]))
     if time_point is None and start_time is not None and end_time is not None:
         time_point = (start_time + end_time) / 2
+    question_times = [parse_hms(match.group(1)) for match in QUESTION_TIME_PATTERN.finditer(sample.question)]
+    question_times = [value for value in question_times if value is not None]
+    if start_time is None and len(question_times) >= 1:
+        start_time = question_times[0]
+    if end_time is None and len(question_times) >= 2:
+        end_time = question_times[1]
+    if time_point is None and len(question_times) == 1:
+        time_point = question_times[0]
+    if time_point is None and start_time is not None and end_time is not None:
+        time_point = (start_time + end_time) / 2
     if start_time is None and time_point is not None:
         start_time = max(0.0, time_point - 5.0)
     if end_time is None and time_point is not None:
@@ -103,6 +123,7 @@ def collect_evidence(
     if not ctx.video_id:
         return {"context": ctx, "events": [], "recipe": None, "ingredient": None, "nutrition": None, "spatial": None}
     recipe = ingredient = nutrition = spatial = None
+    ingredient_interval = []
     evidence_ids: list[str] = []
     if ctx.time_point is not None:
         recipe = state_store.recipe_state(ctx.video_id, ctx.time_point)
@@ -116,10 +137,17 @@ def collect_evidence(
         for event_id in nutrition.evidence_ids[:2]:
             if event_id and event_id not in evidence_ids:
                 evidence_ids.append(event_id)
+    if ctx.video_id and ctx.start_time is not None and ctx.end_time is not None:
+        ingredient_interval = state_store.ingredient_interval(ctx.video_id, ctx.start_time, ctx.end_time)
+        for row in ingredient_interval[:3]:
+            event_id = row.get("event_id")
+            if event_id and event_id not in evidence_ids:
+                evidence_ids.append(event_id)
     return {
         "context": ctx,
         "recipe": recipe,
         "ingredient": ingredient,
+        "ingredient_interval": ingredient_interval,
         "nutrition": nutrition,
         "spatial": spatial,
         "evidence_ids": evidence_ids,
@@ -242,7 +270,9 @@ def _specialized_instruction(specialization: str) -> str:
 
 def _rank_ingredient_choices(sample: VQASample, evidence: dict[str, Any]) -> list[ChoiceHint]:
     ingredient = evidence.get("ingredient")
-    added_text = " ".join(_row_text(row) for row in getattr(ingredient, "added", []))
+    interval_rows = evidence.get("ingredient_interval", [])
+    added_rows = interval_rows or getattr(ingredient, "added", [])
+    added_text = " ".join(_row_text(row) for row in added_rows)
     pending_text = " ".join(_row_text(row) for row in getattr(ingredient, "pending", []))
     recipe = evidence.get("recipe")
     recipe_text = " ".join(_row_text(row) for row in getattr(recipe, "active_steps", []) + getattr(recipe, "completed_steps", [])[-3:])
@@ -253,9 +283,10 @@ def _rank_ingredient_choices(sample: VQASample, evidence: dict[str, Any]) -> lis
         score = 0.0
         reasons = []
         norm_choice = choice.lower()
-        if norm_choice and norm_choice in added_text.lower():
-            score += 3.0
-            reasons.append("match_added")
+        match_score, match_reason = _ingredient_match_score(choice, added_rows)
+        if match_score:
+            score += match_score
+            reasons.append(match_reason)
         if norm_choice and norm_choice in recipe_text.lower():
             score += 1.5
             reasons.append("match_recipe")
@@ -387,6 +418,41 @@ def _token_overlap_score(choice: str, source: str) -> float:
     source_tokens = set(re.findall(r"[a-zA-Z]+", source.lower()))
     overlap = choice_tokens & source_tokens
     return len(overlap) / len(choice_tokens)
+
+
+def _ingredient_match_score(choice: str, rows: list[dict[str, Any]]) -> tuple[float, str]:
+    if not rows:
+        return 0.0, "no_match"
+    aliases = {_normalize_ingredient_text(choice)}
+    for alias in INGREDIENT_ALIASES.get(choice.lower(), []):
+        aliases.add(_normalize_ingredient_text(alias))
+    best = 0.0
+    for row in rows:
+        label = _normalize_ingredient_text(str(row.get("label", "")))
+        text = _normalize_ingredient_text(str(row.get("text", "")))
+        candidates = {label, text}
+        if aliases & candidates:
+            return 5.0, "match_interval_added"
+        for alias in aliases:
+            for candidate in candidates:
+                if not candidate:
+                    continue
+                best = max(best, _jaccard_similarity(alias, candidate))
+    if best >= 0.5:
+        return 3.0 + best, "partial_alias_match"
+    return 0.0, "no_match"
+
+
+def _normalize_ingredient_text(text: str) -> str:
+    return " ".join(TOKEN_PATTERN.findall(text.lower()))
+
+
+def _jaccard_similarity(a: str, b: str) -> float:
+    a_tokens = set(a.split())
+    b_tokens = set(b.split())
+    if not a_tokens or not b_tokens:
+        return 0.0
+    return len(a_tokens & b_tokens) / len(a_tokens | b_tokens)
 
 
 def _extract_json_payload(text: str) -> dict[str, Any]:
