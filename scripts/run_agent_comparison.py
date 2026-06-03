@@ -81,6 +81,11 @@ def run_one_baseline(
             messages = build_messages(sample, baseline, evidence)
             response = model_client.complete(messages, temperature=temperature)
             pred_idx, answer_evidence_ids, parse_failure = parse_model_output(response.content, sample, baseline)
+            if _should_retry_response(baseline, pred_idx, answer_evidence_ids, parse_failure, sample):
+                retry_response = model_client.complete(messages, temperature=temperature)
+                retry_idx, retry_evidence_ids, retry_failure = parse_model_output(retry_response.content, sample, baseline)
+                if _prefer_retry_result(retry_idx, retry_evidence_ids, retry_failure):
+                    pred_idx, answer_evidence_ids, parse_failure = retry_idx, retry_evidence_ids, retry_failure
             evidence_ids = answer_evidence_ids or ([] if baseline == "textonly" else default_evidence_ids[:2])
             failure_type = parse_failure if parse_failure else (None if pred_idx == sample.correct_idx else "reasoning_error")
         except Exception as exc:
@@ -104,6 +109,30 @@ def run_one_baseline(
             )
         )
     return predictions
+
+
+def _should_retry_response(
+    baseline: str,
+    pred_idx: int,
+    evidence_ids: list[str],
+    parse_failure: str | None,
+    sample,
+) -> bool:
+    if baseline != "ours-foodevidence":
+        return False
+    if parse_failure == "format_error":
+        return True
+    if pred_idx == 0 and sample.correct_idx != 0 and not evidence_ids:
+        return True
+    return False
+
+
+def _prefer_retry_result(pred_idx: int, evidence_ids: list[str], parse_failure: str | None) -> bool:
+    if parse_failure is None and evidence_ids:
+        return True
+    if parse_failure is None and pred_idx != 0:
+        return True
+    return False
 
 
 def write_jsonl(path: Path, predictions: list[VQAPrediction]) -> None:

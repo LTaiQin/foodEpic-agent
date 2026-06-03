@@ -14,7 +14,12 @@ from food_agent.comparison import (
     rank_choice_hints,
 )
 from food_agent.vqa import VQASample
-from scripts.run_agent_comparison import load_selected_samples, run_one_baseline
+from scripts.run_agent_comparison import (
+    _prefer_retry_result,
+    _should_retry_response,
+    load_selected_samples,
+    run_one_baseline,
+)
 
 
 def make_sample() -> VQASample:
@@ -200,6 +205,18 @@ def test_run_one_baseline_continues_on_model_error() -> None:
     assert predictions[0].prediction == 0
 
 
+def test_should_retry_response_on_empty_zero_prediction() -> None:
+    sample = make_sample()
+    assert _should_retry_response("ours-foodevidence", 0, [], None, sample) is True
+    assert _should_retry_response("directevidence", 0, [], None, sample) is False
+
+
+def test_prefer_retry_result_prefers_valid_evidence() -> None:
+    assert _prefer_retry_result(2, ["ingredient:abc/add/0/0"], None) is True
+    assert _prefer_retry_result(2, [], None) is True
+    assert _prefer_retry_result(0, [], "format_error") is False
+
+
 def test_token_overlap_score() -> None:
     assert _token_overlap_score("add olive oil to pan", "olive oil was added to the pan") > 0.3
 
@@ -236,6 +253,41 @@ def test_rank_choice_hints_recipe_uses_recipe_catalog() -> None:
     }
     hints = rank_choice_hints(sample, evidence, "recipe")
     assert hints[0].choice_text == "Coffee"
+
+
+def test_rank_choice_hints_ingredient_membership_uses_target_recipe_catalog() -> None:
+    sample = VQASample(
+        vqa_id="ingredient_membership",
+        task_family="ingredient_ingredient_recognition",
+        primary_video_id="P07-20240529-191007",
+        participant_id="P07",
+        question="Which of these ingredients is not used in Chopped Chickpea Salad",
+        choices=["garlic powder", "stilton", "cucumber", "paprika", "kale"],
+        correct_idx=4,
+        inputs={"video 1": {"id": "P07-20240529-191007"}},
+    )
+    evidence = {
+        "recipe_catalog": [
+            {
+                "recipe_id": "P07_R02",
+                "name": "Chopped Chickpea Salad",
+                "video_ids": ["P07-20240529-131737", "P07-20240529-134410"],
+                "step_count": 14,
+                "ingredients": [
+                    "garlic powder",
+                    "stilton",
+                    "cucumber",
+                    "paprika",
+                ],
+            }
+        ],
+        "ingredient": type("Ingredient", (), {"added": [], "pending": []})(),
+        "ingredient_interval": [],
+        "recipe": type("Recipe", (), {"active_steps": [], "completed_steps": []})(),
+        "spatial": type("Spatial", (), {"audio_events": []})(),
+    }
+    hints = rank_choice_hints(sample, evidence, "ingredient")
+    assert hints[0].choice_text == "kale"
 
 
 def test_ingredient_match_score_alias() -> None:

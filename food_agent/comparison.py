@@ -214,7 +214,7 @@ def build_messages(
             + "\n\nchoice_hints=\n"
             + _choice_hints_text(hints)
             + "\n\nEvidence block：\n"
-            + _ours_evidence_text(evidence)
+            + _ours_evidence_text(sample, evidence)
         )
         return [{"role": "system", "content": base}, {"role": "user", "content": content}]
 
@@ -263,6 +263,8 @@ def infer_specialization(task_family: str) -> str:
 
 def rank_choice_hints(sample: VQASample, evidence: dict[str, Any], specialization: str) -> list[ChoiceHint]:
     if specialization == "ingredient":
+        if sample.task_family == "ingredient_ingredient_recognition":
+            return _rank_recipe_ingredient_membership_choices(sample, evidence)
         return _rank_ingredient_choices(sample, evidence)
     if specialization == "recipe":
         return _rank_recipe_choices(sample, evidence)
@@ -320,6 +322,31 @@ def _rank_ingredient_choices(sample: VQASample, evidence: dict[str, Any]) -> lis
         if norm_choice and norm_choice in pending_text.lower():
             score -= 1.0
             reasons.append("still_pending")
+        hints.append(ChoiceHint(idx, choice, score, ",".join(reasons) or "weak_match"))
+    return sorted(hints, key=lambda item: (-item.score, item.choice_idx))
+
+
+def _rank_recipe_ingredient_membership_choices(sample: VQASample, evidence: dict[str, Any]) -> list[ChoiceHint]:
+    recipe_catalog = evidence.get("recipe_catalog", [])
+    target_recipe = _select_target_recipe(sample.question, recipe_catalog)
+    target_ingredients = target_recipe.get("ingredients", []) if target_recipe else []
+    hints: list[ChoiceHint] = []
+    asks_not_used = "not used" in sample.question.lower()
+    for idx, choice in enumerate(sample.choices):
+        score = 0.0
+        reasons = []
+        match_score, match_reason = _ingredient_name_list_match(choice, target_ingredients)
+        if asks_not_used:
+            if match_score > 0:
+                score -= 3.0
+                reasons.append("present_in_recipe_catalog")
+            else:
+                score += 5.0
+                reasons.append("absent_from_recipe_catalog")
+        else:
+            score += match_score
+            if match_score > 0:
+                reasons.append(match_reason)
         hints.append(ChoiceHint(idx, choice, score, ",".join(reasons) or "weak_match"))
     return sorted(hints, key=lambda item: (-item.score, item.choice_idx))
 
@@ -411,20 +438,32 @@ def _food_state_text(evidence: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
-def _ours_evidence_text(evidence: dict[str, Any]) -> str:
+def _ours_evidence_text(sample: VQASample, evidence: dict[str, Any]) -> str:
     recipe = evidence.get("recipe")
     ingredient = evidence.get("ingredient")
     nutrition = evidence.get("nutrition")
     spatial = evidence.get("spatial")
     blocks = []
+    task_family = sample.task_family
+    target_recipe = _select_target_recipe(sample.question, evidence.get("recipe_catalog", []))
     if recipe:
         blocks.append("recipe.active=" + json.dumps(recipe.active_steps, ensure_ascii=False))
         blocks.append("recipe.completed_recent=" + json.dumps(recipe.completed_steps[-3:], ensure_ascii=False))
-    if evidence.get("recipe_catalog"):
-        blocks.append("recipe.catalog=" + json.dumps(evidence["recipe_catalog"], ensure_ascii=False))
+    if task_family == "recipe_recipe_recognition" and evidence.get("recipe_catalog"):
+        compact_catalog = [
+            {
+                "recipe_id": item.get("recipe_id"),
+                "name": item.get("name"),
+                "video_ids": item.get("video_ids"),
+            }
+            for item in evidence["recipe_catalog"]
+        ]
+        blocks.append("recipe.catalog=" + json.dumps(compact_catalog, ensure_ascii=False))
+    if task_family == "ingredient_ingredient_recognition" and target_recipe:
+        blocks.append("recipe.target=" + json.dumps(target_recipe, ensure_ascii=False))
     if evidence.get("activity_window"):
         blocks.append("activity.window=" + json.dumps(evidence["activity_window"].activities[:5], ensure_ascii=False))
-    if evidence.get("video_activities"):
+    if task_family in {"recipe_following_activity_recognition", "recipe_step_recognition"} and evidence.get("video_activities"):
         blocks.append("activity.video_recent=" + json.dumps(evidence["video_activities"][:8], ensure_ascii=False))
     if ingredient:
         blocks.append("ingredient.added=" + json.dumps(ingredient.added[-5:], ensure_ascii=False))
@@ -488,6 +527,39 @@ def _ingredient_match_score(choice: str, rows: list[dict[str, Any]]) -> tuple[fl
     if best >= 0.5:
         return 3.0 + best, "partial_alias_match"
     return 0.0, "no_match"
+
+
+def _ingredient_name_list_match(choice: str, names: list[str]) -> tuple[float, str]:
+    if not names:
+        return 0.0, "no_recipe_catalog"
+    aliases = {_normalize_ingredient_text(choice)}
+    for alias in INGREDIENT_ALIASES.get(choice.lower(), []):
+        aliases.add(_normalize_ingredient_text(alias))
+    best = 0.0
+    for name in names:
+        candidate = _normalize_ingredient_text(name)
+        if candidate in aliases or candidate == _normalize_ingredient_text(choice):
+            return 5.0, "match_recipe_ingredient"
+        for alias in aliases:
+            best = max(best, _jaccard_similarity(alias, candidate))
+    if best >= 0.5:
+        return 3.0 + best, "partial_recipe_ingredient_match"
+    return 0.0, "no_recipe_ingredient_match"
+
+
+def _select_target_recipe(question: str, recipe_catalog: list[dict[str, Any]]) -> dict[str, Any] | None:
+    question_text = question.lower()
+    best_recipe = None
+    best_score = 0.0
+    for recipe in recipe_catalog:
+        name = str(recipe.get("name", ""))
+        score = _token_overlap_score(name, question_text)
+        if name and name.lower() in question_text:
+            score += 2.0
+        if score > best_score:
+            best_score = score
+            best_recipe = recipe
+    return best_recipe
 
 
 def _normalize_ingredient_text(text: str) -> str:

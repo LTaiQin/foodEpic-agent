@@ -92,6 +92,12 @@ class FoodStateStore:
             self._cache["activities_csv"] = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
         return self._cache["activities_csv"]
 
+    def _complete_recipes(self) -> dict[str, Any]:
+        if "complete_recipes_json" not in self._cache:
+            path = self.annotation_root / "high-level" / "complete_recipes.json"
+            self._cache["complete_recipes_json"] = json.loads(path.read_text(encoding="utf-8"))
+        return self._cache["complete_recipes_json"]  # type: ignore[return-value]
+
     def recipe_state(self, video_id: str, time: float, horizon: float = 120.0) -> RecipeState:
         steps = self._table("recipe_steps")
         video_steps = steps[steps["video_id"] == video_id].copy()
@@ -147,6 +153,7 @@ class FoodStateStore:
             return []
         steps = self._table("recipe_steps")
         recipes = self._table("recipes")
+        complete_recipes = self._complete_recipes()
         subset = steps[steps["video_id"].isin(video_ids)].copy()
         if subset.empty:
             return []
@@ -160,6 +167,14 @@ class FoodStateStore:
         for recipe_id in recipe_ids:
             meta = recipe_map.get(recipe_id, {})
             recipe_videos = subset[subset["recipe_id"] == recipe_id]["video_id"].dropna().unique().tolist()
+            recipe_json = complete_recipes.get(recipe_id, {})
+            capture_ingredients = []
+            for capture in recipe_json.get("captures", []):
+                capture_ingredients.extend(
+                    ingredient.get("name")
+                    for ingredient in capture.get("ingredients", {}).values()
+                    if ingredient.get("name")
+                )
             results.append(
                 {
                     "recipe_id": recipe_id,
@@ -167,6 +182,7 @@ class FoodStateStore:
                     "participant_id": meta.get("participant_id"),
                     "video_ids": recipe_videos,
                     "step_count": int(meta.get("step_count") or 0),
+                    "ingredients": sorted({str(name) for name in capture_ingredients}),
                 }
             )
         return results
