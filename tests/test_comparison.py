@@ -3,11 +3,13 @@ from pathlib import Path
 from food_agent.comparison import (
     _extract_json_payload,
     _extract_evidence_ids_from_text,
+    _token_overlap_score,
     build_messages,
     extract_sample_context,
     infer_specialization,
     parse_hms,
     parse_model_output,
+    rank_choice_hints,
 )
 from food_agent.vqa import VQASample
 from scripts.run_agent_comparison import load_selected_samples, run_one_baseline
@@ -71,6 +73,7 @@ def test_build_messages_ours_mentions_evidence_requirement() -> None:
     content = messages[1]["content"]
     assert "只输出 JSON" in content
     assert "evidence_ids 至少填写 1 个" in content
+    assert "choice_hints=" in content
     assert "这是食材题" in content
 
 
@@ -151,3 +154,17 @@ def test_run_one_baseline_continues_on_model_error() -> None:
     assert len(predictions) == 1
     assert predictions[0].failure_type == "model_error:RuntimeError"
     assert predictions[0].prediction == 0
+
+
+def test_token_overlap_score() -> None:
+    assert _token_overlap_score("add olive oil to pan", "olive oil was added to the pan") > 0.3
+
+
+def test_rank_choice_hints_ingredient() -> None:
+    sample = make_sample()
+    evidence = {
+        "ingredient": type("Ingredient", (), {"added": [{"label": "capsule"}], "pending": []})(),
+        "recipe": type("Recipe", (), {"active_steps": [], "completed_steps": []})(),
+    }
+    hints = rank_choice_hints(sample, evidence, "ingredient")
+    assert hints[0].choice_text == "capsule"

@@ -42,6 +42,14 @@ class SampleContext:
     object_name: str | None = None
 
 
+@dataclass(frozen=True)
+class ChoiceHint:
+    choice_idx: int
+    choice_text: str
+    score: float
+    reason: str
+
+
 def parse_hms(text: str) -> float | None:
     match = TIME_PATTERN.search(text)
     if not match:
@@ -145,13 +153,17 @@ def build_messages(
 
     if baseline == "ours-foodevidence":
         specialization = infer_specialization(sample.task_family)
+        hints = rank_choice_hints(sample, evidence, specialization)
         content = (
             question
             + "\n\n"
             + _specialized_instruction(specialization)
+            + "\n先参考 choice_hints 中得分更高的候选，再结合完整证据做最后判断。"
             + "\n你必须依据证据回答。优先引用给定的 suggested_evidence_ids。"
             + "\n如果证据不足，也必须选择最符合证据的选项，且 evidence_ids 至少填写 1 个最相关证据。"
             + "\n只输出 JSON，不要输出 Markdown。格式：{\"choice\": <编号>, \"reason\": \"...\", \"evidence_ids\": [\"...\"]}"
+            + "\n\nchoice_hints=\n"
+            + _choice_hints_text(hints)
             + "\n\nEvidence block：\n"
             + _ours_evidence_text(evidence)
         )
@@ -200,6 +212,16 @@ def infer_specialization(task_family: str) -> str:
     return TASK_SPECIALIZATION.get(task_family, "general")
 
 
+def rank_choice_hints(sample: VQASample, evidence: dict[str, Any], specialization: str) -> list[ChoiceHint]:
+    if specialization == "ingredient":
+        return _rank_ingredient_choices(sample, evidence)
+    if specialization == "recipe":
+        return _rank_recipe_choices(sample, evidence)
+    if specialization == "nutrition":
+        return _rank_nutrition_choices(sample, evidence)
+    return [ChoiceHint(idx, choice, 0.0, "no_special_hint") for idx, choice in enumerate(sample.choices)]
+
+
 def _specialized_instruction(specialization: str) -> str:
     if specialization == "ingredient":
         return (
@@ -216,6 +238,74 @@ def _specialized_instruction(specialization: str) -> str:
             "这是营养变化题。优先根据 nutrition.delta 和最近新增食材判断热量、脂肪、碳水、蛋白质变化。"
         )
     return "这是厨房任务题。优先根据结构化证据判断最符合的选项。"
+
+
+def _rank_ingredient_choices(sample: VQASample, evidence: dict[str, Any]) -> list[ChoiceHint]:
+    ingredient = evidence.get("ingredient")
+    added_text = " ".join(_row_text(row) for row in getattr(ingredient, "added", []))
+    pending_text = " ".join(_row_text(row) for row in getattr(ingredient, "pending", []))
+    recipe = evidence.get("recipe")
+    recipe_text = " ".join(_row_text(row) for row in getattr(recipe, "active_steps", []) + getattr(recipe, "completed_steps", [])[-3:])
+    hints: list[ChoiceHint] = []
+    for idx, choice in enumerate(sample.choices):
+        score = 0.0
+        reasons = []
+        norm_choice = choice.lower()
+        if norm_choice and norm_choice in added_text.lower():
+            score += 3.0
+            reasons.append("match_added")
+        if norm_choice and norm_choice in recipe_text.lower():
+            score += 1.5
+            reasons.append("match_recipe")
+        if "not used" in sample.question.lower() and norm_choice not in added_text.lower() and norm_choice not in recipe_text.lower():
+            score += 2.0
+            reasons.append("absent_support")
+        if norm_choice and norm_choice in pending_text.lower():
+            score -= 1.0
+            reasons.append("still_pending")
+        hints.append(ChoiceHint(idx, choice, score, ",".join(reasons) or "weak_match"))
+    return sorted(hints, key=lambda item: (-item.score, item.choice_idx))
+
+
+def _rank_recipe_choices(sample: VQASample, evidence: dict[str, Any]) -> list[ChoiceHint]:
+    recipe = evidence.get("recipe")
+    active_text = " ".join(_row_text(row) for row in getattr(recipe, "active_steps", []))
+    completed_text = " ".join(_row_text(row) for row in getattr(recipe, "completed_steps", [])[-3:])
+    next_text = " ".join(_row_text(row) for row in getattr(recipe, "next_steps", [])[:3])
+    hints: list[ChoiceHint] = []
+    for idx, choice in enumerate(sample.choices):
+        score = 0.0
+        reasons = []
+        overlap_active = _token_overlap_score(choice, active_text)
+        overlap_completed = _token_overlap_score(choice, completed_text)
+        overlap_next = _token_overlap_score(choice, next_text)
+        score += overlap_active * 3.0
+        score += overlap_completed * 2.0
+        score += overlap_next * 1.0
+        if overlap_active:
+            reasons.append("match_active")
+        if overlap_completed:
+            reasons.append("match_completed")
+        if overlap_next:
+            reasons.append("match_next")
+        hints.append(ChoiceHint(idx, choice, score, ",".join(reasons) or "weak_match"))
+    return sorted(hints, key=lambda item: (-item.score, item.choice_idx))
+
+
+def _rank_nutrition_choices(sample: VQASample, evidence: dict[str, Any]) -> list[ChoiceHint]:
+    nutrition = evidence.get("nutrition")
+    totals = getattr(nutrition, "totals", {}) or {}
+    hints: list[ChoiceHint] = []
+    for idx, choice in enumerate(sample.choices):
+        score = 0.0
+        reasons = []
+        for key in ("calories", "fat", "carbs", "protein"):
+            value = totals.get(key)
+            if value is not None and f"{value:.1f}" in choice:
+                score += 2.0
+                reasons.append(f"match_{key}")
+        hints.append(ChoiceHint(idx, choice, score, ",".join(reasons) or "weak_match"))
+    return sorted(hints, key=lambda item: (-item.score, item.choice_idx))
 
 
 def _food_state_text(evidence: dict[str, Any]) -> str:
@@ -255,6 +345,34 @@ def _ours_evidence_text(evidence: dict[str, Any]) -> str:
         blocks.append("object.tracks=" + json.dumps(spatial.object_tracks[:5], ensure_ascii=False))
     blocks.append("suggested_evidence_ids=" + json.dumps(evidence.get("evidence_ids", []), ensure_ascii=False))
     return "\n".join(blocks)
+
+
+def _choice_hints_text(hints: list[ChoiceHint]) -> str:
+    return json.dumps(
+        [
+            {
+                "choice_idx": hint.choice_idx,
+                "choice_text": hint.choice_text,
+                "score": hint.score,
+                "reason": hint.reason,
+            }
+            for hint in hints[:3]
+        ],
+        ensure_ascii=False,
+    )
+
+
+def _row_text(row: dict[str, Any]) -> str:
+    return " ".join(str(value) for value in row.values() if value is not None)
+
+
+def _token_overlap_score(choice: str, source: str) -> float:
+    choice_tokens = {token for token in re.findall(r"[a-zA-Z]+", choice.lower()) if len(token) > 2}
+    if not choice_tokens:
+        return 0.0
+    source_tokens = set(re.findall(r"[a-zA-Z]+", source.lower()))
+    overlap = choice_tokens & source_tokens
+    return len(overlap) / len(choice_tokens)
 
 
 def _extract_json_payload(text: str) -> dict[str, Any]:
