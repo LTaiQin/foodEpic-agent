@@ -29,6 +29,40 @@ def read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 
 
+def append_agent_comparison(lines: list[str], output_root: Path) -> None:
+    comparison_root = output_root / "results" / "agent_comparison"
+    if not comparison_root.exists():
+        return
+    run_dirs = sorted(path for path in comparison_root.iterdir() if path.is_dir())
+    if not run_dirs:
+        return
+    lines += ["## Agent Comparison", ""]
+    for run_dir in run_dirs:
+        summary = read_json(run_dir / "summary.json")
+        if not summary:
+            continue
+        lines.append(f"### {summary.get('run_name', run_dir.name)}")
+        lines.append("")
+        lines.append(f"- sample_count: {summary.get('sample_count')}")
+        task_family = summary.get("task_family")
+        if task_family:
+            lines.append(f"- task_family: {task_family}")
+        task_family_group = summary.get("task_family_group")
+        if task_family_group:
+            lines.append(f"- task_family_group: {task_family_group}")
+        baselines = summary.get("baselines", {})
+        for baseline, result in baselines.items():
+            metrics = result.get("metrics", {})
+            advantage = result.get("advantage", {})
+            score = advantage.get("food_agent_advantage_score")
+            verdict = result.get("verdict", {}).get("verdict")
+            lines.append(
+                f"- {baseline}: accuracy={metrics.get('accuracy')}, "
+                f"advantage_score={score}, verdict={verdict}"
+            )
+        lines.append("")
+
+
 def main() -> int:
     args = parse_args()
     manifest_path = args.output_root / "dataset_manifest.parquet"
@@ -74,6 +108,7 @@ def main() -> int:
             f"- audio_rows: {spatial_metrics.get('audio_rows')}",
             "",
         ]
+    append_agent_comparison(lines, args.output_root)
     lines += [
         "## Advantage-Oriented Evaluation Criteria",
         "",
@@ -93,4 +128,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
