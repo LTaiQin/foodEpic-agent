@@ -61,41 +61,46 @@ class GraphAgentResult:
         return payload
 
 
-class GraphAgent:
-    """Full agent that plans, retrieves, revisits raw video, and writes back memory."""
+class GraphAgentVideoSession:
+    """Persistent same-video execution session that reuses one store/toolbox/executor."""
 
-    def __init__(self, paths: ProjectPaths | None = None, model_client: OpenAICompatibleModelClient | None = None):
-        self.paths = paths or ProjectPaths.from_env()
-        self.builder = VideoGraphBuilder(self.paths)
-        self.model_client = model_client or OpenAICompatibleModelClient()
-        self.planner = GraphAgentPlanner(self.model_client)
+    def __init__(self, *, agent: GraphAgent, video_id: str):
+        self.agent = agent
+        self.video_id = video_id
+        self.store = agent._ensure_store(video_id)
+        self.toolbox = AgentToolbox(
+            store=self.store,
+            paths=agent.paths,
+            model_client=agent.model_client,
+            video_id=video_id,
+        )
+        self.executor = GraphAgentExecutor(self.toolbox, agent.planner)
+        self.session_dir = agent.paths.output_root / "graph_agent_sessions" / video_id
+        self.session_dir.mkdir(parents=True, exist_ok=True)
+        self.trace_path = self.session_dir / "session_trace.jsonl"
 
     def answer_vqa_row(self, row: dict[str, Any], *, max_steps: int = 6) -> GraphAgentResult:
         started_at = time.time()
-        video_id = str(row["primary_video_id"])
         vqa_id = str(row.get("vqa_id") or "")
         task_family = str(row["task_family"])
-        store = self._ensure_store(video_id)
-        toolbox = AgentToolbox(store=store, paths=self.paths, model_client=self.model_client, video_id=video_id)
-        executor = GraphAgentExecutor(toolbox, self.planner)
         state = AgentState(
-            video_id=video_id,
+            video_id=self.video_id,
             question=str(row["question"]),
             choices=json.loads(row["choices_json"]),
             task_family=task_family,
             inputs_json=str(row.get("inputs_json", "{}")),
             max_steps=max_steps,
         )
-        state = executor.execute(state)
+        state = self.executor.execute(state)
         if state.final_prediction is None:
-            answer_text = self._answer_from_state(state)
-            prediction = self._parse_prediction(answer_text, state.choices)
+            answer_text = self.agent._answer_from_state(state)
+            prediction = self.agent._parse_prediction(answer_text, state.choices)
         else:
             answer_text = state.final_answer
             prediction = state.final_prediction
         result = GraphAgentResult(
             vqa_id=vqa_id,
-            video_id=video_id,
+            video_id=self.video_id,
             task_family=task_family,
             prediction=prediction,
             answer_text=answer_text,
@@ -107,8 +112,50 @@ class GraphAgent:
             confidence=state.confidence,
             elapsed_seconds=time.time() - started_at,
         )
-        self._persist_result(result, row=row)
+        self.agent._persist_result(result, row=row)
+        self._append_session_trace(result, row=row)
         return result
+
+    def _append_session_trace(self, result: GraphAgentResult, *, row: dict[str, Any]) -> None:
+        payload = {
+            "vqa_id": result.vqa_id,
+            "task_family": result.task_family,
+            "prediction": result.prediction,
+            "gold": int(row["correct_idx"]) if row.get("correct_idx") is not None else None,
+            "correct": None if row.get("correct_idx") is None or result.prediction is None else result.prediction == int(row["correct_idx"]),
+            "elapsed_seconds": result.elapsed_seconds,
+            "tool_calls": [entry.get("tool") for entry in result.tool_trace if isinstance(entry, dict)],
+            "working_memory_tail": result.working_memory[-12:],
+            "evidence_tail": result.evidence_bundle[-12:],
+        }
+        with self.trace_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+
+class GraphAgent:
+    """Full agent that plans, retrieves, revisits raw video, and writes back memory."""
+
+    def __init__(self, paths: ProjectPaths | None = None, model_client: OpenAICompatibleModelClient | None = None):
+        self.paths = paths or ProjectPaths.from_env()
+        self.builder = VideoGraphBuilder(self.paths)
+        self.model_client = model_client or OpenAICompatibleModelClient()
+        self.planner = GraphAgentPlanner(self.model_client)
+        self._video_sessions: dict[str, GraphAgentVideoSession] = {}
+
+    def answer_vqa_row(self, row: dict[str, Any], *, max_steps: int = 6) -> GraphAgentResult:
+        video_id = str(row["primary_video_id"])
+        session = self.begin_video_session(video_id)
+        return session.answer_vqa_row(row, max_steps=max_steps)
+
+    def begin_video_session(self, video_id: str) -> GraphAgentVideoSession:
+        session = self._video_sessions.get(video_id)
+        if session is None:
+            session = GraphAgentVideoSession(agent=self, video_id=video_id)
+            self._video_sessions[video_id] = session
+        return session
+
+    def reset_video_session(self, video_id: str) -> None:
+        self._video_sessions.pop(video_id, None)
 
     def _ensure_store(self, video_id: str) -> GraphMemoryStore:
         graph_dir = self.paths.output_root / "graph_memory" / video_id

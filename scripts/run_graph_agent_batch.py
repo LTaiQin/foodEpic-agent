@@ -230,8 +230,9 @@ def load_selected_samples(index_dir: Path, limit: int, task_family: str | None, 
         samples = []
         for family in TASK_FAMILY_GROUPS[task_family_group]:
             samples.extend(load_vqa_samples(index_dir, limit=limit, task_family=family))
-        return samples
-    return load_vqa_samples(index_dir, limit=limit, task_family=task_family)
+        return sorted(samples, key=lambda sample: (str(sample.primary_video_id or ""), sample.task_family, sample.vqa_id))
+    samples = load_vqa_samples(index_dir, limit=limit, task_family=task_family)
+    return sorted(samples, key=lambda sample: (str(sample.primary_video_id or ""), sample.task_family, sample.vqa_id))
 
 
 def append_prediction_jsonl(path: Path, prediction: VQAPrediction) -> None:

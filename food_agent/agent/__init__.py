@@ -1,5 +1,5 @@
 """Graph agent components."""
 
-from .graph_agent import GraphAgent
+from .graph_agent import GraphAgent, GraphAgentVideoSession
 
-__all__ = ["GraphAgent"]
+__all__ = ["GraphAgent", "GraphAgentVideoSession"]
