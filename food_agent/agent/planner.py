@@ -257,11 +257,75 @@ class GraphAgentPlanner:
                     "limit": 20,
                 },
             )
+        if state.current_step <= 1 and state.task_family == "nutrition_nutrition_change" and combined_times:
+            return PlannerDecision(
+                thought="营养变化题优先直接根据 ingredient add 事件计算窗口内营养增量。",
+                tool="compute_nutrition_change",
+                args={"start_time": min(combined_times), "end_time": max(combined_times)},
+            )
+        if state.current_step == 2 and state.task_family == "nutrition_nutrition_change":
+            return PlannerDecision(
+                thought="已经得到营养增量，直接对选项评分。",
+                tool="rank_choices_from_state",
+                args={
+                    "question": state.question,
+                    "choices": [str(choice) for choice in state.choices],
+                    "evidence": state.evidence_bundle,
+                    "working_memory": state.working_memory,
+                },
+            )
+        if state.current_step <= 1 and state.task_family == "nutrition_image_nutrition_estimation":
+            nutrient = "carbs" if "carb" in state.question.lower() else "calories"
+            return PlannerDecision(
+                thought="多图营养题优先直接比较候选食材的结构化营养字段。",
+                tool="compare_choice_nutrition",
+                args={"choices": [str(choice) for choice in state.choices], "nutrient": nutrient},
+            )
+        if state.current_step == 2 and state.task_family == "nutrition_image_nutrition_estimation":
+            return PlannerDecision(
+                thought="已经得到各候选食材的营养比较结果，直接结束。",
+                tool="rank_choices_from_state",
+                args={
+                    "question": state.question,
+                    "choices": [str(choice) for choice in state.choices],
+                    "evidence": state.evidence_bundle,
+                    "working_memory": state.working_memory,
+                },
+            )
         if state.current_step <= 1 and state.task_family.startswith("recipe_"):
             return PlannerDecision(
                 thought="步骤题优先检索 recipe_step。",
                 tool="query_event",
                 args={"event_types": ["recipe_step"], "start_time": min(combined_times) if combined_times else None, "end_time": max(combined_times) if combined_times else None, "limit": 20},
+            )
+        if state.current_step <= 1 and state.task_family == "object_motion_object_movement_counting" and bbox and combined_times:
+            return PlannerDecision(
+                thought="物体移动次数题优先把参考 bbox 解析成对象 association 和完整轨迹。",
+                tool="resolve_bbox_reference",
+                args={"bbox": bbox, "reference_time": combined_times[0], "limit": 5},
+            )
+        if state.current_step == 2 and state.task_family == "object_motion_object_movement_counting" and bbox and combined_times:
+            return PlannerDecision(
+                thought="根据 object association 的全部 tracks 估计位置变化次数。",
+                tool="estimate_object_movement_count",
+                args={"bbox": bbox, "reference_time": combined_times[0], "choices": [str(choice) for choice in state.choices]},
+            )
+        if state.current_step <= 1 and state.task_family == "object_motion_stationary_object_localization" and bbox and combined_times:
+            return PlannerDecision(
+                thought="长期静止定位题先把参考 bbox 解析成对象 association 和完整轨迹。",
+                tool="resolve_bbox_reference",
+                args={"bbox": bbox, "reference_time": combined_times[0], "limit": 5},
+            )
+        if state.current_step == 2 and state.task_family == "object_motion_stationary_object_localization" and bbox and combined_times:
+            return PlannerDecision(
+                thought="根据 object tracks 判断从哪个候选时间开始保持静止超过阈值。",
+                tool="estimate_stationary_start",
+                args={
+                    "bbox": bbox,
+                    "reference_time": combined_times[0],
+                    "choices": [str(choice) for choice in state.choices],
+                    "threshold_s": 150.0,
+                },
             )
         if state.current_step == 1 and state.task_family.startswith("recipe_"):
             return PlannerDecision(
@@ -548,6 +612,56 @@ class GraphAgentPlanner:
                             '输出 JSON，字段固定为 {"ongoing_action":"","reading":"","digits":"","answer_hint":"","confidence":0.0}。'
                         ),
                         "image_paths": state.retrieved_frames[-5:],
+                    },
+                )
+
+        if state.task_family == "nutrition_nutrition_change" and decision.tool == "finish":
+            if "compute_nutrition_change" not in used_tools and combined_times:
+                return PlannerDecision(
+                    thought="营养变化题在 finish 前必须先计算时间窗口内营养增量。",
+                    tool="compute_nutrition_change",
+                    args={"start_time": min(combined_times), "end_time": max(combined_times)},
+                )
+
+        if state.task_family == "nutrition_image_nutrition_estimation" and decision.tool == "finish":
+            if "compare_choice_nutrition" not in used_tools:
+                nutrient = "carbs" if "carb" in state.question.lower() else "calories"
+                return PlannerDecision(
+                    thought="多图营养题在 finish 前必须先比较候选食材的结构化营养值。",
+                    tool="compare_choice_nutrition",
+                    args={"choices": [str(choice) for choice in state.choices], "nutrient": nutrient},
+                )
+
+        if state.task_family == "object_motion_object_movement_counting" and decision.tool == "finish" and bbox and combined_times:
+            if "resolve_bbox_reference" not in used_tools:
+                return PlannerDecision(
+                    thought="移动次数题在 finish 前必须先解析 bbox 对应的 object association。",
+                    tool="resolve_bbox_reference",
+                    args={"bbox": bbox, "reference_time": combined_times[0], "limit": 5},
+                )
+            if "estimate_object_movement_count" not in used_tools:
+                return PlannerDecision(
+                    thought="移动次数题在 finish 前必须先根据 object tracks 估计位置变化次数。",
+                    tool="estimate_object_movement_count",
+                    args={"bbox": bbox, "reference_time": combined_times[0], "choices": [str(choice) for choice in state.choices]},
+                )
+
+        if state.task_family == "object_motion_stationary_object_localization" and decision.tool == "finish" and bbox and combined_times:
+            if "resolve_bbox_reference" not in used_tools:
+                return PlannerDecision(
+                    thought="长期静止题在 finish 前必须先解析 bbox 对应的 object association。",
+                    tool="resolve_bbox_reference",
+                    args={"bbox": bbox, "reference_time": combined_times[0], "limit": 5},
+                )
+            if "estimate_stationary_start" not in used_tools:
+                return PlannerDecision(
+                    thought="长期静止题在 finish 前必须先根据 object tracks 判断静止起点。",
+                    tool="estimate_stationary_start",
+                    args={
+                        "bbox": bbox,
+                        "reference_time": combined_times[0],
+                        "choices": [str(choice) for choice in state.choices],
+                        "threshold_s": 150.0,
                     },
                 )
 

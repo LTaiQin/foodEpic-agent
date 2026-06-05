@@ -7,9 +7,13 @@ import re
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+
 from food_agent.memory import GraphEdgeRecord, GraphMemoryStore, GraphNodeRecord
 from food_agent.model_client import OpenAICompatibleModelClient
 from food_agent.paths import ProjectPaths
+from food_agent.spatial_store import SpatialContextStore
+from food_agent.state_store import FoodStateStore
 from food_agent.tools.graph_tools import GraphToolbox
 from food_agent.tools.video_tools import VideoToolbox
 
@@ -27,6 +31,8 @@ class AgentToolbox:
         self.model_client = model_client
         self.video_id = video_id
         self.graph = GraphToolbox(store)
+        self.state_store = FoodStateStore(self.paths.output_root / "event_index")
+        self.spatial_store = SpatialContextStore(self.paths.output_root / "event_index")
         self.workspace = self.paths.output_root / "graph_agent_artifacts" / video_id
         self.video = VideoToolbox(self.workspace)
 
@@ -59,9 +65,34 @@ class AgentToolbox:
                 "arguments": {"ingredient_name": "str", "start_time": "float|None", "end_time": "float|None", "limit": "int"},
             },
             {
+                "name": "compute_nutrition_change",
+                "description": "根据 ingredient add 事件直接计算给定时间窗口内营养变化。",
+                "arguments": {"start_time": "float", "end_time": "float"},
+            },
+            {
+                "name": "compare_choice_nutrition",
+                "description": "根据数据集中同名食材的结构化营养记录，比较选项的营养高低。",
+                "arguments": {"choices": "list[str]", "nutrient": "str"},
+            },
+            {
                 "name": "get_neighbors",
                 "description": "读取已知节点的邻接边，理解节点关系。",
                 "arguments": {"node_ids": "list[str]", "edge_types": "list[str]|None", "limit": "int"},
+            },
+            {
+                "name": "resolve_bbox_reference",
+                "description": "把题目中的 bbox + 参考时间解析成 object mask、association 和 object track 证据。",
+                "arguments": {"bbox": "list[float]", "reference_time": "float", "limit": "int"},
+            },
+            {
+                "name": "estimate_object_movement_count",
+                "description": "根据已解析到的 object association / tracks 估计物体在视频中的位置变化次数。",
+                "arguments": {"bbox": "list[float]", "reference_time": "float", "choices": "list[str]"},
+            },
+            {
+                "name": "estimate_stationary_start",
+                "description": "根据 object tracks 判断从哪个候选起始时间开始，物体保持静止超过阈值秒数。",
+                "arguments": {"bbox": "list[float]", "reference_time": "float", "choices": "list[str]", "threshold_s": "float"},
             },
             {
                 "name": "extract_frame_at_time",
@@ -231,6 +262,211 @@ class AgentToolbox:
     def get_neighbors(self, node_ids: list[str], edge_types: list[str] | None = None, limit: int = 50) -> dict[str, Any]:
         edges = self.graph.get_neighbors(node_ids=node_ids, edge_types=edge_types, limit=limit)
         return {"edges": edges, "count": len(edges)}
+
+    def compute_nutrition_change(self, start_time: float, end_time: float) -> dict[str, Any]:
+        rows = self.state_store.ingredient_interval(self.video_id, start_time, end_time)
+        totals = {key: 0.0 for key in ("calories", "carbs", "fat", "protein")}
+        contributing: list[dict[str, Any]] = []
+        for row in rows:
+            payload = self._parse_payload_json(row.get("payload_json"))
+            if str(payload.get("action_type") or "").lower() != "add":
+                continue
+            item = {
+                "event_id": row.get("event_id"),
+                "label": row.get("label"),
+                "start_time": row.get("start_time"),
+                "end_time": row.get("end_time"),
+            }
+            for key in totals:
+                value = self._float_or_none(payload.get(key))
+                if value is not None:
+                    totals[key] += value
+                    item[key] = value
+            contributing.append(item)
+        return {
+            "totals": totals,
+            "events": contributing,
+            "count": len(contributing),
+            "start_time": start_time,
+            "end_time": end_time,
+        }
+
+    def compare_choice_nutrition(self, choices: list[str], nutrient: str = "carbs") -> dict[str, Any]:
+        nutrient_key = str(nutrient).strip().lower()
+        if nutrient_key not in {"calories", "carbs", "fat", "protein"}:
+            raise ValueError(f"unsupported nutrient: {nutrient}")
+        ingredients = pd.read_parquet(self.paths.output_root / "event_index" / "ingredients.parquet")
+        scored: list[dict[str, Any]] = []
+        for index, choice in enumerate(choices):
+            label = str(choice).strip().lower()
+            subset = ingredients[ingredients["label"].astype(str).str.lower() == label].copy()
+            values: list[float] = []
+            evidence_ids: list[str] = []
+            for _, row in subset.iterrows():
+                payload = self._parse_payload_json(row.get("payload_json"))
+                value = self._float_or_none(payload.get(nutrient_key))
+                if value is None:
+                    continue
+                values.append(value)
+                if row.get("event_id"):
+                    evidence_ids.append(str(row.get("event_id")))
+            representative = max(values) if values else None
+            scored.append(
+                {
+                    "index": index,
+                    "choice": str(choice),
+                    "nutrient": nutrient_key,
+                    "value": representative,
+                    "evidence_ids": evidence_ids[:10],
+                    "support_count": len(values),
+                }
+            )
+        valid = [item for item in scored if item.get("value") is not None]
+        if valid:
+            best = max(valid, key=lambda item: float(item["value"]))
+            best_index = int(best["index"])
+        else:
+            best_index = 0
+        return {
+            "nutrient": nutrient_key,
+            "scores": scored,
+            "best_index": best_index,
+            "answer": str(choices[best_index]),
+            "confidence": 0.7 if valid else 0.1,
+        }
+
+    def resolve_bbox_reference(self, bbox: list[float], reference_time: float, limit: int = 5) -> dict[str, Any]:
+        mask_refs = self.spatial_store.resolve_object_reference(self.video_id, bbox, time=reference_time, limit=limit)
+        tracks = pd.read_parquet(self.paths.output_root / "event_index" / "object_tracks.parquet")
+        matched_tracks: list[dict[str, Any]] = []
+        association_id = None
+        object_name = None
+        fixture = None
+        for ref in mask_refs:
+            mask_id = ref.get("mask_id")
+            if fixture is None:
+                fixture = ref.get("fixture")
+            if not mask_id:
+                continue
+            video_tracks = tracks[tracks["video_id"] == self.video_id].copy()
+            for _, row in video_tracks.iterrows():
+                mask_ids = json.loads(row.get("masks_json") or "[]")
+                if mask_id not in mask_ids:
+                    continue
+                record = {
+                    "association_id": row.get("association_id"),
+                    "object_name": row.get("object_name"),
+                    "track_id": row.get("track_id"),
+                    "track_index": row.get("track_index"),
+                    "start_time": row.get("start_time"),
+                    "end_time": row.get("end_time"),
+                    "masks": mask_ids,
+                }
+                matched_tracks.append(record)
+                association_id = str(row.get("association_id"))
+                object_name = str(row.get("object_name"))
+                break
+            if association_id:
+                break
+        all_tracks: list[dict[str, Any]] = []
+        if association_id:
+            subset = tracks[
+                (tracks["video_id"] == self.video_id)
+                & (tracks["association_id"].astype(str) == association_id)
+            ].copy().sort_values(["start_time", "end_time", "track_index"])
+            all_tracks = [
+                {
+                    "association_id": row.get("association_id"),
+                    "object_name": row.get("object_name"),
+                    "track_id": row.get("track_id"),
+                    "track_index": row.get("track_index"),
+                    "start_time": row.get("start_time"),
+                    "end_time": row.get("end_time"),
+                    "masks": json.loads(row.get("masks_json") or "[]"),
+                }
+                for _, row in subset.iterrows()
+            ]
+        return {
+            "reference_mask_matches": mask_refs,
+            "matched_tracks": matched_tracks,
+            "association_id": association_id,
+            "object_name": object_name,
+            "fixture": fixture,
+            "tracks": all_tracks,
+            "count": len(all_tracks),
+        }
+
+    def estimate_object_movement_count(self, bbox: list[float], reference_time: float, choices: list[str]) -> dict[str, Any]:
+        resolved = self.resolve_bbox_reference(bbox=bbox, reference_time=reference_time, limit=5)
+        tracks = resolved.get("tracks") or []
+        movement_count = len(tracks)
+        best_index = self._best_choice_for_count(movement_count, choices)
+        return {
+            "association_id": resolved.get("association_id"),
+            "object_name": resolved.get("object_name"),
+            "movement_count": movement_count,
+            "tracks": tracks,
+            "best_index": best_index,
+            "answer": str(choices[best_index]),
+            "confidence": 0.75 if tracks else 0.1,
+        }
+
+    def estimate_stationary_start(
+        self,
+        bbox: list[float],
+        reference_time: float,
+        choices: list[str],
+        threshold_s: float = 150.0,
+    ) -> dict[str, Any]:
+        resolved = self.resolve_bbox_reference(bbox=bbox, reference_time=reference_time, limit=5)
+        tracks = sorted(
+            [
+                track for track in resolved.get("tracks") or []
+                if track.get("start_time") is not None and track.get("end_time") is not None
+            ],
+            key=lambda item: (float(item.get("start_time") or 0.0), float(item.get("end_time") or 0.0)),
+        )
+        first_future_movement = next(
+            (track for track in tracks if float(track["start_time"]) > float(reference_time)),
+            None,
+        )
+        candidate_floor = float(first_future_movement["end_time"]) if first_future_movement else float(reference_time)
+        choice_times = [(index, self._extract_time_points_from_text(str(choice))) for index, choice in enumerate(choices)]
+        choice_points = [(index, values[0]) for index, values in choice_times if values]
+        valid_candidates: list[dict[str, Any]] = []
+        for index, time_s in choice_points:
+            if float(time_s) < candidate_floor:
+                continue
+            next_track = next((track for track in tracks if float(track["start_time"]) > float(time_s)), None)
+            if next_track is None:
+                continue
+            gap = float(next_track["start_time"]) - float(time_s)
+            if gap > float(threshold_s):
+                valid_candidates.append(
+                    {
+                        "choice_index": index,
+                        "choice_time": time_s,
+                        "next_movement_start": float(next_track["start_time"]),
+                        "gap_seconds": gap,
+                    }
+                )
+        if valid_candidates:
+            best = min(valid_candidates, key=lambda item: float(item["choice_time"]))
+            best_index = int(best["choice_index"])
+            confidence = 0.8
+        else:
+            best_index = 0
+            confidence = 0.1
+        return {
+            "association_id": resolved.get("association_id"),
+            "object_name": resolved.get("object_name"),
+            "tracks": tracks,
+            "candidate_floor": candidate_floor,
+            "valid_candidates": valid_candidates,
+            "best_index": best_index,
+            "answer": str(choices[best_index]),
+            "confidence": confidence,
+        }
 
     def extract_frame_at_time(self, time_s: float, tag: str = "frame") -> dict[str, Any]:
         video_path = self._video_path()
@@ -759,6 +995,12 @@ class AgentToolbox:
             return {}
         return payload if isinstance(payload, dict) else {}
 
+    def _float_or_none(self, value: Any) -> float | None:
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
     def _normalize_measurement_answer(self, amount: Any, unit: Any) -> str:
         amount_text = str(amount).strip()
         unit_text = str(unit).strip()
@@ -779,6 +1021,10 @@ class AgentToolbox:
             "query_time": ["start_time", "end_time"],
             "query_event": ["start_time", "end_time"],
             "query_ingredient_measurement": ["start_time", "end_time"],
+            "compute_nutrition_change": ["start_time", "end_time"],
+            "resolve_bbox_reference": ["reference_time"],
+            "estimate_object_movement_count": ["reference_time"],
+            "estimate_stationary_start": ["reference_time", "threshold_s"],
             "extract_frame_at_time": ["time_s"],
             "extract_frames_for_range": ["start_time", "end_time", "stride_s"],
             "extract_region_with_context": ["expand_ratio"],
@@ -790,6 +1036,7 @@ class AgentToolbox:
             "query_object": ["limit"],
             "query_event": ["limit"],
             "query_ingredient_measurement": ["limit"],
+            "resolve_bbox_reference": ["limit"],
             "get_neighbors": ["limit"],
             "extract_frames_for_range": ["max_frames"],
             "sample_choice_frames": ["choice_index", "frames_per_choice"],
@@ -802,8 +1049,10 @@ class AgentToolbox:
         for key in int_keys.get(tool_name, []):
             if key in normalized and normalized[key] is not None:
                 normalized[key] = int(normalized[key])
-        if tool_name in {"render_bbox_overlay", "extract_region_with_context"} and "bbox" in normalized:
+        if tool_name in {"render_bbox_overlay", "extract_region_with_context", "resolve_bbox_reference", "estimate_object_movement_count", "estimate_stationary_start"} and "bbox" in normalized:
             normalized["bbox"] = [float(value) for value in normalized["bbox"]]
+        if tool_name == "compare_choice_nutrition":
+            normalized["choices"] = [str(choice) for choice in normalized.get("choices", [])]
         if tool_name == "inspect_visual_evidence" and "image_paths" in normalized:
             normalized["image_paths"] = [str(path) for path in normalized["image_paths"]]
         if tool_name == "rank_choices_from_state":
@@ -815,6 +1064,8 @@ class AgentToolbox:
         if tool_name == "count_visual_candidates":
             normalized["reference_image_paths"] = [str(path) for path in normalized.get("reference_image_paths", [])]
             normalized["candidate_times"] = [float(value) for value in normalized.get("candidate_times", [])]
+            normalized["choices"] = [str(choice) for choice in normalized.get("choices", [])]
+        if tool_name in {"estimate_object_movement_count", "estimate_stationary_start"}:
             normalized["choices"] = [str(choice) for choice in normalized.get("choices", [])]
         if tool_name == "infer_viewpoint_choice":
             normalized["choices"] = [str(choice) for choice in normalized.get("choices", [])]

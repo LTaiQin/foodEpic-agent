@@ -59,6 +59,40 @@ class GraphAgentExecutor:
                 )
                 state.add_evidence(summary)
                 state.add_memory(summary)
+        totals = result.get("totals")
+        if isinstance(totals, dict):
+            summary = "nutrition_change " + ", ".join(f"{key}={value}" for key, value in totals.items())
+            state.add_evidence(summary)
+            state.add_memory(summary)
+        scores = result.get("scores")
+        if tool_name == "compare_choice_nutrition" and isinstance(scores, list):
+            for item in scores[:10]:
+                if not isinstance(item, dict):
+                    continue
+                state.add_memory(
+                    f"nutrition_choice index={item.get('index')} choice={item.get('choice')} "
+                    f"{item.get('nutrient')}={item.get('value')}"
+                )
+        if tool_name == "resolve_bbox_reference":
+            association_id = result.get("association_id")
+            object_name = result.get("object_name")
+            fixture = result.get("fixture")
+            if association_id or object_name:
+                state.add_evidence(
+                    f"bbox_reference association_id={association_id} object_name={object_name} fixture={fixture}"
+                )
+                state.add_memory(
+                    f"bbox_reference association_id={association_id} object_name={object_name} fixture={fixture}"
+                )
+            tracks = result.get("tracks")
+            if isinstance(tracks, list):
+                for track in tracks[:10]:
+                    if not isinstance(track, dict):
+                        continue
+                    state.add_memory(
+                        f"track association_id={track.get('association_id')} track_index={track.get('track_index')} "
+                        f"time={track.get('start_time')}-{track.get('end_time')}"
+                    )
         edges = result.get("edges")
         if isinstance(edges, list):
             for edge in edges[:10]:
@@ -98,6 +132,16 @@ class GraphAgentExecutor:
             )
             if result.get("reason"):
                 state.add_evidence(f"count_reason={result.get('reason')}")
+        if tool_name == "estimate_object_movement_count":
+            state.add_memory(
+                f"movement_count={result.get('movement_count')} best_index={result.get('best_index')} "
+                f"object_name={result.get('object_name')}"
+            )
+        if tool_name == "estimate_stationary_start":
+            state.add_memory(
+                f"stationary_best_index={result.get('best_index')} object_name={result.get('object_name')} "
+                f"valid_candidates={result.get('valid_candidates')}"
+            )
         if tool_name == "infer_viewpoint_choice":
             state.add_memory(
                 f"viewpoint_best_index={result.get('best_index')} confidence={result.get('confidence')}"
