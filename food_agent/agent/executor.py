@@ -217,6 +217,24 @@ class GraphAgentExecutor:
             node_id = result.get("node_id")
             if node_id:
                 state.add_memory(f"writeback={node_id}")
+        if tool_name in {
+            "write_frame_observation",
+            "write_region_observation",
+            "write_ocr_reading",
+            "write_audio_event",
+            "write_timeline_summary",
+            "write_state_change",
+        }:
+            node = result.get("node")
+            node_id = result.get("node_id")
+            if isinstance(node, dict):
+                state.add_node_result(node)
+                evidence = self._node_to_evidence(node)
+                if evidence:
+                    state.add_evidence(evidence)
+                    state.add_memory(evidence)
+            if node_id:
+                state.add_memory(f"writeback={node_id}")
 
     def _apply_finish(self, state: AgentState, payload: dict[str, Any]) -> None:
         state.final_prediction = int(payload.get("prediction")) if payload.get("prediction") is not None else None

@@ -67,6 +67,26 @@ class AgentToolbox:
                 "arguments": {"ingredient_name": "str", "start_time": "float|None", "end_time": "float|None", "limit": "int"},
             },
             {
+                "name": "query_state",
+                "description": "检索与状态、熟度、混合情况、完成度相关的节点。",
+                "arguments": {"state_keyword": "str", "start_time": "float|None", "end_time": "float|None", "limit": "int"},
+            },
+            {
+                "name": "query_location",
+                "description": "检索与位置、方位、厨房区域、器具所在处相关的节点。",
+                "arguments": {"location_keyword": "str", "start_time": "float|None", "end_time": "float|None", "limit": "int"},
+            },
+            {
+                "name": "query_region",
+                "description": "检索与指定对象或局部区域相关的节点。",
+                "arguments": {"object_hint": "str", "start_time": "float|None", "end_time": "float|None", "limit": "int"},
+            },
+            {
+                "name": "query_ocr",
+                "description": "检索 OCR 文本、数字读数、包装文字等文本证据节点。",
+                "arguments": {"keyword": "str", "start_time": "float|None", "end_time": "float|None", "limit": "int"},
+            },
+            {
                 "name": "compute_nutrition_change",
                 "description": "根据 ingredient add 事件直接计算给定时间窗口内营养变化。",
                 "arguments": {"start_time": "float", "end_time": "float"},
@@ -201,6 +221,74 @@ class AgentToolbox:
                 },
             },
             {
+                "name": "write_frame_observation",
+                "description": "把针对某一帧的结构化观察写回图谱，并与相邻 frame 节点建立关联。",
+                "arguments": {"frame_path": "str", "time_s": "float|None", "label": "str", "observation": "dict", "keywords": "list[str]|None"},
+            },
+            {
+                "name": "write_region_observation",
+                "description": "把针对局部区域或画框图的观察写回图谱。",
+                "arguments": {
+                    "image_path": "str",
+                    "bbox": "list[float]|None",
+                    "time_s": "float|None",
+                    "label": "str",
+                    "observation": "dict",
+                    "keywords": "list[str]|None",
+                },
+            },
+            {
+                "name": "write_ocr_reading",
+                "description": "把 OCR 读数或文本写回图谱。",
+                "arguments": {
+                    "label": "str",
+                    "reading": "str",
+                    "time_s": "float|None",
+                    "image_path": "str|None",
+                    "bbox": "list[float]|None",
+                    "attributes": "dict|None",
+                    "keywords": "list[str]|None",
+                },
+            },
+            {
+                "name": "write_audio_event",
+                "description": "把音频触发事件写回图谱。",
+                "arguments": {
+                    "label": "str",
+                    "start_time": "float|None",
+                    "end_time": "float|None",
+                    "attributes": "dict|None",
+                    "evidence_paths": "list[str]|None",
+                    "keywords": "list[str]|None",
+                },
+            },
+            {
+                "name": "write_timeline_summary",
+                "description": "把时间段总结写回图谱，供后续检索。",
+                "arguments": {
+                    "label": "str",
+                    "start_time": "float|None",
+                    "end_time": "float|None",
+                    "summary": "str",
+                    "evidence_paths": "list[str]|None",
+                    "keywords": "list[str]|None",
+                },
+            },
+            {
+                "name": "write_state_change",
+                "description": "把对象或食材的状态变化写回图谱。",
+                "arguments": {
+                    "label": "str",
+                    "target": "str",
+                    "before_state": "str|None",
+                    "after_state": "str|None",
+                    "start_time": "float|None",
+                    "end_time": "float|None",
+                    "evidence_paths": "list[str]|None",
+                    "keywords": "list[str]|None",
+                },
+            },
+            {
                 "name": "finish",
                 "description": "当证据足够时结束，并给出最终答案编号与证据摘要。",
                 "arguments": {"prediction": "int", "answer": "str", "confidence": "float"},
@@ -284,6 +372,70 @@ class AgentToolbox:
                 }
             )
         return {"matches": matches, "count": len(matches)}
+
+    def query_state(
+        self,
+        state_keyword: str,
+        start_time: float | None = None,
+        end_time: float | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        nodes = self.graph.query_state(
+            video_id=self.video_id,
+            state_keyword=state_keyword,
+            start_time=start_time,
+            end_time=end_time,
+            limit=limit,
+        )
+        return {"nodes": nodes, "count": len(nodes)}
+
+    def query_location(
+        self,
+        location_keyword: str,
+        start_time: float | None = None,
+        end_time: float | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        nodes = self.graph.query_location(
+            video_id=self.video_id,
+            location_keyword=location_keyword,
+            start_time=start_time,
+            end_time=end_time,
+            limit=limit,
+        )
+        return {"nodes": nodes, "count": len(nodes)}
+
+    def query_region(
+        self,
+        object_hint: str,
+        start_time: float | None = None,
+        end_time: float | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        nodes = self.graph.query_region(
+            video_id=self.video_id,
+            object_hint=object_hint,
+            start_time=start_time,
+            end_time=end_time,
+            limit=limit,
+        )
+        return {"nodes": nodes, "count": len(nodes)}
+
+    def query_ocr(
+        self,
+        keyword: str,
+        start_time: float | None = None,
+        end_time: float | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        nodes = self.graph.query_ocr(
+            video_id=self.video_id,
+            keyword=keyword,
+            start_time=start_time,
+            end_time=end_time,
+            limit=limit,
+        )
+        return {"nodes": nodes, "count": len(nodes)}
 
     def get_neighbors(self, node_ids: list[str], edge_types: list[str] | None = None, limit: int = 50) -> dict[str, Any]:
         edges = self.graph.get_neighbors(node_ids=node_ids, edge_types=edge_types, limit=limit)
@@ -976,6 +1128,174 @@ class AgentToolbox:
         )
         return {"node_id": node_id}
 
+    def write_frame_observation(
+        self,
+        frame_path: str,
+        time_s: float | None,
+        label: str,
+        observation: dict[str, Any],
+        keywords: list[str] | None = None,
+    ) -> dict[str, Any]:
+        safe_label = self._safe_tag(label)[:64]
+        node_id = f"frame_observation:{self.video_id}:{safe_label}:{self._node_time_token(time_s, time_s)}"
+        payload = {"frame_path": frame_path, "observation": observation, "source": "agent_frame_observation"}
+        node = self.graph.write_node(
+            node_id=node_id,
+            node_type="observation",
+            label=label,
+            video_id=self.video_id,
+            start_time=time_s,
+            end_time=time_s,
+            attributes=payload,
+            evidence_paths=[frame_path],
+            keywords=keywords or self._keywords_from_payload(label, payload),
+        )
+        self._link_to_matching_frame(node_id=node_id, time_s=time_s)
+        return {"node_id": node["node_id"], "node": node}
+
+    def write_region_observation(
+        self,
+        image_path: str,
+        bbox: list[float] | None,
+        time_s: float | None,
+        label: str,
+        observation: dict[str, Any],
+        keywords: list[str] | None = None,
+    ) -> dict[str, Any]:
+        safe_label = self._safe_tag(label)[:64]
+        node_id = f"region_observation:{self.video_id}:{safe_label}:{self._node_time_token(time_s, time_s)}"
+        payload = {
+            "image_path": image_path,
+            "bbox": bbox or [],
+            "observation": observation,
+            "source": "agent_region_observation",
+        }
+        node = self.graph.write_node(
+            node_id=node_id,
+            node_type="region",
+            label=label,
+            video_id=self.video_id,
+            start_time=time_s,
+            end_time=time_s,
+            attributes=payload,
+            evidence_paths=[image_path],
+            keywords=keywords or self._keywords_from_payload(label, payload),
+        )
+        self._link_to_matching_frame(node_id=node_id, time_s=time_s)
+        return {"node_id": node["node_id"], "node": node}
+
+    def write_ocr_reading(
+        self,
+        label: str,
+        reading: str,
+        time_s: float | None = None,
+        image_path: str | None = None,
+        bbox: list[float] | None = None,
+        attributes: dict[str, Any] | None = None,
+        keywords: list[str] | None = None,
+    ) -> dict[str, Any]:
+        safe_label = self._safe_tag(label)[:64]
+        node_id = f"ocr_reading:{self.video_id}:{safe_label}:{self._node_time_token(time_s, time_s)}"
+        payload = dict(attributes or {})
+        payload.update({"reading": reading, "image_path": image_path, "bbox": bbox or [], "source": "agent_ocr"})
+        evidence_paths = [image_path] if image_path else []
+        node = self.graph.write_node(
+            node_id=node_id,
+            node_type="ocr_reading",
+            label=label,
+            video_id=self.video_id,
+            start_time=time_s,
+            end_time=time_s,
+            attributes=payload,
+            evidence_paths=evidence_paths,
+            keywords=keywords or self._keywords_from_payload(f"{label} {reading}", payload),
+        )
+        self._link_to_matching_frame(node_id=node_id, time_s=time_s)
+        return {"node_id": node["node_id"], "node": node}
+
+    def write_audio_event(
+        self,
+        label: str,
+        start_time: float | None = None,
+        end_time: float | None = None,
+        attributes: dict[str, Any] | None = None,
+        evidence_paths: list[str] | None = None,
+        keywords: list[str] | None = None,
+    ) -> dict[str, Any]:
+        safe_label = self._safe_tag(label)[:64]
+        node_id = f"audio_writeback:{self.video_id}:{safe_label}:{self._node_time_token(start_time, end_time)}"
+        payload = dict(attributes or {})
+        payload["source"] = "agent_audio_event"
+        node = self.graph.write_node(
+            node_id=node_id,
+            node_type="audio_event",
+            label=label,
+            video_id=self.video_id,
+            start_time=start_time,
+            end_time=end_time,
+            attributes=payload,
+            evidence_paths=evidence_paths or [],
+            keywords=keywords or self._keywords_from_payload(label, payload),
+        )
+        return {"node_id": node["node_id"], "node": node}
+
+    def write_timeline_summary(
+        self,
+        label: str,
+        start_time: float | None = None,
+        end_time: float | None = None,
+        summary: str = "",
+        evidence_paths: list[str] | None = None,
+        keywords: list[str] | None = None,
+    ) -> dict[str, Any]:
+        safe_label = self._safe_tag(label)[:64]
+        node_id = f"timeline_summary:{self.video_id}:{safe_label}:{self._node_time_token(start_time, end_time)}"
+        payload = {"summary": summary, "source": "agent_timeline_summary"}
+        node = self.graph.write_node(
+            node_id=node_id,
+            node_type="timeline_event",
+            label=label,
+            video_id=self.video_id,
+            start_time=start_time,
+            end_time=end_time,
+            attributes=payload,
+            evidence_paths=evidence_paths or [],
+            keywords=keywords or self._keywords_from_payload(f"{label} {summary}", payload),
+        )
+        return {"node_id": node["node_id"], "node": node}
+
+    def write_state_change(
+        self,
+        label: str,
+        target: str,
+        before_state: str | None = None,
+        after_state: str | None = None,
+        start_time: float | None = None,
+        end_time: float | None = None,
+        evidence_paths: list[str] | None = None,
+        keywords: list[str] | None = None,
+    ) -> dict[str, Any]:
+        safe_label = self._safe_tag(label)[:64]
+        node_id = f"state_change:{self.video_id}:{safe_label}:{self._node_time_token(start_time, end_time)}"
+        payload = {
+            "target": target,
+            "before_state": before_state,
+            "after_state": after_state,
+            "source": "agent_state_change",
+        }
+        node = self.graph.write_node(
+            node_id=node_id,
+            node_type="state_change",
+            label=label,
+            video_id=self.video_id,
+            start_time=start_time,
+            end_time=end_time,
+            attributes=payload,
+            evidence_paths=evidence_paths or [],
+            keywords=keywords or self._keywords_from_payload(f"{label} {target} {before_state or ''} {after_state or ''}", payload),
+        )
+        return {"node_id": node["node_id"], "node": node}
+
     def finish(self, prediction: int, answer: str, confidence: float = 0.0) -> dict[str, Any]:
         return {"prediction": int(prediction), "answer": str(answer), "confidence": float(confidence), "done": True}
 
@@ -1040,6 +1360,31 @@ class AgentToolbox:
                 if text:
                     tokens.add(text)
         return sorted(token for token in tokens if token)
+
+    def _link_to_matching_frame(self, *, node_id: str, time_s: float | None) -> None:
+        if time_s is None:
+            return
+        frame_nodes = self.store.query_nodes(
+            video_id=self.video_id,
+            node_types=["frame"],
+            time_start=max(0.0, float(time_s) - 0.6),
+            time_end=float(time_s) + 0.6,
+            limit=1,
+        )
+        if not frame_nodes:
+            return
+        frame_node = frame_nodes[0]
+        self.graph.write_edge(
+            edge_id=f"derived_from:{node_id}:{frame_node['node_id']}",
+            source_id=node_id,
+            target_id=frame_node["node_id"],
+            edge_type="derived_from",
+            video_id=self.video_id,
+            attributes={
+                "source": "agent_linker",
+                "time_delta": abs(float(frame_node.get("start_time") or 0.0) - float(time_s)),
+            },
+        )
 
     def _parse_hms(self, text: str) -> float:
         hours, minutes, seconds = text.split(":")
@@ -1173,6 +1518,10 @@ class AgentToolbox:
             "query_time": ["start_time", "end_time"],
             "query_event": ["start_time", "end_time"],
             "query_ingredient_measurement": ["start_time", "end_time"],
+            "query_state": ["start_time", "end_time"],
+            "query_location": ["start_time", "end_time"],
+            "query_region": ["start_time", "end_time"],
+            "query_ocr": ["start_time", "end_time"],
             "compute_nutrition_change": ["start_time", "end_time"],
             "query_spatial_context": ["time_s"],
             "resolve_bbox_reference": ["reference_time"],
@@ -1182,6 +1531,12 @@ class AgentToolbox:
             "extract_frames_for_range": ["start_time", "end_time", "stride_s"],
             "extract_region_with_context": ["expand_ratio"],
             "write_observation": ["start_time", "end_time"],
+            "write_frame_observation": ["time_s"],
+            "write_region_observation": ["time_s"],
+            "write_ocr_reading": ["time_s"],
+            "write_audio_event": ["start_time", "end_time"],
+            "write_timeline_summary": ["start_time", "end_time"],
+            "write_state_change": ["start_time", "end_time"],
             "finish": ["confidence"],
         }
         int_keys = {
@@ -1189,6 +1544,10 @@ class AgentToolbox:
             "query_object": ["limit"],
             "query_event": ["limit"],
             "query_ingredient_measurement": ["limit"],
+            "query_state": ["limit"],
+            "query_location": ["limit"],
+            "query_region": ["limit"],
+            "query_ocr": ["limit"],
             "query_spatial_context": ["limit"],
             "resolve_bbox_reference": ["limit"],
             "get_neighbors": ["limit"],
@@ -1204,6 +1563,8 @@ class AgentToolbox:
             if key in normalized and normalized[key] is not None:
                 normalized[key] = int(normalized[key])
         if tool_name in {"render_bbox_overlay", "extract_region_with_context", "resolve_bbox_reference", "estimate_object_movement_count", "estimate_stationary_start"} and "bbox" in normalized:
+            normalized["bbox"] = [float(value) for value in normalized["bbox"]]
+        if tool_name in {"write_region_observation", "write_ocr_reading"} and "bbox" in normalized and normalized["bbox"] is not None:
             normalized["bbox"] = [float(value) for value in normalized["bbox"]]
         if tool_name == "compare_choice_nutrition":
             normalized["choices"] = [str(choice) for choice in normalized.get("choices", [])]

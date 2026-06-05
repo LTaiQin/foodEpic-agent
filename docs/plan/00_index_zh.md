@@ -30,6 +30,7 @@
 - [07_repo_ops_and_commit_zh.md](07_repo_ops_and_commit_zh.md)：GitHub 绑定、SSH、自动验证提交、数据不入库规范。
 - [08_risks_and_decisions_zh.md](08_risks_and_decisions_zh.md)：风险、决策记录、暂缓方向和后续扩展路线。
 - [10_graph_tool_agent_execution_plan_zh.md](10_graph_tool_agent_execution_plan_zh.md)：工具驱动、图谱记忆、原始视频可回查的真实 agent 实施主线。
+- [11_tool_driven_graph_agent_architecture_zh.md](11_tool_driven_graph_agent_architecture_zh.md)：图谱只做外部记忆层、原始视频始终可回查、LLM 通过工具自主检索证据的主架构约束。
 
 ## 当前本地状态
 
