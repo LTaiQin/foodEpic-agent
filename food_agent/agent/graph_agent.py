@@ -12,6 +12,7 @@ from typing import Any
 from food_agent.agent.executor import GraphAgentExecutor
 from food_agent.agent.planner import GraphAgentPlanner
 from food_agent.agent.state import AgentState
+from food_agent.agent.verifier import GraphAgentVerifier
 from food_agent.graph import VideoGraphBuilder
 from food_agent.memory import GraphMemoryStore
 from food_agent.model_client import OpenAICompatibleModelClient
@@ -74,7 +75,7 @@ class GraphAgentVideoSession:
             model_client=agent.model_client,
             video_id=video_id,
         )
-        self.executor = GraphAgentExecutor(self.toolbox, agent.planner)
+        self.executor = GraphAgentExecutor(self.toolbox, agent.planner, agent.verifier)
         self.session_dir = agent.paths.output_root / "graph_agent_sessions" / video_id
         self.session_dir.mkdir(parents=True, exist_ok=True)
         self.trace_path = self.session_dir / "session_trace.jsonl"
@@ -177,6 +178,7 @@ class GraphAgent:
         self.builder = VideoGraphBuilder(self.paths)
         self.model_client = model_client or OpenAICompatibleModelClient()
         self.planner = GraphAgentPlanner(self.model_client)
+        self.verifier = GraphAgentVerifier(self.model_client)
         self._video_sessions: dict[str, GraphAgentVideoSession] = {}
 
     def answer_vqa_row(self, row: dict[str, Any], *, max_steps: int = 6) -> GraphAgentResult:

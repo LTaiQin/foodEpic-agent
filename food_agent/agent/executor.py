@@ -8,13 +8,15 @@ from typing import Any
 
 from food_agent.agent.planner import GraphAgentPlanner, PlannerDecision
 from food_agent.agent.state import AgentState
+from food_agent.agent.verifier import GraphAgentVerifier
 from food_agent.tools import AgentToolbox
 
 
 class GraphAgentExecutor:
-    def __init__(self, toolbox: AgentToolbox, planner: GraphAgentPlanner):
+    def __init__(self, toolbox: AgentToolbox, planner: GraphAgentPlanner, verifier: GraphAgentVerifier | None = None):
         self.toolbox = toolbox
         self.planner = planner
+        self.verifier = verifier or GraphAgentVerifier()
 
     def execute(self, state: AgentState) -> AgentState:
         self.toolbox.set_runtime_context(question=state.question, inputs_json=state.inputs_json)
@@ -28,6 +30,16 @@ class GraphAgentExecutor:
             state.plan_summary = decision.thought
             self._record_planner_reflection(state, decision)
             if decision.done and decision.tool == "finish":
+                verification = self.verifier.verify(state=state)
+                state.add_memory(f"verifier={verification.summary}")
+                if not verification.sufficient:
+                    state.replace_open_questions(
+                        state.open_questions + [item for item in verification.missing_evidence_types if item not in state.open_questions]
+                    )
+                    for conflict in verification.conflicts:
+                        state.add_open_question(f"conflict:{conflict}")
+                    state.add_hypothesis(f"verifier_blocked_finish={verification.recommend_next_action}")
+                    continue
                 finish_payload = self.toolbox.finish(**decision.args)
                 self._apply_finish(state, finish_payload)
                 state.record_tool("finish", decision.args, self._summarize(finish_payload), raw_result=finish_payload)
@@ -105,6 +117,8 @@ class GraphAgentExecutor:
     def _update_reasoning_after_tool(self, state: AgentState, tool_name: str, result: dict[str, Any]) -> None:
         if result.get("nodes") or result.get("matches") or result.get("totals") or result.get("artifact_path") or result.get("artifact_paths"):
             state.prune_open_question("need_disambiguating_evidence")
+        if state.retrieved_frames or state.retrieved_nodes or state.evidence_bundle:
+            state.prune_open_question("need_initial_observation")
         if tool_name in {"query_time", "sample_sparse_frames", "extract_frames_for_range", "sample_frames_around_peaks"}:
             if state.retrieved_frames or state.retrieved_nodes:
                 state.prune_open_question("need_time_localization")
