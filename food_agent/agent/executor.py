@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from food_agent.agent.planner import GraphAgentPlanner, PlannerDecision
@@ -18,6 +19,7 @@ class GraphAgentExecutor:
     def execute(self, state: AgentState) -> AgentState:
         self.toolbox.set_runtime_context(question=state.question, inputs_json=state.inputs_json)
         hints = self.toolbox.default_hints(state.question, state.inputs_json)
+        self._seed_reusable_memory(state, hints)
         for step_index in range(state.max_steps):
             state.current_step = step_index
             decision = self.planner.next_action(state=state, tool_schemas=self.toolbox.tool_schemas(), hints=hints)
@@ -143,6 +145,7 @@ class GraphAgentExecutor:
             if summary:
                 state.add_evidence(summary)
                 state.add_memory(summary)
+            self._auto_write_visual_observation(state, result)
         if tool_name in {"run_ocr_on_image", "run_ocr_on_region"}:
             reading = result.get("reading")
             text = result.get("text")
@@ -151,6 +154,7 @@ class GraphAgentExecutor:
                 state.add_memory(f"ocr_reading={reading}")
             if text and text != reading:
                 state.add_memory(f"ocr_text={text}")
+            self._auto_write_ocr_observation(state, tool_name, result)
         if tool_name == "detect_audio_peaks":
             peaks = result.get("peaks")
             if isinstance(peaks, list):
@@ -161,6 +165,7 @@ class GraphAgentExecutor:
                     state.add_memory(
                         f"audio_peak time={peak.get('time_s')} score={peak.get('score')}"
                     )
+                self._auto_write_audio_peaks(state, peaks)
         if tool_name == "rank_choices_from_state":
             best_index = result.get("best_index")
             scores = result.get("scores")
@@ -268,7 +273,7 @@ class GraphAgentExecutor:
         if node.get("start_time") is not None:
             end_time = node.get("end_time") if node.get("end_time") is not None else node.get("start_time")
             parts.append(f"time={node.get('start_time'):.3f}-{end_time:.3f}")
-        for key in ("text", "label", "object_name", "event_type", "source", "scene_location", "target_object", "target_location"):
+        for key in ("text", "label", "object_name", "event_type", "source", "scene_location", "target_object", "target_location", "reading", "summary"):
             value = attrs.get(key)
             if value:
                 parts.append(f"{key}={value}")
@@ -296,6 +301,124 @@ class GraphAgentExecutor:
             return "inspection; " + "; ".join(parts)
         raw = str(payload.get("raw_output") or "").strip()
         return f"inspection; raw={raw[:300]}" if raw else ""
+
+    def _seed_reusable_memory(self, state: AgentState, hints: dict[str, Any]) -> None:
+        times = [float(value) for value in hints.get("times") or []] + [float(value) for value in hints.get("input_times") or []]
+        start_time = max(0.0, min(times) - 3.0) if times else None
+        end_time = max(times) + 3.0 if times else None
+        payload = self.toolbox.query_time(start_time=start_time, end_time=end_time, limit=24)
+        nodes = payload.get("nodes") if isinstance(payload, dict) else []
+        if not isinstance(nodes, list):
+            return
+        reusable_types = {"timeline_event", "observation", "ocr_reading", "state_change", "region", "audio_event"}
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            if str(node.get("node_type") or "") not in reusable_types:
+                continue
+            state.add_node_result(node)
+            evidence = self._node_to_evidence(node)
+            if evidence:
+                state.add_evidence(evidence)
+                state.add_memory(f"reuse:{evidence}")
+
+    def _auto_write_visual_observation(self, state: AgentState, payload: dict[str, Any]) -> None:
+        label = str(
+            payload.get("possible_step")
+            or payload.get("ongoing_action")
+            or payload.get("target_object")
+            or "agent visual observation"
+        ).strip()
+        if not label:
+            return
+        attributes = {
+            key: payload.get(key)
+            for key in ("ongoing_action", "possible_step", "target_object", "target_location", "state_change_hint", "answer_hint", "raw_output")
+            if payload.get(key)
+        }
+        image_path = state.retrieved_frames[-1] if state.retrieved_frames else ""
+        time_s = self._infer_time_from_artifact(image_path)
+        keywords = self._keywords_from_strings([label, *attributes.values()])
+        if len(state.retrieved_frames) >= 2:
+            summary = "; ".join(f"{key}={value}" for key, value in attributes.items()) or label
+            result = self.toolbox.write_timeline_summary(
+                label=label,
+                start_time=time_s,
+                end_time=time_s,
+                summary=summary,
+                evidence_paths=state.retrieved_frames[-12:],
+                keywords=keywords,
+            )
+            self._merge_result_into_state(state, "write_timeline_summary", result)
+            return
+        if image_path:
+            result = self.toolbox.write_frame_observation(
+                frame_path=image_path,
+                time_s=time_s,
+                label=label,
+                observation=attributes,
+                keywords=keywords,
+            )
+            self._merge_result_into_state(state, "write_frame_observation", result)
+
+    def _auto_write_ocr_observation(self, state: AgentState, tool_name: str, payload: dict[str, Any]) -> None:
+        reading = str(payload.get("reading") or "").strip()
+        if not reading:
+            return
+        last_trace = state.tool_trace[-1] if state.tool_trace else {}
+        args = last_trace.get("args") if isinstance(last_trace, dict) else {}
+        image_path = str(payload.get("artifact_path") or (args.get("image_path") if isinstance(args, dict) else "") or (state.retrieved_frames[-1] if state.retrieved_frames else ""))
+        bbox = args.get("bbox") if isinstance(args, dict) else None
+        time_s = self._infer_time_from_artifact(image_path)
+        result = self.toolbox.write_ocr_reading(
+            label="ocr reading",
+            reading=reading,
+            time_s=time_s,
+            image_path=image_path or None,
+            bbox=bbox,
+            attributes={"text": payload.get("text"), "source_tool": tool_name},
+            keywords=self._keywords_from_strings([reading, payload.get("text")]),
+        )
+        self._merge_result_into_state(state, "write_ocr_reading", result)
+
+    def _auto_write_audio_peaks(self, state: AgentState, peaks: list[dict[str, Any]]) -> None:
+        for peak in peaks[:3]:
+            if not isinstance(peak, dict) or peak.get("time_s") is None:
+                continue
+            result = self.toolbox.write_audio_event(
+                label=f"audio peak {float(peak['time_s']):.3f}s",
+                start_time=float(peak.get("window_start") or peak["time_s"]),
+                end_time=float(peak.get("window_end") or peak["time_s"]),
+                attributes={"score": peak.get("score"), "peak_time": peak.get("time_s")},
+                evidence_paths=[],
+                keywords=["audio_peak"],
+            )
+            self._merge_result_into_state(state, "write_audio_event", result)
+
+    def _infer_time_from_artifact(self, path: str) -> float | None:
+        if not path:
+            return None
+        match = re.search(r"_(\d+\.\d+)s\.(?:jpg|jpeg|png|webp)$", path)
+        if not match:
+            return None
+        try:
+            return float(match.group(1))
+        except ValueError:
+            return None
+
+    def _keywords_from_strings(self, values: list[Any]) -> list[str]:
+        tokens: set[str] = set()
+        for value in values:
+            if value is None:
+                continue
+            text = str(value).strip().lower()
+            if not text:
+                continue
+            tokens.add(text)
+            for part in re.findall(r"[a-zA-Z0-9]+|[\u4e00-\u9fff]+", text):
+                if len(part) >= 2:
+                    tokens.add(part)
+        return sorted(tokens)
 
     def _summarize(self, result: Any) -> str:
         if isinstance(result, dict):
