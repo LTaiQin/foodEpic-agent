@@ -16,6 +16,7 @@ class GraphAgentExecutor:
         self.planner = planner
 
     def execute(self, state: AgentState) -> AgentState:
+        self.toolbox.set_runtime_context(question=state.question, inputs_json=state.inputs_json)
         hints = self.toolbox.default_hints(state.question, state.inputs_json)
         for step_index in range(state.max_steps):
             state.current_step = step_index

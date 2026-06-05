@@ -30,6 +30,8 @@ class AgentToolbox:
         self.paths = paths
         self.model_client = model_client
         self.video_id = video_id
+        self.runtime_question = ""
+        self.runtime_inputs_json = "{}"
         self.graph = GraphToolbox(store)
         self.state_store = FoodStateStore(self.paths.output_root / "event_index")
         self.spatial_store = SpatialContextStore(self.paths.output_root / "event_index")
@@ -210,6 +212,10 @@ class AgentToolbox:
         if fn is None:
             raise RuntimeError(f"unknown tool: {tool_name}")
         return fn(**self._normalize_args(tool_name, args))
+
+    def set_runtime_context(self, *, question: str, inputs_json: str) -> None:
+        self.runtime_question = str(question or "")
+        self.runtime_inputs_json = str(inputs_json or "{}")
 
     def query_time(self, start_time: float | None = None, end_time: float | None = None, limit: int = 20) -> dict[str, Any]:
         nodes = self.graph.query_time(video_id=self.video_id, start_time=start_time, end_time=end_time, limit=limit)
@@ -530,7 +536,7 @@ class AgentToolbox:
         return {"artifact_paths": [path.as_posix() for path in paths], "start_time": start_time, "end_time": end_time}
 
     def extract_input_reference_frames(self, tag: str = "inputs") -> dict[str, Any]:
-        payload = self.default_hints("", "{}").get("inputs")
+        payload = self.default_hints(self.runtime_question, self.runtime_inputs_json).get("inputs")
         if not payload:
             payload = {}
         references = self._extract_image_like_inputs(payload)
