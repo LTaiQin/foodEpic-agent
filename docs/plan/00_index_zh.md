@@ -32,6 +32,7 @@
 - [10_graph_tool_agent_execution_plan_zh.md](10_graph_tool_agent_execution_plan_zh.md)：工具驱动、图谱记忆、原始视频可回查的真实 agent 实施主线。
 - [11_tool_driven_graph_agent_architecture_zh.md](11_tool_driven_graph_agent_architecture_zh.md)：图谱只做外部记忆层、原始视频始终可回查、LLM 通过工具自主检索证据的主架构约束。
 - [12_autonomous_tool_graph_agent_plan_zh.md](12_autonomous_tool_graph_agent_plan_zh.md)：把当前系统推进成“模型只拿问题和工具，不拿整理证据”的自主检索型 agent 的详细实施文档。
+- [13_complete_agent_target_spec_zh.md](13_complete_agent_target_spec_zh.md)：完整 agent 的最终目标规范，覆盖系统形态、所有功能模块、状态字段、恢复策略、验证标准和完成定义。
 
 ## 当前本地状态
 
