@@ -55,6 +55,26 @@ class AgentState:
         if text and text not in self.working_memory:
             self.working_memory.append(text)
 
+    def add_hypothesis(self, text: str) -> None:
+        if text and text not in self.hypotheses:
+            self.hypotheses.append(text)
+
+    def add_open_question(self, text: str) -> None:
+        if text and text not in self.open_questions:
+            self.open_questions.append(text)
+
+    def prune_open_question(self, text: str) -> None:
+        if not text:
+            return
+        self.open_questions = [item for item in self.open_questions if item != text]
+
+    def replace_open_questions(self, items: list[str]) -> None:
+        deduped: list[str] = []
+        for item in items:
+            if item and item not in deduped:
+                deduped.append(item)
+        self.open_questions = deduped[-20:]
+
     def inputs_payload(self) -> dict[str, Any]:
         try:
             payload = json.loads(self.inputs_json or "{}")

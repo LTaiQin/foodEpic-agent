@@ -20,10 +20,13 @@ class GraphAgentExecutor:
         self.toolbox.set_runtime_context(question=state.question, inputs_json=state.inputs_json)
         hints = self.toolbox.default_hints(state.question, state.inputs_json)
         self._seed_reusable_memory(state, hints)
+        self._initialize_reasoning_state(state, hints)
         for step_index in range(state.max_steps):
             state.current_step = step_index
+            self._refresh_open_questions_before_planning(state)
             decision = self.planner.next_action(state=state, tool_schemas=self.toolbox.tool_schemas(), hints=hints)
             state.plan_summary = decision.thought
+            self._record_planner_reflection(state, decision)
             if decision.done and decision.tool == "finish":
                 finish_payload = self.toolbox.finish(**decision.args)
                 self._apply_finish(state, finish_payload)
@@ -39,6 +42,86 @@ class GraphAgentExecutor:
     def _apply_tool_result(self, state: AgentState, decision: PlannerDecision, result: dict[str, Any]) -> None:
         state.record_tool(decision.tool, decision.args, self._summarize(result), raw_result=result)
         self._merge_result_into_state(state, decision.tool, result)
+        self._update_reasoning_after_tool(state, decision.tool, result)
+
+    def _initialize_reasoning_state(self, state: AgentState, hints: dict[str, Any]) -> None:
+        state.add_hypothesis(f"task_family={state.task_family}")
+        if hints.get("times") or hints.get("input_times"):
+            state.add_open_question("need_time_localization")
+        if hints.get("bbox"):
+            state.add_open_question("need_region_grounding")
+        if hints.get("ocr_keyword"):
+            state.add_open_question("need_ocr_reading")
+        if hints.get("state_keyword"):
+            state.add_open_question("need_state_evidence")
+        if hints.get("location_keyword"):
+            state.add_open_question("need_location_evidence")
+        if not state.open_questions:
+            state.add_open_question("need_disambiguating_evidence")
+
+    def _refresh_open_questions_before_planning(self, state: AgentState) -> None:
+        refreshed: list[str] = []
+        if not state.evidence_bundle:
+            refreshed.append("need_disambiguating_evidence")
+        if not any(item.startswith("ocr_reading=") for item in state.working_memory):
+            if any(token in state.question.lower() for token in ("weight", "gram", "grams", "read", "number", "digit")):
+                refreshed.append("need_ocr_reading")
+        if not any("target_location=" in item or "scene_location=" in item for item in state.evidence_bundle + state.working_memory):
+            if any(token in state.question.lower() for token in ("where", "location", "left", "right", "front", "behind")):
+                refreshed.append("need_location_evidence")
+        if not any("state_change_hint=" in item or "type=state_change" in item for item in state.evidence_bundle + state.working_memory):
+            if any(token in state.question.lower() for token in ("state", "become", "change", "cooked", "mixed", "done")):
+                refreshed.append("need_state_evidence")
+        if state.question.lower() and not state.retrieved_frames and not state.retrieved_nodes:
+            refreshed.append("need_initial_observation")
+        if refreshed:
+            merged = state.open_questions + [item for item in refreshed if item not in state.open_questions]
+            state.replace_open_questions(merged)
+
+    def _record_planner_reflection(self, state: AgentState, decision: PlannerDecision) -> None:
+        if decision.thought:
+            state.add_memory(f"planner_thought={decision.thought}")
+        if decision.tool:
+            state.add_hypothesis(f"plan_step={state.current_step}; tool={decision.tool}")
+        tool = decision.tool
+        if tool in {"query_time", "sample_sparse_frames", "extract_frames_for_range", "sample_frames_around_peaks"}:
+            state.prune_open_question("need_time_localization")
+            state.prune_open_question("need_initial_observation")
+        if tool in {"query_region", "render_bbox_overlay", "extract_region_with_context", "resolve_bbox_reference"}:
+            state.prune_open_question("need_region_grounding")
+        if tool in {"query_ocr", "run_ocr_on_image", "run_ocr_on_region"}:
+            state.prune_open_question("need_ocr_reading")
+        if tool in {"query_state", "write_state_change", "inspect_visual_evidence"}:
+            state.prune_open_question("need_state_evidence")
+        if tool in {"query_location", "infer_viewpoint_choice", "infer_named_fixture_direction", "infer_gaze_target_with_context"}:
+            state.prune_open_question("need_location_evidence")
+
+    def _update_reasoning_after_tool(self, state: AgentState, tool_name: str, result: dict[str, Any]) -> None:
+        if result.get("nodes") or result.get("matches") or result.get("totals") or result.get("artifact_path") or result.get("artifact_paths"):
+            state.prune_open_question("need_disambiguating_evidence")
+        if tool_name in {"query_time", "sample_sparse_frames", "extract_frames_for_range", "sample_frames_around_peaks"}:
+            if state.retrieved_frames or state.retrieved_nodes:
+                state.prune_open_question("need_time_localization")
+                state.prune_open_question("need_initial_observation")
+        if tool_name in {"query_region", "render_bbox_overlay", "extract_region_with_context", "resolve_bbox_reference"}:
+            if state.retrieved_frames or result.get("association_id") or result.get("tracks"):
+                state.prune_open_question("need_region_grounding")
+        if tool_name in {"query_ocr", "run_ocr_on_image", "run_ocr_on_region"}:
+            if result.get("reading") or result.get("text") or any(item.startswith("ocr_reading=") for item in state.working_memory):
+                state.prune_open_question("need_ocr_reading")
+                state.add_hypothesis("ocr_evidence_collected")
+        if tool_name in {"query_state", "inspect_visual_evidence", "write_state_change"}:
+            if any("state_change_hint=" in item for item in state.evidence_bundle + state.working_memory):
+                state.prune_open_question("need_state_evidence")
+                state.add_hypothesis("state_evidence_collected")
+        if tool_name in {"query_location", "infer_viewpoint_choice", "infer_named_fixture_direction", "infer_gaze_target_with_context"}:
+            if any("target_location=" in item or "scene_location=" in item for item in state.evidence_bundle + state.working_memory):
+                state.prune_open_question("need_location_evidence")
+                state.add_hypothesis("location_evidence_collected")
+        if tool_name == "rank_choices_from_state" and result.get("best_index") is not None:
+            state.add_hypothesis(f"candidate_answer_index={result.get('best_index')}")
+        if tool_name == "finish" or result.get("done"):
+            state.replace_open_questions([])
 
     def _merge_result_into_state(self, state: AgentState, tool_name: str, result: dict[str, Any]) -> None:
         nodes = result.get("nodes")
