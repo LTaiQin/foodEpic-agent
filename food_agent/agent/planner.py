@@ -98,6 +98,9 @@ class GraphAgentPlanner:
         last_result = last_tool.get("raw_result") if isinstance(last_tool, dict) else {}
         used_tools = [entry.get("tool") for entry in state.tool_trace if isinstance(entry, dict)]
         open_questions = list(getattr(state, "open_questions", []) or [])
+        candidate = self._select_state_driven_candidate(state=state, hints=hints, used_tools=used_tools)
+        if candidate is not None:
+            return candidate
         if isinstance(last_result, dict) and last_tool.get("tool") == "count_visual_candidates" and last_result.get("best_index") is not None:
             best_index = int(last_result["best_index"])
             return PlannerDecision(
@@ -899,6 +902,223 @@ class GraphAgentPlanner:
                 "limit": 12,
             },
         )
+
+    def _select_state_driven_candidate(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        used_tools: list[str],
+    ) -> PlannerDecision | None:
+        candidates = self._build_state_driven_candidates(state=state, hints=hints, used_tools=used_tools)
+        if not candidates:
+            return None
+        return sorted(candidates, key=lambda item: (int(item["priority"]), str(item["tool"])))[0]["decision"]
+
+    def _build_state_driven_candidates(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        used_tools: list[str],
+    ) -> list[dict[str, Any]]:
+        candidates: list[dict[str, Any]] = []
+        open_questions = list(getattr(state, "open_questions", []) or [])
+        recent_failures = [item for item in getattr(state, "tool_failures", []) if isinstance(item, dict)]
+        recent_ineffective = [item for item in getattr(state, "ineffective_tools", []) if isinstance(item, dict)]
+        blocked_tools = {
+            str(item.get("tool"))
+            for item in (recent_failures[-5:] + recent_ineffective[-5:])
+            if item.get("tool")
+        }
+        combined_times = sorted([float(value) for value in hints.get("times") or []] + [float(value) for value in hints.get("input_times") or []])
+        bbox = hints.get("bbox")
+        ingredient_name = hints.get("ingredient_name")
+        state_keyword = hints.get("state_keyword")
+        location_keyword = hints.get("location_keyword")
+        ocr_keyword = hints.get("ocr_keyword")
+        object_hint = hints.get("object_hint")
+
+        def add_candidate(priority: int, thought: str, tool: str, args: dict[str, Any]) -> None:
+            if tool in blocked_tools:
+                return
+            if tool in used_tools and tool not in {"query_time", "sample_sparse_frames", "extract_frames_for_range"}:
+                return
+            candidates.append(
+                {
+                    "priority": priority,
+                    "tool": tool,
+                    "decision": PlannerDecision(thought=thought, tool=tool, args=args),
+                }
+            )
+
+        if "need_ocr_reading" in open_questions:
+            if bbox and state.retrieved_frames:
+                add_candidate(
+                    10,
+                    "当前最缺 OCR 读数，优先对局部候选区域做 OCR。",
+                    "run_ocr_on_region",
+                    {
+                        "image_path": state.retrieved_frames[-1],
+                        "bbox": bbox,
+                        "expand_ratio": 0.35,
+                        "tag": f"{state.task_family}_state_ocr",
+                    },
+                )
+            if state.retrieved_frames:
+                add_candidate(
+                    20,
+                    "当前最缺 OCR 读数，退而求其次对整图做 OCR。",
+                    "run_ocr_on_image",
+                    {"image_path": state.retrieved_frames[-1]},
+                )
+            if ocr_keyword:
+                add_candidate(
+                    30,
+                    "当前最缺 OCR 读数，先检索已有 OCR 记忆。",
+                    "query_ocr",
+                    {
+                        "keyword": str(ocr_keyword),
+                        "start_time": min(combined_times) if combined_times else None,
+                        "end_time": max(combined_times) if combined_times else None,
+                        "limit": 12,
+                    },
+                )
+        if "need_region_grounding" in open_questions and bbox and state.retrieved_frames:
+            add_candidate(
+                15,
+                "当前最缺区域定位证据，先画框确认目标。",
+                "render_bbox_overlay",
+                {"image_path": state.retrieved_frames[-1], "bbox": bbox, "tag": f"{state.task_family}_state_bbox"},
+            )
+            add_candidate(
+                25,
+                "当前最缺区域定位证据，再补局部上下文图。",
+                "extract_region_with_context",
+                {"image_path": state.retrieved_frames[-1], "bbox": bbox, "expand_ratio": 0.35, "tag": f"{state.task_family}_state_region"},
+            )
+            if combined_times:
+                add_candidate(
+                    35,
+                    "当前最缺区域定位证据，尝试从 bbox 解析到 object track。",
+                    "resolve_bbox_reference",
+                    {"bbox": bbox, "reference_time": combined_times[0], "limit": 5},
+                )
+        if "need_state_evidence" in open_questions:
+            add_candidate(
+                18,
+                "当前最缺状态变化证据，先检索状态记忆。",
+                "query_state",
+                {
+                    "state_keyword": str(state_keyword or "state"),
+                    "start_time": min(combined_times) if combined_times else None,
+                    "end_time": max(combined_times) if combined_times else None,
+                    "limit": 12,
+                },
+            )
+            if state.retrieved_frames:
+                add_candidate(
+                    28,
+                    "当前最缺状态变化证据，补一次视觉观察。",
+                    "inspect_visual_evidence",
+                    {
+                        "prompt": (
+                            "请保守判断这组图像中的状态变化、关键动作和对象。"
+                            '输出 JSON，字段固定为 {"ongoing_action":"","possible_step":"","target_object":"","state_change_hint":"","answer_hint":"","confidence":0.0}。'
+                        ),
+                        "image_paths": state.retrieved_frames[-6:],
+                    },
+                )
+        if "need_location_evidence" in open_questions:
+            add_candidate(
+                18,
+                "当前最缺位置证据，先检索空间位置记忆。",
+                "query_location",
+                {
+                    "location_keyword": str(location_keyword or "location"),
+                    "start_time": min(combined_times) if combined_times else None,
+                    "end_time": max(combined_times) if combined_times else None,
+                    "limit": 12,
+                },
+            )
+            if combined_times and state.task_family in {"3d_perception_fixture_location", "gaze_gaze_estimation"}:
+                add_candidate(
+                    24,
+                    "当前最缺位置证据，补当前时刻的空间上下文。",
+                    "query_spatial_context",
+                    {"time_s": combined_times[0], "object_name": None, "limit": 12},
+                )
+        if "need_time_localization" in open_questions or "need_initial_observation" in open_questions:
+            if combined_times:
+                add_candidate(
+                    12,
+                    "当前最缺时间定位/初始观察，先检索时间窗口记忆。",
+                    "query_time",
+                    {"start_time": min(combined_times), "end_time": max(combined_times), "limit": 20},
+                )
+                add_candidate(
+                    22,
+                    "当前最缺时间定位/初始观察，回看原始视频做稀疏抽帧。",
+                    "sample_sparse_frames",
+                    {
+                        "start_time": max(0.0, min(combined_times) - 2.0),
+                        "end_time": max(combined_times) + 2.0,
+                        "sample_count": 4,
+                        "tag": f"{state.task_family}_state_frames",
+                    },
+                )
+        if "need_disambiguating_evidence" in open_questions:
+            if object_hint and bbox is None:
+                add_candidate(
+                    26,
+                    "当前缺少区分性证据，先检索对象/区域记忆。",
+                    "query_region",
+                    {
+                        "object_hint": str(object_hint),
+                        "start_time": min(combined_times) if combined_times else None,
+                        "end_time": max(combined_times) if combined_times else None,
+                        "limit": 12,
+                    },
+                )
+            if ingredient_name and state.task_family == "ingredient_ingredient_weight" and combined_times:
+                add_candidate(
+                    16,
+                    "当前缺少区分性证据，先查结构化称量记录。",
+                    "query_ingredient_measurement",
+                    {
+                        "ingredient_name": str(ingredient_name),
+                        "start_time": min(combined_times),
+                        "end_time": max(combined_times),
+                        "limit": 10,
+                    },
+                )
+            if state.task_family.startswith("recipe_"):
+                add_candidate(
+                    16,
+                    "当前缺少区分性证据，先检索 recipe_step 事件。",
+                    "query_event",
+                    {
+                        "event_types": ["recipe_step"],
+                        "start_time": min(combined_times) if combined_times else None,
+                        "end_time": max(combined_times) if combined_times else None,
+                        "limit": 20,
+                    },
+                )
+        if "need_alternative_evidence_path" in open_questions and state.retrieved_frames:
+            add_candidate(
+                40,
+                "当前路径无效或失败，补一次视觉检查尝试换证据源。",
+                "inspect_visual_evidence",
+                {
+                    "prompt": (
+                        "已有路径失败或空转。"
+                        "请保守补充当前图像中的对象、位置、动作、状态变化或读数。"
+                        '输出 JSON，字段固定为 {"target_object":"","target_location":"","ongoing_action":"","state_change_hint":"","reading":"","answer_hint":"","confidence":0.0}。'
+                    ),
+                    "image_paths": state.retrieved_frames[-6:],
+                },
+            )
+        return candidates
 
     def _enforce_task_requirements(self, *, state: AgentState, hints: dict[str, Any], decision: PlannerDecision) -> PlannerDecision:
         used_tools = [entry.get("tool") for entry in state.tool_trace if isinstance(entry, dict)]
