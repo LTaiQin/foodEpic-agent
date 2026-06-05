@@ -275,13 +275,25 @@ class GraphAgentPlanner:
                 },
             )
         if state.current_step <= 1 and state.task_family == "nutrition_image_nutrition_estimation":
+            return PlannerDecision(
+                thought="多图营养题先提取 inputs_json 中的跨视频参考图。",
+                tool="extract_input_reference_frames",
+                args={"tag": f"{state.task_family}_inputs"},
+            )
+        if state.current_step == 2 and state.task_family == "nutrition_image_nutrition_estimation" and state.retrieved_frames:
+            return PlannerDecision(
+                thought="先识别每张参考图里展示的食材，避免只按选项名字硬比营养。",
+                tool="identify_image_ingredients",
+                args={"image_paths": state.retrieved_frames[-10:]},
+            )
+        if state.current_step == 3 and state.task_family == "nutrition_image_nutrition_estimation":
             nutrient = "carbs" if "carb" in state.question.lower() else "calories"
             return PlannerDecision(
-                thought="多图营养题优先直接比较候选食材的结构化营养字段。",
+                thought="在图像识别确认后，再比较候选食材的结构化营养字段。",
                 tool="compare_choice_nutrition",
                 args={"choices": [str(choice) for choice in state.choices], "nutrient": nutrient},
             )
-        if state.current_step == 2 and state.task_family == "nutrition_image_nutrition_estimation":
+        if state.current_step == 4 and state.task_family == "nutrition_image_nutrition_estimation":
             return PlannerDecision(
                 thought="已经得到各候选食材的营养比较结果，直接结束。",
                 tool="rank_choices_from_state",
@@ -325,6 +337,37 @@ class GraphAgentPlanner:
                     "reference_time": combined_times[0],
                     "choices": [str(choice) for choice in state.choices],
                     "threshold_s": 150.0,
+                },
+            )
+        if state.current_step <= 1 and state.task_family == "gaze_gaze_estimation" and combined_times:
+            return PlannerDecision(
+                thought="注视目标题先抽取当前瞬时视角关键帧。",
+                tool="extract_frames_for_range",
+                args={
+                    "start_time": max(0.0, min(combined_times)),
+                    "end_time": max(combined_times),
+                    "stride_s": 0.3,
+                    "max_frames": 3,
+                    "tag": f"{state.task_family}_view",
+                },
+            )
+        if state.current_step == 2 and state.task_family == "gaze_gaze_estimation" and combined_times:
+            return PlannerDecision(
+                thought="再查询该时刻附近的空间候选与 gaze priming 上下文。",
+                tool="query_spatial_context",
+                args={"time_s": combined_times[0], "object_name": None, "limit": 12},
+            )
+        if state.current_step == 3 and state.task_family == "gaze_gaze_estimation" and state.retrieved_frames:
+            last_result = state.tool_trace[-1].get("raw_result") if state.tool_trace else {}
+            spatial_context = last_result if isinstance(last_result, dict) else {}
+            return PlannerDecision(
+                thought="结合视角图像与空间上下文，对注视目标做专用判断。",
+                tool="infer_gaze_target_with_context",
+                args={
+                    "question": state.question,
+                    "choices": [str(choice) for choice in state.choices],
+                    "image_paths": state.retrieved_frames[-3:],
+                    "spatial_context": spatial_context,
                 },
             )
         if state.current_step == 1 and state.task_family.startswith("recipe_"):
@@ -383,17 +426,23 @@ class GraphAgentPlanner:
         if state.current_step == 2 and state.task_family in {"3d_perception_fixture_location", "gaze_gaze_estimation"} and state.retrieved_frames:
             if state.task_family == "3d_perception_fixture_location":
                 return PlannerDecision(
-                    thought="先识别具名 fixture 在当前厨房语境里最可能对应什么，再映射方向。",
-                    tool="infer_named_fixture_direction",
-                    args={
-                        "question": state.question,
-                        "choices": [str(choice) for choice in state.choices],
-                        "image_paths": state.retrieved_frames[-3:],
-                    },
+                    thought="先查询该时刻附近的 fixture 空间候选。",
+                    tool="query_spatial_context",
+                    args={"time_s": combined_times[0], "object_name": None, "limit": 12},
                 )
             return PlannerDecision(
                 thought="直接根据视角图像在方位/注视目标选项中做视觉定位判断。",
                 tool="infer_viewpoint_choice",
+                args={
+                    "question": state.question,
+                    "choices": [str(choice) for choice in state.choices],
+                    "image_paths": state.retrieved_frames[-3:],
+                },
+            )
+        if state.current_step == 3 and state.task_family == "3d_perception_fixture_location" and state.retrieved_frames:
+            return PlannerDecision(
+                thought="结合当前视角图像和附近 fixture 候选，识别具名设备并映射方向。",
+                tool="infer_named_fixture_direction",
                 args={
                     "question": state.question,
                     "choices": [str(choice) for choice in state.choices],
@@ -624,6 +673,18 @@ class GraphAgentPlanner:
                 )
 
         if state.task_family == "nutrition_image_nutrition_estimation" and decision.tool == "finish":
+            if "extract_input_reference_frames" not in used_tools:
+                return PlannerDecision(
+                    thought="多图营养题在 finish 前必须先提取跨视频参考图。",
+                    tool="extract_input_reference_frames",
+                    args={"tag": f"{state.task_family}_inputs"},
+                )
+            if "identify_image_ingredients" not in used_tools and state.retrieved_frames:
+                return PlannerDecision(
+                    thought="多图营养题在 finish 前必须先识别参考图中的食材。",
+                    tool="identify_image_ingredients",
+                    args={"image_paths": state.retrieved_frames[-10:]},
+                )
             if "compare_choice_nutrition" not in used_tools:
                 nutrient = "carbs" if "carb" in state.question.lower() else "calories"
                 return PlannerDecision(
@@ -720,7 +781,7 @@ class GraphAgentPlanner:
             )
 
         if state.task_family in {"3d_perception_fixture_location", "gaze_gaze_estimation"}:
-            required_tool = "infer_named_fixture_direction" if state.task_family == "3d_perception_fixture_location" else "infer_viewpoint_choice"
+            required_tool = "infer_named_fixture_direction" if state.task_family == "3d_perception_fixture_location" else "infer_gaze_target_with_context"
             if required_tool not in used_tools:
                 if not state.retrieved_frames and combined_times:
                     return PlannerDecision(
@@ -734,14 +795,45 @@ class GraphAgentPlanner:
                             "tag": f"{state.task_family}_view",
                         },
                     )
-                if state.retrieved_frames and decision.tool == "finish":
+                if state.task_family == "3d_perception_fixture_location" and "query_spatial_context" not in used_tools and combined_times:
                     return PlannerDecision(
-                        thought="视角定位题在 finish 前必须先做专用视觉方位选择。",
+                        thought="fixture 方位题在 finish 前必须先查询附近的空间候选。",
+                        tool="query_spatial_context",
+                        args={"time_s": combined_times[0], "object_name": None, "limit": 12},
+                    )
+                if state.task_family == "gaze_gaze_estimation" and "query_spatial_context" not in used_tools and combined_times:
+                    return PlannerDecision(
+                        thought="注视目标题在 finish 前必须先查询该时刻的空间上下文。",
+                        tool="query_spatial_context",
+                        args={"time_s": combined_times[0], "object_name": None, "limit": 12},
+                    )
+                if state.retrieved_frames and decision.tool == "finish":
+                    if state.task_family == "3d_perception_fixture_location":
+                        return PlannerDecision(
+                            thought="视角定位题在 finish 前必须先做具名 fixture 方向判断。",
+                            tool=required_tool,
+                            args={
+                                "question": state.question,
+                                "choices": [str(choice) for choice in state.choices],
+                                "image_paths": state.retrieved_frames[-3:],
+                            },
+                        )
+                    last_spatial = next(
+                        (
+                            entry.get("raw_result")
+                            for entry in reversed(state.tool_trace)
+                            if isinstance(entry, dict) and entry.get("tool") == "query_spatial_context"
+                        ),
+                        {},
+                    )
+                    return PlannerDecision(
+                        thought="注视目标题在 finish 前必须先结合空间上下文做专用判断。",
                         tool=required_tool,
                         args={
                             "question": state.question,
                             "choices": [str(choice) for choice in state.choices],
                             "image_paths": state.retrieved_frames[-3:],
+                            "spatial_context": last_spatial if isinstance(last_spatial, dict) else {},
                         },
                     )
 

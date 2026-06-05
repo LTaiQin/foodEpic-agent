@@ -75,6 +75,11 @@ class AgentToolbox:
                 "arguments": {"choices": "list[str]", "nutrient": "str"},
             },
             {
+                "name": "query_spatial_context",
+                "description": "查询当前时间附近的 object tracks、mask fixtures、gaze priming 和 audio context。",
+                "arguments": {"time_s": "float", "object_name": "str|None", "limit": "int"},
+            },
+            {
                 "name": "get_neighbors",
                 "description": "读取已知节点的邻接边，理解节点关系。",
                 "arguments": {"node_ids": "list[str]", "edge_types": "list[str]|None", "limit": "int"},
@@ -103,6 +108,11 @@ class AgentToolbox:
                 "name": "extract_frames_for_range",
                 "description": "从原视频在指定时间段稀疏抽帧。",
                 "arguments": {"start_time": "float", "end_time": "float", "stride_s": "float", "max_frames": "int", "tag": "str"},
+            },
+            {
+                "name": "extract_input_reference_frames",
+                "description": "根据 inputs_json 中给出的 image/video 引用，跨视频提取对应参考帧。",
+                "arguments": {"tag": "str"},
             },
             {
                 "name": "render_bbox_overlay",
@@ -150,6 +160,16 @@ class AgentToolbox:
                 "name": "infer_named_fixture_direction",
                 "description": "先识别题目中的具名 fixture 在当前厨房语境里最可能对应什么，再映射到钟表方向选项。",
                 "arguments": {"question": "str", "choices": "list[str]", "image_paths": "list[str]"},
+            },
+            {
+                "name": "infer_gaze_target_with_context",
+                "description": "结合当前视角帧和空间上下文，在注视目标候选中做判断。",
+                "arguments": {"question": "str", "choices": "list[str]", "image_paths": "list[str]", "spatial_context": "dict"},
+            },
+            {
+                "name": "identify_image_ingredients",
+                "description": "识别一组参考图里分别是什么食材，用于多图营养对比题。",
+                "arguments": {"image_paths": "list[str]"},
             },
             {
                 "name": "infer_visual_mcq",
@@ -262,6 +282,22 @@ class AgentToolbox:
     def get_neighbors(self, node_ids: list[str], edge_types: list[str] | None = None, limit: int = 50) -> dict[str, Any]:
         edges = self.graph.get_neighbors(node_ids=node_ids, edge_types=edge_types, limit=limit)
         return {"edges": edges, "count": len(edges)}
+
+    def query_spatial_context(self, time_s: float, object_name: str | None = None, limit: int = 20) -> dict[str, Any]:
+        context = self.spatial_store.combined_context(
+            self.video_id,
+            time=float(time_s),
+            object_name=object_name,
+            audio_window=5.0,
+            limit=limit,
+        )
+        return {
+            "object_tracks": context.object_tracks,
+            "object_masks": context.object_masks,
+            "gaze_priming": context.gaze_priming,
+            "audio_events": context.audio_events,
+            "count": len(context.object_tracks) + len(context.object_masks) + len(context.gaze_priming) + len(context.audio_events),
+        }
 
     def compute_nutrition_change(self, start_time: float, end_time: float) -> dict[str, Any]:
         rows = self.state_store.ingredient_interval(self.video_id, start_time, end_time)
@@ -493,6 +529,27 @@ class AgentToolbox:
         )
         return {"artifact_paths": [path.as_posix() for path in paths], "start_time": start_time, "end_time": end_time}
 
+    def extract_input_reference_frames(self, tag: str = "inputs") -> dict[str, Any]:
+        payload = self.default_hints("", "{}").get("inputs")
+        if not payload:
+            payload = {}
+        references = self._extract_image_like_inputs(payload)
+        artifact_paths: list[str] = []
+        items: list[dict[str, Any]] = []
+        for index, item in enumerate(references):
+            video_id = str(item["video_id"])
+            time_s = float(item["time_s"])
+            store = self._ensure_video_store(video_id)
+            node = store.get_node(f"video:{video_id}")
+            if not node:
+                continue
+            video_path = Path(node["attributes"].get("path") or (node.get("evidence_paths") or [None])[0])
+            output_name = f"{self._safe_tag(tag)}_{video_id}_{time_s:09.3f}s_{index:02d}.jpg"
+            path = self.video.extract_frame_at_time(video_path=video_path, time_s=time_s, output_name=output_name)
+            artifact_paths.append(path.as_posix())
+            items.append({"video_id": video_id, "time_s": time_s, "artifact_path": path.as_posix()})
+        return {"artifact_paths": artifact_paths, "items": items, "count": len(items)}
+
     def render_bbox_overlay(self, image_path: str, bbox: list[float], tag: str = "bbox") -> dict[str, Any]:
         source_path = Path(image_path)
         output_name = f"{self._safe_tag(tag)}_{source_path.stem}_bbox.jpg"
@@ -718,6 +775,74 @@ class AgentToolbox:
             "reason": str(payload.get("reason") or text[:300]),
         }
 
+    def infer_gaze_target_with_context(
+        self,
+        question: str,
+        choices: list[str],
+        image_paths: list[str],
+        spatial_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        prompt = (
+            "你在看厨房第一视角视频的瞬时注视片段关键帧。"
+            "请结合图像和给定的空间上下文，判断说话者/佩戴者此时最可能在看哪个目标。"
+            "\n空间上下文中的 fixture、object track 和 gaze priming 只是候选线索，不要脱离图像瞎猜。"
+            f"\n空间上下文: {json.dumps(spatial_context, ensure_ascii=False)}"
+            '\n输出 JSON，字段固定为 {"best_index":0,"answer":"","confidence":0.0,"reason":""}。'
+            f"\n问题: {question}\n选项:\n"
+            + "\n".join(f"{idx}. {choice}" for idx, choice in enumerate(choices))
+        )
+        response = self.model_client.inspect_images(prompt=prompt, image_paths=[Path(path) for path in image_paths], temperature=0.0)
+        text = response.content.strip()
+        try:
+            payload = self.model_client._extract_json_object(text)
+            best_index = self._resolve_choice_index(
+                choices=choices,
+                best_index=payload.get("best_index"),
+                answer=payload.get("answer"),
+            )
+        except Exception:  # noqa: BLE001
+            return self._fallback_rank_choices(question=question, choices=choices, evidence=[json.dumps(spatial_context, ensure_ascii=False)], working_memory=[text])
+        return {
+            "best_index": best_index,
+            "answer": str(payload.get("answer") or choices[best_index]),
+            "confidence": float(payload.get("confidence") or 0.0),
+            "reason": str(payload.get("reason") or text[:300]),
+        }
+
+    def identify_image_ingredients(self, image_paths: list[str]) -> dict[str, Any]:
+        prompt = (
+            "你会看到若干张单独的厨房食材参考图。"
+            "请按输入顺序识别每张图最可能展示的主要食材名称。"
+            "只能输出保守结果。"
+            '\n输出 JSON，字段固定为 {"items":[{"index":0,"ingredient":"","confidence":0.0,"reason":""}]}。'
+        )
+        response = self.model_client.inspect_images(prompt=prompt, image_paths=[Path(path) for path in image_paths], temperature=0.0)
+        text = response.content.strip()
+        try:
+            payload = self.model_client._extract_json_object(text)
+        except Exception:  # noqa: BLE001
+            payload = {"items": []}
+        items = payload.get("items")
+        if not isinstance(items, list):
+            items = []
+        normalized: list[dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            try:
+                index = int(item.get("index"))
+            except Exception:  # noqa: BLE001
+                continue
+            normalized.append(
+                {
+                    "index": index,
+                    "ingredient": str(item.get("ingredient") or "").strip().lower(),
+                    "confidence": float(item.get("confidence") or 0.0),
+                    "reason": str(item.get("reason") or ""),
+                }
+            )
+        return {"items": normalized, "raw_output": text}
+
     def infer_visual_mcq(self, question: str, choices: list[str], image_paths: list[str]) -> dict[str, Any]:
         prompt = (
             "你在看厨房第一视角视频片段抽取出的关键帧，这些图片按时间顺序排列。"
@@ -877,6 +1002,15 @@ class AgentToolbox:
             raise RuntimeError(f"video path missing for video_id={self.video_id}")
         return Path(path)
 
+    def _ensure_video_store(self, video_id: str) -> GraphMemoryStore:
+        root = self.paths.output_root / "graph_memory" / video_id
+        store = GraphMemoryStore(root)
+        if not store.query_nodes(video_id=video_id, limit=1):
+            from food_agent.graph import VideoGraphBuilder
+
+            return VideoGraphBuilder(self.paths).build(video_id)
+        return store
+
     def _safe_tag(self, value: str) -> str:
         compact = re.sub(r"[^a-zA-Z0-9._-]+", "_", value.strip())
         return compact or "artifact"
@@ -977,6 +1111,18 @@ class AgentToolbox:
                         values.append(self._parse_hms(raw))
         return values
 
+    def _extract_image_like_inputs(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for value in payload.values():
+            if not isinstance(value, dict):
+                continue
+            video_id = value.get("id")
+            raw_time = value.get("time")
+            if not video_id or not isinstance(raw_time, str) or ":" not in raw_time:
+                continue
+            items.append({"video_id": str(video_id), "time_s": self._parse_hms(raw_time)})
+        return items
+
     def _extract_ingredient_name(self, question: str) -> str | None:
         lowered = question.strip()
         match = re.search(r"weigh of (.+?) in this video\??$", lowered, flags=re.IGNORECASE)
@@ -1022,6 +1168,7 @@ class AgentToolbox:
             "query_event": ["start_time", "end_time"],
             "query_ingredient_measurement": ["start_time", "end_time"],
             "compute_nutrition_change": ["start_time", "end_time"],
+            "query_spatial_context": ["time_s"],
             "resolve_bbox_reference": ["reference_time"],
             "estimate_object_movement_count": ["reference_time"],
             "estimate_stationary_start": ["reference_time", "threshold_s"],
@@ -1036,6 +1183,7 @@ class AgentToolbox:
             "query_object": ["limit"],
             "query_event": ["limit"],
             "query_ingredient_measurement": ["limit"],
+            "query_spatial_context": ["limit"],
             "resolve_bbox_reference": ["limit"],
             "get_neighbors": ["limit"],
             "extract_frames_for_range": ["max_frames"],
@@ -1053,8 +1201,12 @@ class AgentToolbox:
             normalized["bbox"] = [float(value) for value in normalized["bbox"]]
         if tool_name == "compare_choice_nutrition":
             normalized["choices"] = [str(choice) for choice in normalized.get("choices", [])]
+        if tool_name == "query_spatial_context" and "object_name" in normalized and normalized["object_name"] is not None:
+            normalized["object_name"] = str(normalized["object_name"])
         if tool_name == "inspect_visual_evidence" and "image_paths" in normalized:
             normalized["image_paths"] = [str(path) for path in normalized["image_paths"]]
+        if tool_name == "identify_image_ingredients":
+            normalized["image_paths"] = [str(path) for path in normalized.get("image_paths", [])]
         if tool_name == "rank_choices_from_state":
             normalized["choices"] = [str(choice) for choice in normalized.get("choices", [])]
             normalized["evidence"] = [str(item) for item in normalized.get("evidence", [])]
@@ -1071,6 +1223,9 @@ class AgentToolbox:
             normalized["choices"] = [str(choice) for choice in normalized.get("choices", [])]
             normalized["image_paths"] = [str(path) for path in normalized.get("image_paths", [])]
         if tool_name == "infer_named_fixture_direction":
+            normalized["choices"] = [str(choice) for choice in normalized.get("choices", [])]
+            normalized["image_paths"] = [str(path) for path in normalized.get("image_paths", [])]
+        if tool_name == "infer_gaze_target_with_context":
             normalized["choices"] = [str(choice) for choice in normalized.get("choices", [])]
             normalized["image_paths"] = [str(path) for path in normalized.get("image_paths", [])]
         if tool_name == "infer_visual_mcq":

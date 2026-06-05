@@ -64,6 +64,30 @@ class GraphAgentExecutor:
             summary = "nutrition_change " + ", ".join(f"{key}={value}" for key, value in totals.items())
             state.add_evidence(summary)
             state.add_memory(summary)
+        object_tracks = result.get("object_tracks")
+        object_masks = result.get("object_masks")
+        gaze_priming = result.get("gaze_priming")
+        audio_events = result.get("audio_events")
+        if tool_name == "query_spatial_context":
+            if isinstance(object_tracks, list):
+                for item in object_tracks[:10]:
+                    if not isinstance(item, dict):
+                        continue
+                    state.add_memory(
+                        f"spatial_track object={item.get('object_name')} association_id={item.get('association_id')} "
+                        f"time={item.get('start_time')}-{item.get('end_time')}"
+                    )
+            if isinstance(object_masks, list):
+                for item in object_masks[:10]:
+                    if not isinstance(item, dict):
+                        continue
+                    state.add_memory(
+                        f"spatial_mask fixture={item.get('fixture')} frame={item.get('frame_number')}"
+                    )
+            if isinstance(gaze_priming, list):
+                state.add_memory(f"gaze_priming_count={len(gaze_priming)}")
+            if isinstance(audio_events, list):
+                state.add_memory(f"audio_event_count={len(audio_events)}")
         scores = result.get("scores")
         if tool_name == "compare_choice_nutrition" and isinstance(scores, list):
             for item in scores[:10]:
@@ -142,6 +166,22 @@ class GraphAgentExecutor:
                 f"stationary_best_index={result.get('best_index')} object_name={result.get('object_name')} "
                 f"valid_candidates={result.get('valid_candidates')}"
             )
+        if tool_name == "identify_image_ingredients":
+            items = result.get("items")
+            if isinstance(items, list):
+                for item in items[:10]:
+                    if not isinstance(item, dict):
+                        continue
+                    state.add_memory(
+                        f"identified_image index={item.get('index')} ingredient={item.get('ingredient')} "
+                        f"confidence={item.get('confidence')}"
+                    )
+        if tool_name == "infer_gaze_target_with_context":
+            state.add_memory(
+                f"gaze_best_index={result.get('best_index')} confidence={result.get('confidence')}"
+            )
+            if result.get("reason"):
+                state.add_evidence(f"gaze_reason={result.get('reason')}")
         if tool_name == "infer_viewpoint_choice":
             state.add_memory(
                 f"viewpoint_best_index={result.get('best_index')} confidence={result.get('confidence')}"

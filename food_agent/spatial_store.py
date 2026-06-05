@@ -69,6 +69,11 @@ class SpatialContextStore:
         track_subset = track_subset.sort_values(["start_time", "end_time"]).head(limit)
         mask_subset = masks[masks["video_id"] == video_id].copy()
         if time is not None and not mask_subset.empty:
+            fps = self._video_fps(video_id)
+            if fps:
+                target_frame = float(time) * fps
+                mask_subset["frame_distance"] = mask_subset["frame_number"].apply(lambda value: abs(float(value) - target_frame))
+                mask_subset = mask_subset.sort_values(["frame_distance", "frame_number"], na_position="last")
             mask_subset = mask_subset.head(limit)
         return {
             "video_id": video_id,
