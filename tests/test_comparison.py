@@ -2,6 +2,7 @@ from pathlib import Path
 
 from food_agent.comparison import (
     _extract_json_payload,
+    _extract_question_bbox,
     _extract_evidence_ids_from_text,
     _ingredient_match_score,
     _extract_question_recipe_step_name,
@@ -15,8 +16,14 @@ from food_agent.comparison import (
     parse_model_output,
     rank_choice_hints,
 )
-from food_agent.vqa import VQASample
+from food_agent.vqa import VQAPrediction, VQASample
 from scripts.run_agent_comparison import (
+    PersistentModelError,
+    append_prediction_jsonl,
+    load_latest_predictions_jsonl,
+    load_predictions_jsonl,
+    merge_summary,
+    _should_retry_existing_prediction,
     _prefer_retry_result,
     _should_retry_response,
     load_selected_samples,
@@ -157,7 +164,28 @@ def test_load_selected_samples_group(monkeypatch) -> None:
     }
 
 
-def test_run_one_baseline_continues_on_model_error() -> None:
+def test_load_selected_samples_multimodal_group(monkeypatch) -> None:
+    calls = []
+
+    def fake_load(index_dir: Path, limit: int | None = None, task_family: str | None = None):
+        calls.append((index_dir, limit, task_family))
+        return [make_sample()]
+
+    monkeypatch.setattr("scripts.run_agent_comparison.load_vqa_samples", fake_load)
+    samples = load_selected_samples(Path("/tmp/index"), limit=2, task_family=None, task_family_group="multimodal-core")
+    assert len(samples) == 6
+    assert all(call[1] == 2 for call in calls)
+    assert {call[2] for call in calls} == {
+        "gaze_gaze_estimation",
+        "gaze_interaction_anticipation",
+        "3d_perception_object_location",
+        "3d_perception_object_contents_retrieval",
+        "object_motion_object_movement_counting",
+        "object_motion_stationary_object_localization",
+    }
+
+
+def test_run_one_baseline_pauses_on_model_error_after_retry_budget() -> None:
     class DummyStateStore:
         pass
 
@@ -194,17 +222,241 @@ def test_run_one_baseline_continues_on_model_error() -> None:
     spatial_store = DummySpatialStore()
     spatial_store.combined_context = lambda *args, **kwargs: dummy_state
 
+    try:
+        run_one_baseline(
+            "ours-foodevidence",
+            [make_sample()],
+            BrokenClient(),
+            state_store=state_store,
+            spatial_store=spatial_store,
+            temperature=0.0,
+            max_model_error_attempts=5,
+        )
+        assert False, "expected PersistentModelError"
+    except PersistentModelError as exc:
+        assert exc.prediction.failure_type == "model_error:RuntimeError"
+        assert exc.prediction.prediction == 0
+        assert exc.prediction.attempt_count == 5
+
+
+def test_run_one_baseline_resume_skips_completed_samples(tmp_path: Path) -> None:
+    class DummyStateStore:
+        pass
+
+    class DummySpatialStore:
+        pass
+
+    class DummyClient:
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, messages, temperature=0.0):
+            self.calls += 1
+            return type("Resp", (), {"content": "2"})()
+
+    class DummyState:
+        active_steps = []
+        completed_steps = []
+        next_steps = []
+        added = []
+        pending = []
+        weighed = []
+        evidence_ids = []
+        totals = {}
+        unknown_count = 0
+        audio_events = []
+        gaze_priming = []
+        object_tracks = []
+
+    dummy_state = DummyState()
+    state_store = DummyStateStore()
+    state_store.recipe_state = lambda *args, **kwargs: dummy_state
+    state_store.ingredient_state = lambda *args, **kwargs: dummy_state
+    state_store.ingredient_interval = lambda *args, **kwargs: []
+    state_store.recipe_catalog = lambda *args, **kwargs: []
+    state_store.activity_window = lambda *args, **kwargs: type("ActivityWindow", (), {"activities": []})()
+    state_store.all_video_activities = lambda *args, **kwargs: []
+    state_store.nutrition_delta = lambda *args, **kwargs: dummy_state
+    spatial_store = DummySpatialStore()
+    spatial_store.combined_context = lambda *args, **kwargs: dummy_state
+
+    pred_path = tmp_path / "predictions_resume.jsonl"
+    append_prediction_jsonl(
+        pred_path,
+        VQAPrediction(
+            sample_id="sample",
+            baseline="textonly",
+            task_family="ingredient_ingredient_retrieval",
+            video_id="P01",
+            question="q",
+            choices=["a"],
+            gold=2,
+            prediction=2,
+            correct=True,
+            evidence_ids=[],
+            tool_calls=[],
+            failure_type=None,
+            attempt_count=1,
+        ),
+    )
+
+    client = DummyClient()
     predictions = run_one_baseline(
-        "ours-foodevidence",
+        "textonly",
         [make_sample()],
-        BrokenClient(),
+        client,
         state_store=state_store,
         spatial_store=spatial_store,
         temperature=0.0,
+        pred_path=pred_path,
+        resume=True,
     )
+    assert client.calls == 0
     assert len(predictions) == 1
-    assert predictions[0].failure_type == "model_error:RuntimeError"
-    assert predictions[0].prediction == 0
+    assert predictions[0].sample_id == "sample"
+
+
+def test_run_one_baseline_resume_retries_model_error_samples(tmp_path: Path) -> None:
+    class DummyStateStore:
+        pass
+
+    class DummySpatialStore:
+        pass
+
+    class DummyClient:
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, messages, temperature=0.0):
+            self.calls += 1
+            return type("Resp", (), {"content": "2"})()
+
+    class DummyState:
+        active_steps = []
+        completed_steps = []
+        next_steps = []
+        added = []
+        pending = []
+        weighed = []
+        evidence_ids = []
+        totals = {}
+        unknown_count = 0
+        audio_events = []
+        gaze_priming = []
+        object_tracks = []
+
+    dummy_state = DummyState()
+    state_store = DummyStateStore()
+    state_store.recipe_state = lambda *args, **kwargs: dummy_state
+    state_store.ingredient_state = lambda *args, **kwargs: dummy_state
+    state_store.ingredient_interval = lambda *args, **kwargs: []
+    state_store.recipe_catalog = lambda *args, **kwargs: []
+    state_store.activity_window = lambda *args, **kwargs: type("ActivityWindow", (), {"activities": []})()
+    state_store.all_video_activities = lambda *args, **kwargs: []
+    state_store.nutrition_delta = lambda *args, **kwargs: dummy_state
+    spatial_store = DummySpatialStore()
+    spatial_store.combined_context = lambda *args, **kwargs: dummy_state
+
+    pred_path = tmp_path / "predictions_retry.jsonl"
+    append_prediction_jsonl(
+        pred_path,
+        VQAPrediction(
+            sample_id="sample",
+            baseline="textonly",
+            task_family="ingredient_ingredient_retrieval",
+            video_id="P01",
+            question="q",
+            choices=["a"],
+            gold=2,
+            prediction=0,
+            correct=False,
+            evidence_ids=[],
+            tool_calls=[],
+            failure_type="model_error:RuntimeError",
+            attempt_count=5,
+        ),
+    )
+
+    client = DummyClient()
+    predictions = run_one_baseline(
+        "textonly",
+        [make_sample()],
+        client,
+        state_store=state_store,
+        spatial_store=spatial_store,
+        temperature=0.0,
+        pred_path=pred_path,
+        resume=True,
+        max_model_error_attempts=5,
+    )
+    assert client.calls == 1
+    assert len(predictions) == 1
+    assert predictions[0].failure_type is None
+    assert predictions[0].attempt_count == 1
+
+
+def test_run_one_baseline_pauses_on_persistent_model_error(tmp_path: Path) -> None:
+    class DummyStateStore:
+        pass
+
+    class DummySpatialStore:
+        pass
+
+    class BrokenClient:
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, messages, temperature=0.0):
+            self.calls += 1
+            raise RuntimeError("boom")
+
+    class DummyState:
+        active_steps = []
+        completed_steps = []
+        next_steps = []
+        added = []
+        pending = []
+        weighed = []
+        evidence_ids = []
+        totals = {}
+        unknown_count = 0
+        audio_events = []
+        gaze_priming = []
+        object_tracks = []
+
+    dummy_state = DummyState()
+    state_store = DummyStateStore()
+    state_store.recipe_state = lambda *args, **kwargs: dummy_state
+    state_store.ingredient_state = lambda *args, **kwargs: dummy_state
+    state_store.ingredient_interval = lambda *args, **kwargs: []
+    state_store.recipe_catalog = lambda *args, **kwargs: []
+    state_store.activity_window = lambda *args, **kwargs: type("ActivityWindow", (), {"activities": []})()
+    state_store.all_video_activities = lambda *args, **kwargs: []
+    state_store.nutrition_delta = lambda *args, **kwargs: dummy_state
+    spatial_store = DummySpatialStore()
+    spatial_store.combined_context = lambda *args, **kwargs: dummy_state
+
+    pred_path = tmp_path / "predictions_pause.jsonl"
+    client = BrokenClient()
+    try:
+        run_one_baseline(
+            "textonly",
+            [make_sample()],
+            client,
+            state_store=state_store,
+            spatial_store=spatial_store,
+            temperature=0.0,
+            pred_path=pred_path,
+            resume=False,
+            max_model_error_attempts=5,
+        )
+        assert False, "expected PersistentModelError"
+    except PersistentModelError as exc:
+        assert exc.prediction.failure_type == "model_error:RuntimeError"
+        assert exc.prediction.attempt_count == 5
+    assert client.calls == 5
+    latest = load_latest_predictions_jsonl(pred_path)
+    assert latest["sample"].failure_type == "model_error:RuntimeError"
 
 
 def test_should_retry_response_on_empty_zero_prediction() -> None:
@@ -217,6 +469,63 @@ def test_prefer_retry_result_prefers_valid_evidence() -> None:
     assert _prefer_retry_result(2, ["ingredient:abc/add/0/0"], None) is True
     assert _prefer_retry_result(2, [], None) is True
     assert _prefer_retry_result(0, [], "format_error") is False
+
+
+def test_append_and_load_predictions_jsonl(tmp_path: Path) -> None:
+    pred_path = tmp_path / "predictions.jsonl"
+    prediction = VQAPrediction(
+        sample_id="sample",
+        baseline="textonly",
+        task_family="ingredient_ingredient_retrieval",
+        video_id="P01",
+        question="q",
+        choices=["a"],
+        gold=0,
+        prediction=0,
+        correct=True,
+        evidence_ids=[],
+        tool_calls=[],
+        failure_type=None,
+        attempt_count=1,
+    )
+    append_prediction_jsonl(pred_path, prediction)
+    rows = load_predictions_jsonl(pred_path)
+    assert len(rows) == 1
+    assert rows[0].sample_id == prediction.sample_id
+
+
+def test_load_latest_predictions_jsonl_uses_last_record(tmp_path: Path) -> None:
+    pred_path = tmp_path / "predictions_latest.jsonl"
+    append_prediction_jsonl(
+        pred_path,
+        VQAPrediction("sample", "b", "task", "v", "q", ["x"], 0, 0, False, [], [], "model_error:RuntimeError", 5),
+    )
+    append_prediction_jsonl(
+        pred_path,
+        VQAPrediction("sample", "b", "task", "v", "q", ["x"], 0, 0, True, [], [], None, 1),
+    )
+    latest = load_latest_predictions_jsonl(pred_path)
+    assert latest["sample"].correct is True
+
+
+def test_should_retry_existing_prediction_only_for_model_error() -> None:
+    assert _should_retry_existing_prediction(
+        VQAPrediction("a", "b", "task", "v", "q", ["x"], 0, 0, False, [], [], "model_error:RuntimeError", 5)
+    )
+    assert not _should_retry_existing_prediction(
+        VQAPrediction("a", "b", "task", "v", "q", ["x"], 0, 1, False, [], [], "reasoning_error", 1)
+    )
+
+
+def test_merge_summary_reads_existing_files(tmp_path: Path) -> None:
+    run_dir = tmp_path
+    (run_dir / "predictions_textonly.jsonl").write_text("{}", encoding="utf-8")
+    (run_dir / "metrics_textonly.json").write_text('{"accuracy": 1.0}', encoding="utf-8")
+    (run_dir / "advantage_textonly.json").write_text('{"score": 0.5, "verdict": {"verdict": "not_yet"}}', encoding="utf-8")
+    summary = merge_summary(run_dir, ["textonly", "foodstate"])
+    assert "textonly" in summary
+    assert summary["textonly"]["advantage"] == 0.5
+    assert "foodstate" not in summary
 
 
 def test_token_overlap_score() -> None:
@@ -331,6 +640,11 @@ def test_extract_question_recipe_step_name() -> None:
     assert _extract_question_recipe_step_name(question) == (
         "Add the onions and chopped garlic and brown slowly until tender and golden, about 5 minutes"
     )
+
+
+def test_extract_question_bbox() -> None:
+    question = "Where did I put the object identified by <BBOX 787.036 734.085 972.362 791.85> at <TIME 00:04:47.9 video 1>?"
+    assert _extract_question_bbox(question) == [787.036, 734.085, 972.362, 791.85]
 
 
 def test_collect_evidence_uses_step_focus_for_following_activity() -> None:

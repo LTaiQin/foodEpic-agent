@@ -42,8 +42,10 @@ class ModelConfig:
     model: str
     api_key: str
     base_url: str
+    provider_mode: str = "chat_completions"
     max_retries: int = 3
     retry_backoff_seconds: float = 2.0
+    request_timeout_seconds: float = 120.0
 
     @classmethod
     def from_env(cls) -> "ModelConfig":
@@ -51,8 +53,10 @@ class ModelConfig:
             model=os.environ.get("FOOD_AGENT_MODEL", "gpt-5.4"),
             api_key=os.environ.get("OPENAI_API_KEY", ""),
             base_url=os.environ.get("OPENAI_BASE_URL", "https://www.cctq.ai/v1"),
+            provider_mode=os.environ.get("FOOD_AGENT_PROVIDER_MODE", "chat_completions"),
             max_retries=int(os.environ.get("FOOD_AGENT_MODEL_MAX_RETRIES", "3")),
             retry_backoff_seconds=float(os.environ.get("FOOD_AGENT_MODEL_RETRY_BACKOFF_SECONDS", "2.0")),
+            request_timeout_seconds=float(os.environ.get("FOOD_AGENT_MODEL_TIMEOUT_SECONDS", "120.0")),
         )
 
 

@@ -29,6 +29,7 @@
 - [06_implementation_phases_zh.md](06_implementation_phases_zh.md)：逐阶段代码实现计划、模块、脚本和完成标准。
 - [07_repo_ops_and_commit_zh.md](07_repo_ops_and_commit_zh.md)：GitHub 绑定、SSH、自动验证提交、数据不入库规范。
 - [08_risks_and_decisions_zh.md](08_risks_and_decisions_zh.md)：风险、决策记录、暂缓方向和后续扩展路线。
+- [10_graph_tool_agent_execution_plan_zh.md](10_graph_tool_agent_execution_plan_zh.md)：工具驱动、图谱记忆、原始视频可回查的真实 agent 实施主线。
 
 ## 当前本地状态
 
@@ -59,4 +60,3 @@
 - 有 git commit。
 - 如涉及实验，保存 config、结果和 trace。
 - 如失败，记录失败原因、影响范围和下一步修复方案。
-

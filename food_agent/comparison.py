@@ -18,6 +18,7 @@ JSON_BLOCK_PATTERN = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 EVIDENCE_LINE_PATTERN = re.compile(r"(?:event_id|evidence_ids?)\s*[:=]\s*([^\n]+)", re.IGNORECASE)
 EVIDENCE_TOKEN_PATTERN = re.compile(r"[A-Za-z]+[A-Za-z0-9:_/\-]*")
 TOKEN_PATTERN = re.compile(r"[a-zA-Z]+")
+BBOX_PATTERN = re.compile(r"<BBOX\s+([0-9.\s]+)>", re.IGNORECASE)
 
 TASK_SPECIALIZATION = {
     "ingredient_ingredient_retrieval": "ingredient",
@@ -132,6 +133,7 @@ def collect_evidence(
     recipe_catalog = []
     activity_window = None
     step_focus = None
+    object_reference = []
     video_activities: list[dict[str, Any]] = []
     evidence_ids: list[str] = []
     if ctx.video_ids:
@@ -188,6 +190,10 @@ def collect_evidence(
                             evidence_ids.append(event_id)
     if ctx.video_id:
         video_activities = state_store.all_video_activities(ctx.video_id)
+        bbox = _extract_question_bbox(sample.question)
+        ref_time = ctx.time_point if ctx.time_point is not None else ctx.start_time
+        if bbox:
+            object_reference = spatial_store.resolve_object_reference(ctx.video_id, bbox, time=ref_time, limit=5)
     return {
         "context": ctx,
         "recipe": recipe,
@@ -196,6 +202,7 @@ def collect_evidence(
         "recipe_catalog": recipe_catalog,
         "activity_window": activity_window,
         "step_focus": step_focus,
+        "object_reference": object_reference,
         "video_activities": video_activities,
         "nutrition": nutrition,
         "spatial": spatial,
@@ -496,6 +503,8 @@ def _food_state_text(evidence: dict[str, Any]) -> str:
         parts.append("activity_window=" + json.dumps(evidence["activity_window"].activities[:5], ensure_ascii=False))
     if evidence.get("step_focus"):
         parts.append("step_focus=" + json.dumps(evidence["step_focus"], ensure_ascii=False))
+    if evidence.get("object_reference"):
+        parts.append("object_reference=" + json.dumps(evidence["object_reference"][:3], ensure_ascii=False))
     if ingredient:
         parts.append("added_ingredients=" + json.dumps(ingredient.added[-5:], ensure_ascii=False))
         parts.append("pending_ingredients=" + json.dumps(ingredient.pending[:5], ensure_ascii=False))
@@ -532,6 +541,8 @@ def _ours_evidence_text(sample: VQASample, evidence: dict[str, Any]) -> str:
         blocks.append("activity.window=" + json.dumps(evidence["activity_window"].activities[:5], ensure_ascii=False))
     if evidence.get("step_focus"):
         blocks.append("recipe.step_focus=" + json.dumps(evidence["step_focus"], ensure_ascii=False))
+    if evidence.get("object_reference"):
+        blocks.append("object.reference=" + json.dumps(evidence["object_reference"][:5], ensure_ascii=False))
     if task_family in {"recipe_following_activity_recognition", "recipe_step_recognition"} and evidence.get("video_activities"):
         blocks.append("activity.video_recent=" + json.dumps(evidence["video_activities"][:8], ensure_ascii=False))
     if ingredient:
@@ -628,6 +639,19 @@ def _extract_question_recipe_step_name(question: str) -> str | None:
     if not match:
         return None
     return match.group(1).strip().rstrip(".")
+
+
+def _extract_question_bbox(question: str) -> list[float] | None:
+    match = BBOX_PATTERN.search(question)
+    if not match:
+        return None
+    try:
+        values = [float(value) for value in match.group(1).split()]
+    except ValueError:
+        return None
+    if len(values) != 4:
+        return None
+    return values
 
 
 def _parse_choice_quantity(choice: str) -> tuple[float, str] | None:

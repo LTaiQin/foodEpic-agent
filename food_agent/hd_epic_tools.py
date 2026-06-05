@@ -34,9 +34,21 @@ class HDEpicToolset:
             _make_tool("get_recipe_state", self.get_recipe_state),
             _make_tool("get_ingredient_state", self.get_ingredient_state),
             _make_tool("get_object_state", self.get_object_state),
+            _make_tool("resolve_object_reference", self.resolve_object_reference),
             _make_tool("get_gaze_hand_context", self.get_gaze_hand_context),
             _make_tool("get_audio_events", self.get_audio_events),
         ]
+
+    def _video_fps(self, video_id: str) -> float | None:
+        videos = self._table("videos")
+        row = videos[videos["video_id"] == video_id].head(1)
+        if row.empty:
+            return None
+        fps = row.iloc[0].get("fps")
+        try:
+            return float(fps) if fps is not None else None
+        except (TypeError, ValueError):
+            return None
 
     def get_video_metadata(self, video_id: str) -> str:
         videos = self._table("videos")
@@ -90,12 +102,34 @@ class HDEpicToolset:
             ]
         return subset.head(20).to_json(orient="records", force_ascii=False)
 
+    def resolve_object_reference(self, video_id: str, bbox: list[float], time: float | None = None, limit: int = 5) -> str:
+        masks = self._table("object_masks")
+        subset = masks[masks["video_id"] == video_id].copy()
+        fps = self._video_fps(video_id)
+        if time is not None and fps and not subset.empty:
+            target_frame = float(time) * fps
+            subset["frame_distance"] = subset["frame_number"].apply(lambda value: abs(float(value) - target_frame))
+            subset = subset.sort_values(["frame_distance", "frame_number"]).head(max(limit * 20, 20))
+        rows = []
+        target_bbox = [float(value) for value in bbox]
+        for row in subset.to_dict(orient="records"):
+            row_bbox = json.loads(row.get("bbox_json") or "[]")
+            iou = _best_bbox_iou(target_bbox, [float(value) for value in row_bbox]) if len(row_bbox) == 4 else 0.0
+            if iou <= 0:
+                continue
+            row["iou"] = iou
+            rows.append(row)
+        rows.sort(key=lambda row: row.get("iou", 0.0), reverse=True)
+        return json.dumps(rows[:limit], ensure_ascii=False)
+
     def get_gaze_hand_context(self, video_id: str, time: float | None = None) -> str:
         gaze = self._table("gaze_priming")
         subset = gaze[gaze["video_id"] == video_id].copy()
-        if time is not None:
-            # Gaze priming table currently stores frames, not exact seconds. Keep top rows for first pass.
-            subset = subset.head(20)
+        fps = self._video_fps(video_id)
+        if time is not None and fps and not subset.empty:
+            subset["frame_time"] = subset["frame"].astype(float) / fps
+            subset["time_distance"] = subset["frame_time"].apply(lambda value: abs(float(value) - float(time)))
+            subset = subset.sort_values(["time_distance", "frame_time"], na_position="last")
         return subset.head(20).to_json(orient="records", force_ascii=False)
 
     def get_audio_events(self, video_id: str, start_time: float, end_time: float, limit: int = 20) -> str:
@@ -161,6 +195,21 @@ def _tool_info(name: str) -> dict[str, Any]:
                 {"name": "time", "description": "Optional time in seconds.", "type": "number", "required": False},
             ],
         ),
+        "resolve_object_reference": (
+            "Resolve a bbox/time object reference to matching object-mask candidates.",
+            [
+                {"name": "video_id", "description": "HD-EPIC video id.", "type": "string", "required": True},
+                {
+                    "name": "bbox",
+                    "description": "Bounding box [x1, y1, x2, y2].",
+                    "type": "array",
+                    "items": {"type": "number"},
+                    "required": True,
+                },
+                {"name": "time", "description": "Optional time in seconds.", "type": "number", "required": False},
+                {"name": "limit", "description": "Maximum number of matches.", "type": "integer", "required": False},
+            ],
+        ),
         "get_gaze_hand_context": (
             "Return gaze priming context for a video.",
             [
@@ -180,3 +229,43 @@ def _tool_info(name: str) -> dict[str, Any]:
     }
     description, params = infos[name]
     return {"tool_name": name, "tool_description": description, "tool_params": params}
+
+
+def _bbox_iou(a: list[float], b: list[float]) -> float:
+    if len(a) != 4 or len(b) != 4:
+        return 0.0
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    inter_x1 = max(ax1, bx1)
+    inter_y1 = max(ay1, by1)
+    inter_x2 = min(ax2, bx2)
+    inter_y2 = min(ay2, by2)
+    inter_w = max(0.0, inter_x2 - inter_x1)
+    inter_h = max(0.0, inter_y2 - inter_y1)
+    inter = inter_w * inter_h
+    if inter <= 0:
+        return 0.0
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    union = area_a + area_b - inter
+    if union <= 0:
+        return 0.0
+    return inter / union
+
+
+def _bbox_variants(bbox: list[float]) -> list[list[float]]:
+    if len(bbox) != 4:
+        return [bbox]
+    x1, y1, x2, y2 = bbox
+    return [
+        [x1, y1, x2, y2],
+        [y1, x1, y2, x2],
+    ]
+
+
+def _best_bbox_iou(a: list[float], b: list[float]) -> float:
+    best = 0.0
+    for a_variant in _bbox_variants(a):
+        for b_variant in _bbox_variants(b):
+            best = max(best, _bbox_iou(a_variant, b_variant))
+    return best

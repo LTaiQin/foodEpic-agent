@@ -49,6 +49,7 @@ class VQAPrediction:
     evidence_ids: list[str]
     tool_calls: list[str]
     failure_type: str | None
+    attempt_count: int = 1
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False)
@@ -93,4 +94,3 @@ def compute_metrics(predictions: list[VQAPrediction]) -> dict[str, Any]:
         "accuracy": correct / len(predictions),
         "by_task_family": by_family,
     }
-
