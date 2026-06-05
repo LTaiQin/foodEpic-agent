@@ -32,7 +32,11 @@ class GraphAgentExecutor:
                 self._apply_finish(state, finish_payload)
                 state.record_tool("finish", decision.args, self._summarize(finish_payload), raw_result=finish_payload)
                 break
-            result = self.toolbox.run(decision.tool, decision.args)
+            try:
+                result = self.toolbox.run(decision.tool, decision.args)
+            except Exception as exc:  # noqa: BLE001
+                self._handle_tool_failure(state, decision, exc)
+                continue
             self._apply_tool_result(state, decision, result)
             if result.get("done"):
                 self._apply_finish(state, result)
@@ -122,6 +126,24 @@ class GraphAgentExecutor:
             state.add_hypothesis(f"candidate_answer_index={result.get('best_index')}")
         if tool_name == "finish" or result.get("done"):
             state.replace_open_questions([])
+
+    def _handle_tool_failure(self, state: AgentState, decision: PlannerDecision, exc: Exception) -> None:
+        error_type = type(exc).__name__
+        error_message = str(exc)
+        state.record_tool_failure(decision.tool, decision.args, error_type, error_message)
+        state.add_memory(f"tool_failure tool={decision.tool} error_type={error_type}")
+        state.add_hypothesis(f"failed_tool={decision.tool}")
+        state.add_open_question("need_alternative_evidence_path")
+        if decision.tool in {"run_ocr_on_image", "run_ocr_on_region", "query_ocr"}:
+            state.add_open_question("need_ocr_reading")
+        if decision.tool in {"render_bbox_overlay", "extract_region_with_context", "resolve_bbox_reference", "query_region"}:
+            state.add_open_question("need_region_grounding")
+        if decision.tool in {"query_state", "inspect_visual_evidence", "write_state_change"}:
+            state.add_open_question("need_state_evidence")
+        if decision.tool in {"query_location", "infer_viewpoint_choice", "infer_named_fixture_direction", "infer_gaze_target_with_context"}:
+            state.add_open_question("need_location_evidence")
+        if decision.tool in {"query_time", "sample_sparse_frames", "extract_frames_for_range", "sample_frames_around_peaks"}:
+            state.add_open_question("need_time_localization")
 
     def _merge_result_into_state(self, state: AgentState, tool_name: str, result: dict[str, Any]) -> None:
         nodes = result.get("nodes")

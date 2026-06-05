@@ -775,8 +775,10 @@ class GraphAgentPlanner:
         combined_times = sorted([float(value) for value in hints.get("times") or []] + [float(value) for value in hints.get("input_times") or []])
         bbox = hints.get("bbox")
         open_questions = list(getattr(state, "open_questions", []) or [])
+        recent_failures = [item for item in getattr(state, "tool_failures", []) if isinstance(item, dict)]
+        failed_tools = {str(item.get("tool")) for item in recent_failures[-5:] if item.get("tool")}
         if "need_ocr_reading" in open_questions:
-            if bbox and state.retrieved_frames and "run_ocr_on_region" not in used_tools:
+            if bbox and state.retrieved_frames and "run_ocr_on_region" not in used_tools and "run_ocr_on_region" not in failed_tools:
                 return PlannerDecision(
                     thought="当前评分置信度不足，且仍缺 OCR 证据，转为补局部 OCR。",
                     tool="run_ocr_on_region",
@@ -787,26 +789,26 @@ class GraphAgentPlanner:
                         "tag": f"{state.task_family}_recover_ocr",
                     },
                 )
-            if state.retrieved_frames and "run_ocr_on_image" not in used_tools:
+            if state.retrieved_frames and "run_ocr_on_image" not in failed_tools:
                 return PlannerDecision(
                     thought="当前评分置信度不足，且仍缺 OCR 证据，转为补整图 OCR。",
                     tool="run_ocr_on_image",
                     args={"image_path": state.retrieved_frames[-1]},
                 )
         if "need_region_grounding" in open_questions and bbox and state.retrieved_frames:
-            if "render_bbox_overlay" not in used_tools:
+            if "render_bbox_overlay" not in used_tools and "render_bbox_overlay" not in failed_tools:
                 return PlannerDecision(
                     thought="当前评分置信度不足，且仍缺区域定位证据，转为先画框确认目标。",
                     tool="render_bbox_overlay",
                     args={"image_path": state.retrieved_frames[-1], "bbox": bbox, "tag": f"{state.task_family}_recover_bbox"},
                 )
-            if "extract_region_with_context" not in used_tools:
+            if "extract_region_with_context" not in used_tools and "extract_region_with_context" not in failed_tools:
                 return PlannerDecision(
                     thought="当前评分置信度不足，且仍缺区域定位证据，转为补局部上下文图。",
                     tool="extract_region_with_context",
                     args={"image_path": state.retrieved_frames[-1], "bbox": bbox, "expand_ratio": 0.35, "tag": f"{state.task_family}_recover_region"},
                 )
-        if "need_location_evidence" in open_questions and "query_location" not in used_tools:
+        if "need_location_evidence" in open_questions and "query_location" not in used_tools and "query_location" not in failed_tools:
             return PlannerDecision(
                 thought="当前评分置信度不足，且仍缺位置证据，转为检索空间/位置记忆。",
                 tool="query_location",
@@ -817,7 +819,7 @@ class GraphAgentPlanner:
                     "limit": 12,
                 },
             )
-        if "need_state_evidence" in open_questions and "query_state" not in used_tools:
+        if "need_state_evidence" in open_questions and "query_state" not in used_tools and "query_state" not in failed_tools:
             return PlannerDecision(
                 thought="当前评分置信度不足，且仍缺状态证据，转为检索状态变化记忆。",
                 tool="query_state",
@@ -829,7 +831,7 @@ class GraphAgentPlanner:
                 },
             )
         if ("need_time_localization" in open_questions or "need_initial_observation" in open_questions) and combined_times:
-            if "sample_sparse_frames" not in used_tools:
+            if "sample_sparse_frames" not in used_tools and "sample_sparse_frames" not in failed_tools:
                 return PlannerDecision(
                     thought="当前评分置信度不足，且时间证据仍弱，转为重新稀疏抽帧补证据。",
                     tool="sample_sparse_frames",
@@ -840,7 +842,7 @@ class GraphAgentPlanner:
                         "tag": f"{state.task_family}_recover_frames",
                     },
                 )
-        if state.retrieved_frames and "inspect_visual_evidence" not in used_tools:
+        if state.retrieved_frames and "inspect_visual_evidence" not in used_tools and "inspect_visual_evidence" not in failed_tools:
             return PlannerDecision(
                 thought="当前评分置信度不足，转为补一次视觉检查而不是直接结束。",
                 tool="inspect_visual_evidence",

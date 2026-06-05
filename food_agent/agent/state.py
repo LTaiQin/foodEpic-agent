@@ -26,6 +26,7 @@ class AgentState:
     evidence_bundle: list[str] = field(default_factory=list)
     working_memory: list[str] = field(default_factory=list)
     tool_trace: list[dict[str, Any]] = field(default_factory=list)
+    tool_failures: list[dict[str, Any]] = field(default_factory=list)
     final_answer: str = ""
     final_prediction: int | None = None
     confidence: float = 0.0
@@ -35,6 +36,23 @@ class AgentState:
         if raw_result is not None:
             entry["raw_result"] = raw_result
         self.tool_trace.append(entry)
+
+    def record_tool_failure(self, name: str, args: dict[str, Any], error_type: str, error_message: str) -> None:
+        entry = {
+            "tool": name,
+            "args": args,
+            "error_type": error_type,
+            "error_message": error_message,
+        }
+        self.tool_failures.append(entry)
+        self.tool_trace.append(
+            {
+                "tool": name,
+                "args": args,
+                "result_summary": f"tool_failed:{error_type}",
+                "raw_result": {"tool_failed": True, "error_type": error_type, "error_message": error_message},
+            }
+        )
 
     def add_node_result(self, node: dict[str, Any]) -> None:
         node_id = str(node.get("node_id") or "")
@@ -97,6 +115,7 @@ class AgentState:
             "retrieved_frames": self.retrieved_frames[-20:],
             "evidence_bundle": self.evidence_bundle[-20:],
             "working_memory": self.working_memory[-20:],
+            "tool_failures": self.tool_failures[-10:],
             "confidence": self.confidence,
         }
 
@@ -110,6 +129,7 @@ class AgentState:
             "retrieved_nodes": self.retrieved_nodes[-200:],
             "hypotheses": self.hypotheses[-100:],
             "open_questions": self.open_questions[-100:],
+            "tool_failures": self.tool_failures[-100:],
             "confidence": self.confidence,
         }
 
@@ -127,6 +147,9 @@ class AgentState:
             self.retrieved_nodes = [item for item in retrieved_nodes[-200:] if isinstance(item, dict)]
         self.hypotheses = self._string_list(payload.get("hypotheses"), limit=100)
         self.open_questions = self._string_list(payload.get("open_questions"), limit=100)
+        tool_failures = payload.get("tool_failures")
+        if isinstance(tool_failures, list):
+            self.tool_failures = [item for item in tool_failures[-100:] if isinstance(item, dict)]
         try:
             self.confidence = float(payload.get("confidence") or 0.0)
         except Exception:  # noqa: BLE001
