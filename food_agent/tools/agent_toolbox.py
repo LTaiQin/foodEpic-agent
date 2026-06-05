@@ -169,6 +169,11 @@ class AgentToolbox:
                 "arguments": {"start_time": "float", "end_time": "float", "window_s": "float", "top_k": "int"},
             },
             {
+                "name": "sample_frames_around_peaks",
+                "description": "围绕音频峰值时间点抽取少量前后关键帧，作为候选事件证据。",
+                "arguments": {"peak_times": "list[float]", "radius_s": "float", "frames_per_peak": "int", "tag": "str"},
+            },
+            {
                 "name": "inspect_visual_evidence",
                 "description": "让模型查看指定图片并输出保守的结构化观察结果。",
                 "arguments": {"prompt": "str", "image_paths": "list[str]"},
@@ -796,6 +801,39 @@ class AgentToolbox:
             "start_time": start_time,
             "end_time": end_time,
         }
+
+    def sample_frames_around_peaks(
+        self,
+        peak_times: list[float],
+        radius_s: float = 0.6,
+        frames_per_peak: int = 3,
+        tag: str = "peak_frames",
+    ) -> dict[str, Any]:
+        video_path = self._video_path()
+        peak_items: list[dict[str, Any]] = []
+        artifact_paths: list[str] = []
+        for peak_index, peak_time in enumerate(peak_times[:8]):
+            center = float(peak_time)
+            start_time = max(0.0, center - float(radius_s))
+            end_time = center + float(radius_s)
+            paths = self.video.sample_sparse_frames(
+                video_path=video_path,
+                start_time=start_time,
+                end_time=end_time,
+                sample_count=max(1, int(frames_per_peak)),
+                prefix=f"{self._safe_tag(tag)}_{peak_index:02d}",
+            )
+            peak_artifacts = [path.as_posix() for path in paths]
+            artifact_paths.extend(peak_artifacts)
+            peak_items.append(
+                {
+                    "peak_time": center,
+                    "window_start": start_time,
+                    "window_end": end_time,
+                    "artifact_paths": peak_artifacts,
+                }
+            )
+        return {"items": peak_items, "artifact_paths": artifact_paths, "count": len(peak_items)}
 
     def inspect_visual_evidence(self, prompt: str, image_paths: list[str]) -> dict[str, Any]:
         response = self.model_client.inspect_images(prompt=prompt, image_paths=[Path(path) for path in image_paths], temperature=0.0)
@@ -1652,6 +1690,7 @@ class AgentToolbox:
             "extract_region_with_context": ["expand_ratio"],
             "run_ocr_on_region": ["expand_ratio"],
             "detect_audio_peaks": ["start_time", "end_time", "window_s"],
+            "sample_frames_around_peaks": ["radius_s"],
             "write_observation": ["start_time", "end_time"],
             "write_frame_observation": ["time_s"],
             "write_region_observation": ["time_s"],
@@ -1676,6 +1715,7 @@ class AgentToolbox:
             "extract_frames_for_range": ["max_frames"],
             "sample_sparse_frames": ["sample_count"],
             "detect_audio_peaks": ["top_k"],
+            "sample_frames_around_peaks": ["frames_per_peak"],
             "sample_choice_frames": ["choice_index", "frames_per_choice"],
             "count_visual_candidates": ["max_candidates"],
             "finish": ["prediction"],
@@ -1708,6 +1748,8 @@ class AgentToolbox:
             normalized["reference_image_paths"] = [str(path) for path in normalized.get("reference_image_paths", [])]
             normalized["candidate_times"] = [float(value) for value in normalized.get("candidate_times", [])]
             normalized["choices"] = [str(choice) for choice in normalized.get("choices", [])]
+        if tool_name == "sample_frames_around_peaks":
+            normalized["peak_times"] = [float(value) for value in normalized.get("peak_times", [])]
         if tool_name in {"estimate_object_movement_count", "estimate_stationary_start"}:
             normalized["choices"] = [str(choice) for choice in normalized.get("choices", [])]
         if tool_name == "infer_viewpoint_choice":

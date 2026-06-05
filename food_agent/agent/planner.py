@@ -473,6 +473,62 @@ class GraphAgentPlanner:
                     "image_paths": state.retrieved_frames[-3:],
                 },
             )
+        if state.task_family.startswith(("recipe_", "ingredient_", "nutrition_")) and combined_times:
+            if "detect_audio_peaks" not in used_tools:
+                return PlannerDecision(
+                    thought="先检测时间段内的音频峰值，作为后续补证据的候选时间。",
+                    tool="detect_audio_peaks",
+                    args={
+                        "start_time": max(0.0, min(combined_times) - 2.0),
+                        "end_time": max(combined_times) + 2.0,
+                        "window_s": 0.5,
+                        "top_k": 4,
+                    },
+                )
+            last_peak_result = last_result if last_tool.get("tool") == "detect_audio_peaks" and isinstance(last_result, dict) else {}
+            peaks = last_peak_result.get("peaks") or []
+            peak_times = [
+                float(item.get("time_s"))
+                for item in peaks
+                if isinstance(item, dict) and item.get("time_s") is not None
+            ]
+            if peak_times and "sample_frames_around_peaks" not in used_tools:
+                return PlannerDecision(
+                    thought="围绕音频峰值再抽取候选关键帧，定位更可能的事件瞬间。",
+                    tool="sample_frames_around_peaks",
+                    args={
+                        "peak_times": peak_times,
+                        "radius_s": 0.7,
+                        "frames_per_peak": 3,
+                        "tag": f"{state.task_family}_audio_peaks",
+                    },
+                )
+            if state.retrieved_frames and "inspect_visual_evidence" not in used_tools:
+                return PlannerDecision(
+                    thought="先根据峰值附近的关键帧做阶段观察，并写回时间线记忆。",
+                    tool="inspect_visual_evidence",
+                    args={
+                        "prompt": (
+                            "你在看厨房视频中若干候选关键时刻的图片。"
+                            "请概括这一小段时间里最可能发生的动作、涉及对象、可能的步骤和状态变化。"
+                            '输出 JSON，字段固定为 {"ongoing_action":"","possible_step":"","target_object":"","state_change_hint":"","answer_hint":"","confidence":0.0}。'
+                        ),
+                        "image_paths": state.retrieved_frames[-12:],
+                    },
+                )
+            if state.evidence_bundle or state.working_memory:
+                return PlannerDecision(
+                    thought="把当前阶段的总结写回图谱，供后续问题复用。",
+                    tool="write_timeline_summary",
+                    args={
+                        "label": f"{state.task_family} timeline summary",
+                        "start_time": max(0.0, min(combined_times) - 2.0),
+                        "end_time": max(combined_times) + 2.0,
+                        "summary": " | ".join(state.evidence_bundle[-4:] or state.working_memory[-4:]),
+                        "evidence_paths": state.retrieved_frames[-12:],
+                        "keywords": [state.task_family, "timeline", "audio_peak"],
+                    },
+                )
         if state.current_step == 1 and state.task_family in {
             "gaze_interaction_anticipation",
             "fine_grained_how_recognition",
@@ -610,17 +666,6 @@ class GraphAgentPlanner:
                 },
             )
         if state.current_step <= 2 and combined_times:
-            if state.task_family.startswith(("recipe_", "ingredient_", "nutrition_")):
-                return PlannerDecision(
-                    thought="先检测时间段内的音频峰值，作为后续补证据的候选时间。",
-                    tool="detect_audio_peaks",
-                    args={
-                        "start_time": max(0.0, min(combined_times) - 2.0),
-                        "end_time": max(combined_times) + 2.0,
-                        "window_s": 0.5,
-                        "top_k": 4,
-                    },
-                )
             return PlannerDecision(
                 thought="图谱证据不够，去视频里抽帧补证据。",
                 tool="sample_sparse_frames",
@@ -870,10 +915,7 @@ class GraphAgentPlanner:
                         },
                     )
 
-        if state.task_family in {
-            "gaze_interaction_anticipation",
-            "recipe_step_recognition",
-        } and "infer_visual_mcq" not in used_tools:
+        if state.task_family == "gaze_interaction_anticipation" and "infer_visual_mcq" not in used_tools:
             if not state.retrieved_frames and combined_times:
                 return PlannerDecision(
                     thought="片段类题先抽关键帧。",
