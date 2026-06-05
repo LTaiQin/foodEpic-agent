@@ -78,6 +78,9 @@ class GraphAgentVideoSession:
         self.session_dir = agent.paths.output_root / "graph_agent_sessions" / video_id
         self.session_dir.mkdir(parents=True, exist_ok=True)
         self.trace_path = self.session_dir / "session_trace.jsonl"
+        self.state_path = self.session_dir / "session_state.json"
+        self.question_count = 0
+        self.persisted_memory: dict[str, Any] = self._load_session_state()
 
     def answer_vqa_row(self, row: dict[str, Any], *, max_steps: int = 6) -> GraphAgentResult:
         started_at = time.time()
@@ -91,6 +94,7 @@ class GraphAgentVideoSession:
             inputs_json=str(row.get("inputs_json", "{}")),
             max_steps=max_steps,
         )
+        state.restore_session_memory(self.persisted_memory)
         state = self.executor.execute(state)
         if state.final_prediction is None:
             answer_text = self.agent._answer_from_state(state)
@@ -112,6 +116,9 @@ class GraphAgentVideoSession:
             confidence=state.confidence,
             elapsed_seconds=time.time() - started_at,
         )
+        self.question_count += 1
+        self.persisted_memory = state.export_session_memory()
+        self._save_session_state(result=result, state=state)
         self.agent._persist_result(result, row=row)
         self._append_session_trace(result, row=row)
         return result
@@ -124,12 +131,42 @@ class GraphAgentVideoSession:
             "gold": int(row["correct_idx"]) if row.get("correct_idx") is not None else None,
             "correct": None if row.get("correct_idx") is None or result.prediction is None else result.prediction == int(row["correct_idx"]),
             "elapsed_seconds": result.elapsed_seconds,
+            "question_count": self.question_count,
             "tool_calls": [entry.get("tool") for entry in result.tool_trace if isinstance(entry, dict)],
             "working_memory_tail": result.working_memory[-12:],
             "evidence_tail": result.evidence_bundle[-12:],
         }
         with self.trace_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+    def _load_session_state(self) -> dict[str, Any]:
+        if not self.state_path.exists():
+            return {"video_id": self.video_id}
+        try:
+            payload = json.loads(self.state_path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            return {"video_id": self.video_id}
+        if not isinstance(payload, dict):
+            return {"video_id": self.video_id}
+        try:
+            self.question_count = int(payload.get("question_count") or 0)
+        except Exception:  # noqa: BLE001
+            self.question_count = 0
+        session_memory = payload.get("session_memory")
+        return session_memory if isinstance(session_memory, dict) else {"video_id": self.video_id}
+
+    def _save_session_state(self, *, result: GraphAgentResult, state: AgentState) -> None:
+        payload = {
+            "video_id": self.video_id,
+            "question_count": self.question_count,
+            "last_vqa_id": result.vqa_id,
+            "last_task_family": result.task_family,
+            "last_prediction": result.prediction,
+            "last_elapsed_seconds": result.elapsed_seconds,
+            "updated_at": time.time(),
+            "session_memory": state.export_session_memory(),
+        }
+        self.state_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 class GraphAgent:
@@ -155,7 +192,9 @@ class GraphAgent:
         return session
 
     def reset_video_session(self, video_id: str) -> None:
-        self._video_sessions.pop(video_id, None)
+        session = self._video_sessions.pop(video_id, None)
+        if session and session.state_path.exists():
+            session.state_path.unlink()
 
     def _ensure_store(self, video_id: str) -> GraphMemoryStore:
         graph_dir = self.paths.output_root / "graph_memory" / video_id

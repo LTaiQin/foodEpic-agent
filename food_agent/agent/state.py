@@ -80,7 +80,44 @@ class AgentState:
             "confidence": self.confidence,
         }
 
+    def export_session_memory(self) -> dict[str, Any]:
+        return {
+            "video_id": self.video_id,
+            "working_memory": self.working_memory[-200:],
+            "evidence_bundle": self.evidence_bundle[-200:],
+            "retrieved_frames": self.retrieved_frames[-200:],
+            "retrieved_node_ids": self.retrieved_node_ids[-200:],
+            "retrieved_nodes": self.retrieved_nodes[-200:],
+            "hypotheses": self.hypotheses[-100:],
+            "open_questions": self.open_questions[-100:],
+            "confidence": self.confidence,
+        }
+
+    def restore_session_memory(self, payload: dict[str, Any]) -> None:
+        if not isinstance(payload, dict):
+            return
+        if str(payload.get("video_id") or self.video_id) != self.video_id:
+            return
+        self.working_memory = self._string_list(payload.get("working_memory"), limit=200)
+        self.evidence_bundle = self._string_list(payload.get("evidence_bundle"), limit=200)
+        self.retrieved_frames = self._string_list(payload.get("retrieved_frames"), limit=200)
+        self.retrieved_node_ids = self._string_list(payload.get("retrieved_node_ids"), limit=200)
+        retrieved_nodes = payload.get("retrieved_nodes")
+        if isinstance(retrieved_nodes, list):
+            self.retrieved_nodes = [item for item in retrieved_nodes[-200:] if isinstance(item, dict)]
+        self.hypotheses = self._string_list(payload.get("hypotheses"), limit=100)
+        self.open_questions = self._string_list(payload.get("open_questions"), limit=100)
+        try:
+            self.confidence = float(payload.get("confidence") or 0.0)
+        except Exception:  # noqa: BLE001
+            self.confidence = 0.0
+
     def _is_visual_asset(self, path: Any) -> bool:
         if not isinstance(path, str) or not path:
             return False
         return Path(path).suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
+
+    def _string_list(self, value: Any, *, limit: int) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [item for item in value[-limit:] if isinstance(item, str) and item]
