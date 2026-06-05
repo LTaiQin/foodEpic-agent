@@ -50,6 +50,7 @@ class GraphAgentPlanner:
             decision = self._payload_to_decision(payload)
         except Exception:  # noqa: BLE001
             decision = self._heuristic_fallback(state=state, hints=hints)
+        decision = self._recover_if_low_confidence(state=state, hints=hints, decision=decision)
         return self._enforce_task_requirements(state=state, hints=hints, decision=decision)
 
     def _build_user_prompt(self, *, state: AgentState, tool_schemas: list[dict[str, Any]], hints: dict[str, Any]) -> str:
@@ -96,6 +97,7 @@ class GraphAgentPlanner:
         last_tool = state.tool_trace[-1] if state.tool_trace else {}
         last_result = last_tool.get("raw_result") if isinstance(last_tool, dict) else {}
         used_tools = [entry.get("tool") for entry in state.tool_trace if isinstance(entry, dict)]
+        open_questions = list(getattr(state, "open_questions", []) or [])
         if isinstance(last_result, dict) and last_tool.get("tool") == "count_visual_candidates" and last_result.get("best_index") is not None:
             best_index = int(last_result["best_index"])
             return PlannerDecision(
@@ -187,6 +189,8 @@ class GraphAgentPlanner:
                 confidence=float(last_result.get("confidence") or 0.0),
             )
         if isinstance(last_result, dict) and last_tool.get("tool") == "rank_choices_from_state" and last_result.get("best_index") is not None:
+            if self._has_unresolved_evidence_gap(open_questions) and float(last_result.get("confidence") or 0.0) < 0.8:
+                return self._recover_from_open_questions(state=state, hints=hints, used_tools=used_tools)
             best_index = int(last_result["best_index"])
             return PlannerDecision(
                 thought="已经有选项评分结果，直接结束。",
@@ -743,6 +747,119 @@ class GraphAgentPlanner:
                 "choices": [str(choice) for choice in state.choices],
                 "evidence": state.evidence_bundle,
                 "working_memory": state.working_memory,
+            },
+        )
+
+    def _recover_if_low_confidence(self, *, state: AgentState, hints: dict[str, Any], decision: PlannerDecision) -> PlannerDecision:
+        open_questions = list(getattr(state, "open_questions", []) or [])
+        if not self._has_unresolved_evidence_gap(open_questions):
+            return decision
+        last_tool = state.tool_trace[-1] if state.tool_trace else {}
+        last_result = last_tool.get("raw_result") if isinstance(last_tool, dict) else {}
+        used_tools = [entry.get("tool") for entry in state.tool_trace if isinstance(entry, dict)]
+        if decision.tool == "finish" and decision.confidence < 0.8:
+            return self._recover_from_open_questions(state=state, hints=hints, used_tools=used_tools)
+        if decision.tool == "rank_choices_from_state":
+            if isinstance(last_result, dict) and last_tool.get("tool") == "rank_choices_from_state":
+                if float(last_result.get("confidence") or 0.0) < 0.8:
+                    return self._recover_from_open_questions(state=state, hints=hints, used_tools=used_tools)
+            elif decision.confidence < 0.8:
+                return self._recover_from_open_questions(state=state, hints=hints, used_tools=used_tools)
+        return decision
+
+    def _has_unresolved_evidence_gap(self, open_questions: list[str]) -> bool:
+        meaningful = [item for item in open_questions if item and item != "need_disambiguating_evidence"]
+        return bool(meaningful)
+
+    def _recover_from_open_questions(self, *, state: AgentState, hints: dict[str, Any], used_tools: list[str]) -> PlannerDecision:
+        combined_times = sorted([float(value) for value in hints.get("times") or []] + [float(value) for value in hints.get("input_times") or []])
+        bbox = hints.get("bbox")
+        open_questions = list(getattr(state, "open_questions", []) or [])
+        if "need_ocr_reading" in open_questions:
+            if bbox and state.retrieved_frames and "run_ocr_on_region" not in used_tools:
+                return PlannerDecision(
+                    thought="当前评分置信度不足，且仍缺 OCR 证据，转为补局部 OCR。",
+                    tool="run_ocr_on_region",
+                    args={
+                        "image_path": state.retrieved_frames[-1],
+                        "bbox": bbox,
+                        "expand_ratio": 0.35,
+                        "tag": f"{state.task_family}_recover_ocr",
+                    },
+                )
+            if state.retrieved_frames and "run_ocr_on_image" not in used_tools:
+                return PlannerDecision(
+                    thought="当前评分置信度不足，且仍缺 OCR 证据，转为补整图 OCR。",
+                    tool="run_ocr_on_image",
+                    args={"image_path": state.retrieved_frames[-1]},
+                )
+        if "need_region_grounding" in open_questions and bbox and state.retrieved_frames:
+            if "render_bbox_overlay" not in used_tools:
+                return PlannerDecision(
+                    thought="当前评分置信度不足，且仍缺区域定位证据，转为先画框确认目标。",
+                    tool="render_bbox_overlay",
+                    args={"image_path": state.retrieved_frames[-1], "bbox": bbox, "tag": f"{state.task_family}_recover_bbox"},
+                )
+            if "extract_region_with_context" not in used_tools:
+                return PlannerDecision(
+                    thought="当前评分置信度不足，且仍缺区域定位证据，转为补局部上下文图。",
+                    tool="extract_region_with_context",
+                    args={"image_path": state.retrieved_frames[-1], "bbox": bbox, "expand_ratio": 0.35, "tag": f"{state.task_family}_recover_region"},
+                )
+        if "need_location_evidence" in open_questions and "query_location" not in used_tools:
+            return PlannerDecision(
+                thought="当前评分置信度不足，且仍缺位置证据，转为检索空间/位置记忆。",
+                tool="query_location",
+                args={
+                    "location_keyword": str(hints.get("location_keyword") or "location"),
+                    "start_time": min(combined_times) if combined_times else None,
+                    "end_time": max(combined_times) if combined_times else None,
+                    "limit": 12,
+                },
+            )
+        if "need_state_evidence" in open_questions and "query_state" not in used_tools:
+            return PlannerDecision(
+                thought="当前评分置信度不足，且仍缺状态证据，转为检索状态变化记忆。",
+                tool="query_state",
+                args={
+                    "state_keyword": str(hints.get("state_keyword") or "state"),
+                    "start_time": min(combined_times) if combined_times else None,
+                    "end_time": max(combined_times) if combined_times else None,
+                    "limit": 12,
+                },
+            )
+        if ("need_time_localization" in open_questions or "need_initial_observation" in open_questions) and combined_times:
+            if "sample_sparse_frames" not in used_tools:
+                return PlannerDecision(
+                    thought="当前评分置信度不足，且时间证据仍弱，转为重新稀疏抽帧补证据。",
+                    tool="sample_sparse_frames",
+                    args={
+                        "start_time": max(0.0, min(combined_times) - 2.0),
+                        "end_time": max(combined_times) + 2.0,
+                        "sample_count": 4,
+                        "tag": f"{state.task_family}_recover_frames",
+                    },
+                )
+        if state.retrieved_frames and "inspect_visual_evidence" not in used_tools:
+            return PlannerDecision(
+                thought="当前评分置信度不足，转为补一次视觉检查而不是直接结束。",
+                tool="inspect_visual_evidence",
+                args={
+                    "prompt": (
+                        "当前证据不足以高置信回答。"
+                        "请保守地补充这组图片中的关键对象、动作、位置、状态变化或读数。"
+                        '输出 JSON，字段固定为 {"target_object":"","target_location":"","ongoing_action":"","state_change_hint":"","reading":"","answer_hint":"","confidence":0.0}。'
+                    ),
+                    "image_paths": state.retrieved_frames[-6:],
+                },
+            )
+        return PlannerDecision(
+            thought="当前评分置信度不足，继续保留评分结果，但先补一个通用时间检索。",
+            tool="query_time",
+            args={
+                "start_time": min(combined_times) if combined_times else None,
+                "end_time": max(combined_times) if combined_times else None,
+                "limit": 12,
             },
         )
 
