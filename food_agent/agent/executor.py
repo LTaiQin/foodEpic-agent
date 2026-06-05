@@ -44,9 +44,11 @@ class GraphAgentExecutor:
         return state
 
     def _apply_tool_result(self, state: AgentState, decision: PlannerDecision, result: dict[str, Any]) -> None:
+        before_counts = self._state_counts(state)
         state.record_tool(decision.tool, decision.args, self._summarize(result), raw_result=result)
         self._merge_result_into_state(state, decision.tool, result)
         self._update_reasoning_after_tool(state, decision.tool, result)
+        self._record_ineffective_tool_if_needed(state, decision, result, before_counts)
 
     def _initialize_reasoning_state(self, state: AgentState, hints: dict[str, Any]) -> None:
         state.add_hypothesis(f"task_family={state.task_family}")
@@ -144,6 +146,37 @@ class GraphAgentExecutor:
             state.add_open_question("need_location_evidence")
         if decision.tool in {"query_time", "sample_sparse_frames", "extract_frames_for_range", "sample_frames_around_peaks"}:
             state.add_open_question("need_time_localization")
+
+    def _record_ineffective_tool_if_needed(
+        self,
+        state: AgentState,
+        decision: PlannerDecision,
+        result: dict[str, Any],
+        before_counts: dict[str, int],
+    ) -> None:
+        if decision.tool in {"finish", "write_observation", "write_frame_observation", "write_region_observation", "write_ocr_reading", "write_audio_event", "write_timeline_summary", "write_state_change"}:
+            return
+        if result.get("done"):
+            return
+        after_counts = self._state_counts(state)
+        no_new_evidence = before_counts == after_counts
+        empty_payload = not any(
+            result.get(key)
+            for key in ("nodes", "matches", "totals", "artifact_path", "artifact_paths", "reading", "text", "peaks", "scores", "best_index", "association_id", "tracks")
+        )
+        if no_new_evidence and empty_payload:
+            state.record_ineffective_tool(decision.tool, decision.args, "no_new_evidence")
+            state.add_memory(f"tool_ineffective tool={decision.tool} reason=no_new_evidence")
+            state.add_hypothesis(f"ineffective_tool={decision.tool}")
+            state.add_open_question("need_alternative_evidence_path")
+
+    def _state_counts(self, state: AgentState) -> dict[str, int]:
+        return {
+            "nodes": len(state.retrieved_nodes),
+            "frames": len(state.retrieved_frames),
+            "evidence": len(state.evidence_bundle),
+            "memory": len(state.working_memory),
+        }
 
     def _merge_result_into_state(self, state: AgentState, tool_name: str, result: dict[str, Any]) -> None:
         nodes = result.get("nodes")

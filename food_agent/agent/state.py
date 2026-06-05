@@ -27,6 +27,7 @@ class AgentState:
     working_memory: list[str] = field(default_factory=list)
     tool_trace: list[dict[str, Any]] = field(default_factory=list)
     tool_failures: list[dict[str, Any]] = field(default_factory=list)
+    ineffective_tools: list[dict[str, Any]] = field(default_factory=list)
     final_answer: str = ""
     final_prediction: int | None = None
     confidence: float = 0.0
@@ -51,6 +52,18 @@ class AgentState:
                 "args": args,
                 "result_summary": f"tool_failed:{error_type}",
                 "raw_result": {"tool_failed": True, "error_type": error_type, "error_message": error_message},
+            }
+        )
+
+    def record_ineffective_tool(self, name: str, args: dict[str, Any], reason: str) -> None:
+        entry = {"tool": name, "args": args, "reason": reason}
+        self.ineffective_tools.append(entry)
+        self.tool_trace.append(
+            {
+                "tool": name,
+                "args": args,
+                "result_summary": f"tool_ineffective:{reason}",
+                "raw_result": {"tool_ineffective": True, "reason": reason},
             }
         )
 
@@ -116,6 +129,7 @@ class AgentState:
             "evidence_bundle": self.evidence_bundle[-20:],
             "working_memory": self.working_memory[-20:],
             "tool_failures": self.tool_failures[-10:],
+            "ineffective_tools": self.ineffective_tools[-10:],
             "confidence": self.confidence,
         }
 
@@ -130,6 +144,7 @@ class AgentState:
             "hypotheses": self.hypotheses[-100:],
             "open_questions": self.open_questions[-100:],
             "tool_failures": self.tool_failures[-100:],
+            "ineffective_tools": self.ineffective_tools[-100:],
             "confidence": self.confidence,
         }
 
@@ -150,6 +165,9 @@ class AgentState:
         tool_failures = payload.get("tool_failures")
         if isinstance(tool_failures, list):
             self.tool_failures = [item for item in tool_failures[-100:] if isinstance(item, dict)]
+        ineffective_tools = payload.get("ineffective_tools")
+        if isinstance(ineffective_tools, list):
+            self.ineffective_tools = [item for item in ineffective_tools[-100:] if isinstance(item, dict)]
         try:
             self.confidence = float(payload.get("confidence") or 0.0)
         except Exception:  # noqa: BLE001
