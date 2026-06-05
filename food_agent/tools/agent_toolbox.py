@@ -9,6 +9,8 @@ from typing import Any
 
 import pandas as pd
 
+from PIL import Image
+
 from food_agent.memory import GraphEdgeRecord, GraphMemoryStore, GraphNodeRecord
 from food_agent.model_client import OpenAICompatibleModelClient
 from food_agent.paths import ProjectPaths
@@ -132,6 +134,11 @@ class AgentToolbox:
                 "arguments": {"start_time": "float", "end_time": "float", "stride_s": "float", "max_frames": "int", "tag": "str"},
             },
             {
+                "name": "sample_sparse_frames",
+                "description": "在给定时间段内做更均匀的稀疏采样，避免连续相近帧。",
+                "arguments": {"start_time": "float", "end_time": "float", "sample_count": "int", "tag": "str"},
+            },
+            {
                 "name": "extract_input_reference_frames",
                 "description": "根据 inputs_json 中给出的 image/video 引用，跨视频提取对应参考帧。",
                 "arguments": {"tag": "str"},
@@ -145,6 +152,21 @@ class AgentToolbox:
                 "name": "extract_region_with_context",
                 "description": "对 bbox 区域做保留上下文的局部放大。",
                 "arguments": {"image_path": "str", "bbox": "list[float]", "expand_ratio": "float", "tag": "str"},
+            },
+            {
+                "name": "run_ocr_on_image",
+                "description": "对整张图运行 OCR，优先读数字、单位、包装文字或显示屏内容。",
+                "arguments": {"image_path": "str"},
+            },
+            {
+                "name": "run_ocr_on_region",
+                "description": "对局部区域做上下文保留放大后运行 OCR。",
+                "arguments": {"image_path": "str", "bbox": "list[float]", "expand_ratio": "float", "tag": "str"},
+            },
+            {
+                "name": "detect_audio_peaks",
+                "description": "在指定时间段内检测音频峰值，作为关键事件候选时间。",
+                "arguments": {"start_time": "float", "end_time": "float", "window_s": "float", "top_k": "int"},
             },
             {
                 "name": "inspect_visual_evidence",
@@ -687,6 +709,17 @@ class AgentToolbox:
         )
         return {"artifact_paths": [path.as_posix() for path in paths], "start_time": start_time, "end_time": end_time}
 
+    def sample_sparse_frames(self, start_time: float, end_time: float, sample_count: int = 5, tag: str = "sparse") -> dict[str, Any]:
+        video_path = self._video_path()
+        paths = self.video.sample_sparse_frames(
+            video_path=video_path,
+            start_time=start_time,
+            end_time=end_time,
+            sample_count=sample_count,
+            prefix=self._safe_tag(tag),
+        )
+        return {"artifact_paths": [path.as_posix() for path in paths], "start_time": start_time, "end_time": end_time, "count": len(paths)}
+
     def extract_input_reference_frames(self, tag: str = "inputs") -> dict[str, Any]:
         payload = self.default_hints(self.runtime_question, self.runtime_inputs_json).get("inputs")
         if not payload:
@@ -724,6 +757,45 @@ class AgentToolbox:
             output_name=output_name,
         )
         return {"artifact_path": path.as_posix()}
+
+    def run_ocr_on_image(self, image_path: str) -> dict[str, Any]:
+        source_path = Path(image_path)
+        text = self._ocr_image(source_path)
+        reading = self._extract_compact_reading(text)
+        return {
+            "text": text,
+            "reading": reading,
+            "artifact_path": source_path.as_posix(),
+            "count": 1 if text else 0,
+        }
+
+    def run_ocr_on_region(self, image_path: str, bbox: list[float], expand_ratio: float = 0.35, tag: str = "ocr_region") -> dict[str, Any]:
+        region = self.extract_region_with_context(image_path=image_path, bbox=bbox, expand_ratio=expand_ratio, tag=tag)
+        region_path = Path(str(region["artifact_path"]))
+        text = self._ocr_image(region_path)
+        reading = self._extract_compact_reading(text)
+        return {
+            "text": text,
+            "reading": reading,
+            "artifact_path": region_path.as_posix(),
+            "count": 1 if text else 0,
+        }
+
+    def detect_audio_peaks(self, start_time: float, end_time: float, window_s: float = 0.5, top_k: int = 5) -> dict[str, Any]:
+        video_path = self._video_path()
+        peaks = self.video.detect_audio_peaks(
+            video_path=video_path,
+            start_time=start_time,
+            end_time=end_time,
+            window_s=window_s,
+            top_k=top_k,
+        )
+        return {
+            "peaks": peaks,
+            "count": len(peaks),
+            "start_time": start_time,
+            "end_time": end_time,
+        }
 
     def inspect_visual_evidence(self, prompt: str, image_paths: list[str]) -> dict[str, Any]:
         response = self.model_client.inspect_images(prompt=prompt, image_paths=[Path(path) for path in image_paths], temperature=0.0)
@@ -1390,6 +1462,53 @@ class AgentToolbox:
         hours, minutes, seconds = text.split(":")
         return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
 
+    def _ocr_image(self, image_path: Path) -> str:
+        try:
+            import pytesseract  # type: ignore
+        except Exception:  # noqa: BLE001
+            pytesseract = None
+        if pytesseract is not None:
+            try:
+                text = pytesseract.image_to_string(Image.open(image_path))
+                text = text.strip()
+                if text:
+                    return text
+            except Exception:  # noqa: BLE001
+                pass
+        response = self.model_client.inspect_images(
+            prompt=(
+                "请只读取这张图片中可见的文字、数字、单位或显示屏读数。"
+                '输出 JSON，字段固定为 {"text":"","reading":"","confidence":0.0}。'
+            ),
+            image_paths=[image_path],
+            temperature=0.0,
+        )
+        text = response.content.strip()
+        try:
+            payload = self.model_client._extract_json_object(text)
+            combined = str(payload.get("reading") or payload.get("text") or "").strip()
+            if combined:
+                return combined
+        except Exception:  # noqa: BLE001
+            pass
+        return text
+
+    def _extract_compact_reading(self, text: str) -> str:
+        match = re.search(r"(\d+(?:\.\d+)?)\s*([a-zA-Z]+)", text)
+        if match:
+            value = match.group(1)
+            unit = match.group(2)
+            if value.endswith(".0"):
+                value = value[:-2]
+            return f"{value} {unit}".strip()
+        digits = re.findall(r"\d+(?:\.\d+)?", text)
+        if digits:
+            value = digits[0]
+            if value.endswith(".0"):
+                value = value[:-2]
+            return value
+        return text.strip()
+
     def _best_choice_for_count(self, count: int, choices: list[str]) -> int:
         normalized_count = str(int(count))
         for index, choice in enumerate(choices):
@@ -1529,7 +1648,10 @@ class AgentToolbox:
             "estimate_stationary_start": ["reference_time", "threshold_s"],
             "extract_frame_at_time": ["time_s"],
             "extract_frames_for_range": ["start_time", "end_time", "stride_s"],
+            "sample_sparse_frames": ["start_time", "end_time"],
             "extract_region_with_context": ["expand_ratio"],
+            "run_ocr_on_region": ["expand_ratio"],
+            "detect_audio_peaks": ["start_time", "end_time", "window_s"],
             "write_observation": ["start_time", "end_time"],
             "write_frame_observation": ["time_s"],
             "write_region_observation": ["time_s"],
@@ -1552,6 +1674,8 @@ class AgentToolbox:
             "resolve_bbox_reference": ["limit"],
             "get_neighbors": ["limit"],
             "extract_frames_for_range": ["max_frames"],
+            "sample_sparse_frames": ["sample_count"],
+            "detect_audio_peaks": ["top_k"],
             "sample_choice_frames": ["choice_index", "frames_per_choice"],
             "count_visual_candidates": ["max_candidates"],
             "finish": ["prediction"],
@@ -1562,7 +1686,7 @@ class AgentToolbox:
         for key in int_keys.get(tool_name, []):
             if key in normalized and normalized[key] is not None:
                 normalized[key] = int(normalized[key])
-        if tool_name in {"render_bbox_overlay", "extract_region_with_context", "resolve_bbox_reference", "estimate_object_movement_count", "estimate_stationary_start"} and "bbox" in normalized:
+        if tool_name in {"render_bbox_overlay", "extract_region_with_context", "resolve_bbox_reference", "estimate_object_movement_count", "estimate_stationary_start", "run_ocr_on_region"} and "bbox" in normalized:
             normalized["bbox"] = [float(value) for value in normalized["bbox"]]
         if tool_name in {"write_region_observation", "write_ocr_reading"} and "bbox" in normalized and normalized["bbox"] is not None:
             normalized["bbox"] = [float(value) for value in normalized["bbox"]]

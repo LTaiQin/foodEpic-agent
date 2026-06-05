@@ -143,6 +143,24 @@ class GraphAgentExecutor:
             if summary:
                 state.add_evidence(summary)
                 state.add_memory(summary)
+        if tool_name in {"run_ocr_on_image", "run_ocr_on_region"}:
+            reading = result.get("reading")
+            text = result.get("text")
+            if reading:
+                state.add_evidence(f"ocr_reading={reading}")
+                state.add_memory(f"ocr_reading={reading}")
+            if text and text != reading:
+                state.add_memory(f"ocr_text={text}")
+        if tool_name == "detect_audio_peaks":
+            peaks = result.get("peaks")
+            if isinstance(peaks, list):
+                state.add_memory(f"audio_peak_count={len(peaks)}")
+                for peak in peaks[:5]:
+                    if not isinstance(peak, dict):
+                        continue
+                    state.add_memory(
+                        f"audio_peak time={peak.get('time_s')} score={peak.get('score')}"
+                    )
         if tool_name == "rank_choices_from_state":
             best_index = result.get("best_index")
             scores = result.get("scores")

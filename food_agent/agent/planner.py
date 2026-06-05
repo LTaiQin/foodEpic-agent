@@ -95,6 +95,7 @@ class GraphAgentPlanner:
     def _heuristic_fallback(self, *, state: AgentState, hints: dict[str, Any]) -> PlannerDecision:
         last_tool = state.tool_trace[-1] if state.tool_trace else {}
         last_result = last_tool.get("raw_result") if isinstance(last_tool, dict) else {}
+        used_tools = [entry.get("tool") for entry in state.tool_trace if isinstance(entry, dict)]
         if isinstance(last_result, dict) and last_tool.get("tool") == "count_visual_candidates" and last_result.get("best_index") is not None:
             best_index = int(last_result["best_index"])
             return PlannerDecision(
@@ -213,7 +214,7 @@ class GraphAgentPlanner:
             )
         if state.current_step <= 1 and state.task_family.startswith("ingredient_"):
             if state.task_family == "ingredient_ingredient_weight" and combined_times:
-                if state.current_step == 1 and ingredient_name:
+                if "query_ingredient_measurement" not in used_tools and ingredient_name:
                     return PlannerDecision(
                         thought="称重题先查图谱中的 ingredient weigh 记录。",
                         tool="query_ingredient_measurement",
@@ -224,7 +225,31 @@ class GraphAgentPlanner:
                             "limit": 10,
                         },
                     )
-                if state.current_step == 2:
+                if state.retrieved_frames:
+                    latest_frame = state.retrieved_frames[-1] if state.retrieved_frames else None
+                    if latest_frame and bbox and "run_ocr_on_region" not in used_tools:
+                        return PlannerDecision(
+                            thought="称重题优先对可能的显示区域做 OCR。",
+                            tool="run_ocr_on_region",
+                            args={
+                                "image_path": latest_frame,
+                                "bbox": bbox,
+                                "expand_ratio": 0.35,
+                                "tag": f"{state.task_family}_ocr",
+                            },
+                        )
+                if "sample_sparse_frames" not in used_tools:
+                    return PlannerDecision(
+                        thought="称重题先回看称量时间段的原始视频。",
+                        tool="sample_sparse_frames",
+                        args={
+                            "start_time": max(0.0, min(combined_times) - 2.0),
+                            "end_time": max(combined_times) + 2.0,
+                            "sample_count": 5,
+                            "tag": f"{state.task_family}_range",
+                        },
+                    )
+                if state.current_step >= 2:
                     return PlannerDecision(
                         thought="先根据称量记录对候选重量评分。",
                         tool="rank_choices_from_state",
@@ -235,17 +260,6 @@ class GraphAgentPlanner:
                             "working_memory": state.working_memory,
                         },
                     )
-                return PlannerDecision(
-                    thought="称重题先回看称量时间段的原始视频。",
-                    tool="extract_frames_for_range",
-                    args={
-                        "start_time": max(0.0, min(combined_times) - 2.0),
-                        "end_time": max(combined_times) + 2.0,
-                        "stride_s": 1.0,
-                        "max_frames": 5,
-                        "tag": f"{state.task_family}_range",
-                    },
-                )
             return PlannerDecision(
                 thought="食材题优先检索 ingredient_event。",
                 tool="query_event",
@@ -342,12 +356,11 @@ class GraphAgentPlanner:
         if state.current_step <= 1 and state.task_family == "gaze_gaze_estimation" and combined_times:
             return PlannerDecision(
                 thought="注视目标题先抽取当前瞬时视角关键帧。",
-                tool="extract_frames_for_range",
+                tool="sample_sparse_frames",
                 args={
                     "start_time": max(0.0, min(combined_times)),
                     "end_time": max(combined_times),
-                    "stride_s": 0.3,
-                    "max_frames": 3,
+                    "sample_count": 3,
                     "tag": f"{state.task_family}_view",
                 },
             )
@@ -381,6 +394,18 @@ class GraphAgentPlanner:
                     "working_memory": state.working_memory,
                 },
             )
+        if state.task_family == "ingredient_ingredient_weight" and state.retrieved_frames:
+            if bbox and "run_ocr_on_region" not in used_tools:
+                return PlannerDecision(
+                    thought="称重题优先对候选显示区域做 OCR 读取数字。",
+                    tool="run_ocr_on_region",
+                    args={
+                        "image_path": state.retrieved_frames[-1],
+                        "bbox": bbox,
+                        "expand_ratio": 0.35,
+                        "tag": f"{state.task_family}_ocr",
+                    },
+                )
         if state.current_step <= 2 and state.task_family == "ingredient_ingredient_weight" and state.retrieved_frames:
             return PlannerDecision(
                 thought="让视觉工具查看称重图片，尝试读取数字和食材。",
@@ -414,12 +439,11 @@ class GraphAgentPlanner:
         if state.current_step == 1 and state.task_family in {"3d_perception_fixture_location", "gaze_gaze_estimation"} and combined_times and not state.retrieved_frames:
             return PlannerDecision(
                 thought="先抽取当前视角关键帧。",
-                tool="extract_frames_for_range",
+                tool="sample_sparse_frames",
                 args={
                     "start_time": max(0.0, min(combined_times) - 0.5),
                     "end_time": max(combined_times) + 0.5,
-                    "stride_s": 0.5,
-                    "max_frames": 3,
+                    "sample_count": 3,
                     "tag": f"{state.task_family}_view",
                 },
             )
@@ -457,12 +481,11 @@ class GraphAgentPlanner:
         } and combined_times and not state.retrieved_frames:
             return PlannerDecision(
                 thought="先为短视频片段抽取按时间顺序排列的关键帧。",
-                tool="extract_frames_for_range",
+                tool="sample_sparse_frames",
                 args={
                     "start_time": max(0.0, min(combined_times)),
                     "end_time": max(combined_times),
-                    "stride_s": max(0.3, (max(combined_times) - min(combined_times)) / 2) if len(combined_times) > 1 else 0.4,
-                    "max_frames": 4,
+                    "sample_count": 4,
                     "tag": f"{state.task_family}_segment",
                 },
             )
@@ -587,14 +610,24 @@ class GraphAgentPlanner:
                 },
             )
         if state.current_step <= 2 and combined_times:
+            if state.task_family.startswith(("recipe_", "ingredient_", "nutrition_")):
+                return PlannerDecision(
+                    thought="先检测时间段内的音频峰值，作为后续补证据的候选时间。",
+                    tool="detect_audio_peaks",
+                    args={
+                        "start_time": max(0.0, min(combined_times) - 2.0),
+                        "end_time": max(combined_times) + 2.0,
+                        "window_s": 0.5,
+                        "top_k": 4,
+                    },
+                )
             return PlannerDecision(
                 thought="图谱证据不够，去视频里抽帧补证据。",
-                tool="extract_frames_for_range",
+                tool="sample_sparse_frames",
                 args={
                     "start_time": max(0.0, min(combined_times) - 2.0),
                     "end_time": max(combined_times) + 2.0,
-                    "stride_s": 1.5,
-                    "max_frames": 4,
+                    "sample_count": 4,
                     "tag": f"{state.task_family}_step{state.current_step}",
                 },
             )
