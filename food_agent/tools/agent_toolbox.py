@@ -1426,6 +1426,10 @@ class AgentToolbox:
             "bbox": bbox,
             "input_times": self._extract_times_from_inputs(inputs if isinstance(inputs, dict) else {}),
             "ingredient_name": self._extract_ingredient_name(question),
+            "state_keyword": self._extract_state_keyword(question),
+            "location_keyword": self._extract_location_keyword(question),
+            "ocr_keyword": self._extract_ocr_keyword(question),
+            "object_hint": self._extract_object_hint(question),
             "inputs": inputs if isinstance(inputs, dict) else {},
         }
 
@@ -1636,6 +1640,45 @@ class AgentToolbox:
         match = re.search(r"weigh of (.+?) in this video\??$", lowered, flags=re.IGNORECASE)
         if match:
             return match.group(1).strip()
+        return None
+
+    def _extract_state_keyword(self, question: str) -> str | None:
+        lowered = question.lower()
+        state_terms = [
+            "mixed", "mix", "stirred", "stirring", "cooked", "raw", "soft", "softened",
+            "melted", "open", "closed", "empty", "full", "boiled", "fried", "chopped",
+        ]
+        for term in state_terms:
+            if term in lowered:
+                return term
+        return None
+
+    def _extract_location_keyword(self, question: str) -> str | None:
+        lowered = question.lower()
+        location_terms = [
+            "bowl", "pan", "pot", "fridge", "microwave", "sink", "counter",
+            "table", "plate", "cupboard", "drawer", "left", "right", "front", "behind",
+        ]
+        for term in location_terms:
+            if term in lowered:
+                return term
+        return None
+
+    def _extract_ocr_keyword(self, question: str) -> str | None:
+        lowered = question.lower()
+        if any(token in lowered for token in ["weigh", "weight", "read", "reading", "label", "text", "number", "digit", "g ", "kg", "ml"]):
+            return "reading"
+        return None
+
+    def _extract_object_hint(self, question: str) -> str | None:
+        lowered = question.lower()
+        candidates = [
+            "salad", "onion", "tomato", "bowl", "pan", "pot", "plate", "knife",
+            "spoon", "fork", "cup", "bottle", "bag", "drawer", "fridge", "microwave",
+        ]
+        for term in candidates:
+            if term in lowered:
+                return term
         return None
 
     def _parse_payload_json(self, value: Any) -> dict[str, Any]:

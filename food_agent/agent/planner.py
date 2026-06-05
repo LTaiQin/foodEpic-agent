@@ -206,11 +206,59 @@ class GraphAgentPlanner:
         combined_times = sorted(times + input_times)
         bbox = hints.get("bbox")
         ingredient_name = hints.get("ingredient_name")
+        state_keyword = hints.get("state_keyword")
+        location_keyword = hints.get("location_keyword")
+        ocr_keyword = hints.get("ocr_keyword")
+        object_hint = hints.get("object_hint")
         if state.current_step == 0 and combined_times:
             return PlannerDecision(
                 thought="先查题目时间窗口附近的图谱节点。",
                 tool="query_time",
                 args={"start_time": min(combined_times), "end_time": max(combined_times), "limit": 20},
+            )
+        if state.current_step <= 1 and state_keyword and "query_state" not in used_tools:
+            return PlannerDecision(
+                thought="问题明显涉及状态变化，先检索已写回或已索引的状态证据。",
+                tool="query_state",
+                args={
+                    "state_keyword": str(state_keyword),
+                    "start_time": min(combined_times) if combined_times else None,
+                    "end_time": max(combined_times) if combined_times else None,
+                    "limit": 12,
+                },
+            )
+        if state.current_step <= 1 and ocr_keyword and "query_ocr" not in used_tools:
+            return PlannerDecision(
+                thought="问题涉及读数或文本，先检索已有 OCR 记忆。",
+                tool="query_ocr",
+                args={
+                    "keyword": str(ocr_keyword),
+                    "start_time": min(combined_times) if combined_times else None,
+                    "end_time": max(combined_times) if combined_times else None,
+                    "limit": 12,
+                },
+            )
+        if state.current_step <= 1 and location_keyword and "query_location" not in used_tools:
+            return PlannerDecision(
+                thought="问题涉及位置或方位，先检索已有空间位置记忆。",
+                tool="query_location",
+                args={
+                    "location_keyword": str(location_keyword),
+                    "start_time": min(combined_times) if combined_times else None,
+                    "end_time": max(combined_times) if combined_times else None,
+                    "limit": 12,
+                },
+            )
+        if state.current_step <= 1 and object_hint and "query_region" not in used_tools and bbox is None:
+            return PlannerDecision(
+                thought="问题涉及具体对象，先检索已有对象/区域相关记忆。",
+                tool="query_region",
+                args={
+                    "object_hint": str(object_hint),
+                    "start_time": min(combined_times) if combined_times else None,
+                    "end_time": max(combined_times) if combined_times else None,
+                    "limit": 12,
+                },
             )
         if state.current_step <= 1 and state.task_family.startswith("ingredient_"):
             if state.task_family == "ingredient_ingredient_weight" and combined_times:
