@@ -50,6 +50,10 @@ class VQAPrediction:
     tool_calls: list[str]
     failure_type: str | None
     attempt_count: int = 1
+    reuse_memory_count: int = 0
+    raw_revisit_count: int = 0
+    structured_query_count: int = 0
+    session_video_position: int = 0
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False)

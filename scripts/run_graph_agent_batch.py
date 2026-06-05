@@ -40,6 +40,31 @@ TASK_FAMILY_GROUPS = {
         "object_motion_stationary_object_localization",
     ],
 }
+STRUCTURED_QUERY_TOOLS = {
+    "query_time",
+    "query_object",
+    "query_event",
+    "query_state",
+    "query_location",
+    "query_region",
+    "query_ocr",
+    "get_neighbors",
+    "query_ingredient_measurement",
+    "compute_nutrition_change",
+    "compare_choice_nutrition",
+}
+RAW_REVISIT_TOOLS = {
+    "extract_frame_at_time",
+    "extract_frames_for_range",
+    "sample_sparse_frames",
+    "sample_frames_around_peaks",
+    "extract_input_reference_frames",
+    "render_bbox_overlay",
+    "extract_region_with_context",
+    "run_ocr_on_image",
+    "run_ocr_on_region",
+    "detect_audio_peaks",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -54,6 +79,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-suffix", default=None)
     parser.add_argument("--max-steps", type=int, default=8)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--no-video-session-mode", action="store_false", dest="video_session_mode")
+    parser.set_defaults(video_session_mode=True)
     return parser.parse_args()
 
 
@@ -62,7 +89,13 @@ def main() -> int:
     load_env_file(args.env_file)
     paths = ProjectPaths.from_env()
     agent = GraphAgent(paths=paths)
-    samples = load_selected_samples(args.index_dir, args.limit, args.task_family, args.task_family_group)
+    samples = load_selected_samples(
+        args.index_dir,
+        args.limit,
+        args.task_family,
+        args.task_family_group,
+        video_session_mode=args.video_session_mode,
+    )
     run_name = build_run_name(args.task_family, args.task_family_group, args.limit, args.run_suffix)
     run_dir = args.out_dir / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -104,11 +137,15 @@ def main() -> int:
             summary_path=summary_path,
             progress_path=progress_path,
         )
+    video_positions: dict[str, int] = build_video_positions(samples)
+
     for index, sample in enumerate(samples, start=1):
         if sample.vqa_id in completed:
             pred = completed[sample.vqa_id]
             print(
-                f"[{index}/{total}] skip sample={sample.vqa_id} pred={pred.prediction} gold={pred.gold} correct={pred.correct} failure={pred.failure_type}",
+                f"[{index}/{total}] skip sample={sample.vqa_id} pred={pred.prediction} gold={pred.gold} correct={pred.correct} "
+                f"reuse={pred.reuse_memory_count} raw={pred.raw_revisit_count} structured={pred.structured_query_count} "
+                f"session_pos={pred.session_video_position} failure={pred.failure_type}",
                 flush=True,
             )
             continue
@@ -123,6 +160,7 @@ def main() -> int:
         }
         try:
             result = agent.answer_vqa_row(row, max_steps=args.max_steps)
+            tool_calls = [entry.get("tool", "") for entry in result.tool_trace]
             pred = VQAPrediction(
                 sample_id=sample.vqa_id,
                 baseline="graph-agent",
@@ -134,9 +172,13 @@ def main() -> int:
                 prediction=int(result.prediction if result.prediction is not None else 0),
                 correct=result.prediction == sample.correct_idx,
                 evidence_ids=[],
-                tool_calls=[entry.get("tool", "") for entry in result.tool_trace],
+                tool_calls=tool_calls,
                 failure_type=None if result.prediction == sample.correct_idx else "reasoning_error",
                 attempt_count=1,
+                reuse_memory_count=count_reuse_memory_from_result(result),
+                raw_revisit_count=count_tools(tool_calls, RAW_REVISIT_TOOLS),
+                structured_query_count=count_tools(tool_calls, STRUCTURED_QUERY_TOOLS),
+                session_video_position=video_positions.get(sample.vqa_id, 0),
             )
         except Exception as exc:  # noqa: BLE001
             pred = VQAPrediction(
@@ -153,6 +195,10 @@ def main() -> int:
                 tool_calls=[],
                 failure_type=f"agent_error:{type(exc).__name__}",
                 attempt_count=1,
+                reuse_memory_count=0,
+                raw_revisit_count=0,
+                structured_query_count=0,
+                session_video_position=video_positions.get(sample.vqa_id, 0),
             )
         append_prediction_jsonl(pred_path, pred)
         running[pred.sample_id] = pred
@@ -185,7 +231,9 @@ def main() -> int:
         running_accuracy = metrics.get("accuracy")
         print(
             f"[{index}/{total}] sample={pred.sample_id} pred={pred.prediction} gold={pred.gold} correct={pred.correct} "
-            f"failure={pred.failure_type} running_acc={running_correct}/{len(running)}={_format_ratio(running_accuracy)}",
+            f"reuse={pred.reuse_memory_count} raw={pred.raw_revisit_count} structured={pred.structured_query_count} "
+            f"session_pos={pred.session_video_position} failure={pred.failure_type} "
+            f"running_acc={running_correct}/{len(running)}={_format_ratio(running_accuracy)}",
             flush=True,
         )
 
@@ -225,14 +273,25 @@ def build_run_name(task_family: str | None, task_family_group: str | None, limit
     return name
 
 
-def load_selected_samples(index_dir: Path, limit: int, task_family: str | None, task_family_group: str | None):
+def load_selected_samples(
+    index_dir: Path,
+    limit: int,
+    task_family: str | None,
+    task_family_group: str | None,
+    *,
+    video_session_mode: bool = True,
+):
     if task_family_group:
         samples = []
         for family in TASK_FAMILY_GROUPS[task_family_group]:
             samples.extend(load_vqa_samples(index_dir, limit=limit, task_family=family))
-        return sorted(samples, key=lambda sample: (str(sample.primary_video_id or ""), sample.task_family, sample.vqa_id))
+        if video_session_mode:
+            return sorted(samples, key=lambda sample: (str(sample.primary_video_id or ""), sample.task_family, sample.vqa_id))
+        return sorted(samples, key=lambda sample: (sample.task_family, sample.vqa_id))
     samples = load_vqa_samples(index_dir, limit=limit, task_family=task_family)
-    return sorted(samples, key=lambda sample: (str(sample.primary_video_id or ""), sample.task_family, sample.vqa_id))
+    if video_session_mode:
+        return sorted(samples, key=lambda sample: (str(sample.primary_video_id or ""), sample.task_family, sample.vqa_id))
+    return sorted(samples, key=lambda sample: (sample.task_family, sample.vqa_id))
 
 
 def append_prediction_jsonl(path: Path, prediction: VQAPrediction) -> None:
@@ -251,6 +310,10 @@ def load_predictions_by_id(path: Path) -> dict[str, VQAPrediction]:
             continue
         payload = json.loads(raw)
         payload.setdefault("attempt_count", 1)
+        payload.setdefault("reuse_memory_count", 0)
+        payload.setdefault("raw_revisit_count", 0)
+        payload.setdefault("structured_query_count", 0)
+        payload.setdefault("session_video_position", 0)
         pred = VQAPrediction(**payload)
         latest[pred.sample_id] = pred
     return latest
@@ -272,12 +335,18 @@ def build_progress_payload(*, total: int, predictions: list[VQAPrediction]) -> d
     metrics = compute_metrics(predictions)
     completed = len(predictions)
     correct = metrics.get("correct", 0) or 0
+    reuse_total = sum(pred.reuse_memory_count for pred in predictions)
+    raw_total = sum(pred.raw_revisit_count for pred in predictions)
+    structured_total = sum(pred.structured_query_count for pred in predictions)
     return {
         "total": total,
         "completed": completed,
         "remaining": max(total - completed, 0),
         "correct": correct,
         "accuracy": metrics.get("accuracy"),
+        "avg_reuse_memory_count": (reuse_total / completed) if completed else 0.0,
+        "avg_raw_revisit_count": (raw_total / completed) if completed else 0.0,
+        "avg_structured_query_count": (structured_total / completed) if completed else 0.0,
     }
 
 
@@ -295,9 +364,63 @@ def build_failure_cases(predictions: list[VQAPrediction]) -> list[dict[str, Any]
                 "correct": pred.correct,
                 "failure_type": pred.failure_type,
                 "tool_calls": pred.tool_calls,
+                "reuse_memory_count": pred.reuse_memory_count,
+                "raw_revisit_count": pred.raw_revisit_count,
+                "structured_query_count": pred.structured_query_count,
+                "session_video_position": pred.session_video_position,
             }
         )
     return cases
+
+
+def build_video_positions(samples) -> dict[str, int]:
+    positions: dict[str, int] = {}
+    per_video_counter: Counter[str] = Counter()
+    for sample in samples:
+        video_id = str(sample.primary_video_id or "")
+        per_video_counter[video_id] += 1
+        positions[sample.vqa_id] = per_video_counter[video_id]
+    return positions
+
+
+def count_reuse_memory_from_result(result) -> int:
+    return sum(1 for item in result.working_memory if isinstance(item, str) and item.startswith("reuse:"))
+
+
+def count_tools(tool_calls: list[str], allowed: set[str]) -> int:
+    return sum(1 for tool in tool_calls if tool in allowed)
+
+
+def build_video_session_summary(predictions: list[VQAPrediction]) -> dict[str, Any]:
+    by_video: dict[str, list[VQAPrediction]] = {}
+    for pred in predictions:
+        by_video.setdefault(str(pred.video_id or ""), []).append(pred)
+    video_summaries: list[dict[str, Any]] = []
+    for video_id, preds in sorted(by_video.items()):
+        correct = sum(1 for pred in preds if pred.correct)
+        tool_counts = Counter()
+        task_counts = Counter()
+        for pred in preds:
+            tool_counts.update(pred.tool_calls)
+            task_counts[pred.task_family] += 1
+        count = len(preds)
+        video_summaries.append(
+            {
+                "video_id": video_id,
+                "count": count,
+                "correct": correct,
+                "accuracy": (correct / count) if count else None,
+                "avg_reuse_memory_count": sum(pred.reuse_memory_count for pred in preds) / count if count else 0.0,
+                "avg_raw_revisit_count": sum(pred.raw_revisit_count for pred in preds) / count if count else 0.0,
+                "avg_structured_query_count": sum(pred.structured_query_count for pred in preds) / count if count else 0.0,
+                "task_family_counts": dict(task_counts),
+                "tool_counts": dict(tool_counts),
+            }
+        )
+    return {
+        "video_count": len(video_summaries),
+        "videos": video_summaries,
+    }
 
 
 def update_run_artifacts(
@@ -319,6 +442,7 @@ def update_run_artifacts(
     failure_summary = summarize_failures(predictions)
     progress = build_progress_payload(total=len(samples), predictions=predictions)
     failure_cases = build_failure_cases(predictions)
+    video_session_summary = build_video_session_summary(predictions)
     summary = {
         "run_name": run_name,
         "sample_count": len(samples),
@@ -333,6 +457,7 @@ def update_run_artifacts(
         "metrics": metrics,
         "failure_summary": failure_summary,
         "progress": progress,
+        "video_session_summary": video_session_summary,
     }
     metrics_path.write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
     failures_path.write_text(json.dumps(failure_summary, ensure_ascii=False, indent=2), encoding="utf-8")
