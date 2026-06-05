@@ -106,6 +106,18 @@ class AgentState:
                 deduped.append(item)
         self.open_questions = deduped[-20:]
 
+    def trim_memory(self, *, working_limit: int = 120, evidence_limit: int = 120, frame_limit: int = 80, node_limit: int = 80) -> None:
+        self.working_memory = self.working_memory[-working_limit:]
+        self.evidence_bundle = self.evidence_bundle[-evidence_limit:]
+        self.retrieved_frames = self.retrieved_frames[-frame_limit:]
+        self.retrieved_nodes = self.retrieved_nodes[-node_limit:]
+        self.retrieved_node_ids = self.retrieved_node_ids[-node_limit:]
+        self.hypotheses = self.hypotheses[-80:]
+        self.open_questions = self.open_questions[-20:]
+        self.tool_trace = self.tool_trace[-120:]
+        self.tool_failures = self.tool_failures[-80:]
+        self.ineffective_tools = self.ineffective_tools[-80:]
+
     def inputs_payload(self) -> dict[str, Any]:
         try:
             payload = json.loads(self.inputs_json or "{}")

@@ -117,6 +117,7 @@ class GraphAgentVideoSession:
             confidence=state.confidence,
             elapsed_seconds=time.time() - started_at,
         )
+        self._compress_and_persist_session_memory(state=state, row=row)
         self.question_count += 1
         self.persisted_memory = state.export_session_memory()
         self._save_session_state(result=result, state=state)
@@ -168,6 +169,59 @@ class GraphAgentVideoSession:
             "session_memory": state.export_session_memory(),
         }
         self.state_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _compress_and_persist_session_memory(self, *, state: AgentState, row: dict[str, Any]) -> None:
+        summary_lines = state.evidence_bundle[-6:] or state.working_memory[-6:]
+        if summary_lines:
+            label = f"session summary {row.get('task_family') or state.task_family}"
+            try:
+                start_time, end_time = self._infer_session_time_window(state=state, row=row)
+                self.toolbox.write_timeline_summary(
+                    label=label,
+                    start_time=start_time,
+                    end_time=end_time,
+                    summary=" | ".join(summary_lines),
+                    evidence_paths=state.retrieved_frames[-12:],
+                    keywords=[state.task_family, "session_summary", "compressed_memory"],
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        if state.working_memory:
+            important = [
+                item
+                for item in state.working_memory
+                if any(
+                    token in item
+                    for token in (
+                        "ocr_reading=",
+                        "state_change_hint=",
+                        "target_location=",
+                        "possible_step=",
+                        "candidate_answer_index=",
+                    )
+                )
+            ]
+            if important:
+                try:
+                    start_time, end_time = self._infer_session_time_window(state=state, row=row)
+                    self.toolbox.write_observation(
+                        label=f"compressed session memory {state.task_family}",
+                        start_time=start_time,
+                        end_time=end_time,
+                        attributes={"summary": " | ".join(important[-8:]), "source": "session_memory_compressor"},
+                        evidence_paths=state.retrieved_frames[-12:],
+                        keywords=[state.task_family, "compressed", "memory"],
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+        state.trim_memory()
+
+    def _infer_session_time_window(self, *, state: AgentState, row: dict[str, Any]) -> tuple[float | None, float | None]:
+        hints = self.toolbox.default_hints(str(row.get("question") or state.question), str(row.get("inputs_json") or state.inputs_json))
+        times = [float(value) for value in hints.get("times") or []] + [float(value) for value in hints.get("input_times") or []]
+        if not times:
+            return None, None
+        return min(times), max(times)
 
 
 class GraphAgent:
