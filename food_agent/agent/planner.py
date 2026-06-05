@@ -21,6 +21,15 @@ class PlannerDecision:
     confidence: float = 0.0
 
 
+@dataclass(frozen=True)
+class CandidatePlan:
+    decision: PlannerDecision
+    cost: int
+    gain: int
+    risk: int
+    rationale: str
+
+
 class GraphAgentPlanner:
     """Use the model to decide the next tool call instead of hard-coded routing."""
 
@@ -913,7 +922,14 @@ class GraphAgentPlanner:
         candidates = self._build_state_driven_candidates(state=state, hints=hints, used_tools=used_tools)
         if not candidates:
             return None
-        return sorted(candidates, key=lambda item: (int(item["priority"]), str(item["tool"])))[0]["decision"]
+        ranked = sorted(candidates, key=lambda item: (item.cost - item.gain + item.risk, item.cost, item.risk, item.decision.tool))
+        best = ranked[0]
+        self._state_add_memory(
+            state,
+            f"candidate_plan_selected tool={best.decision.tool} cost={best.cost} gain={best.gain} risk={best.risk}",
+        )
+        self._state_add_hypothesis(state, f"candidate_plan_rationale={best.rationale}")
+        return best.decision
 
     def _build_state_driven_candidates(
         self,
@@ -921,8 +937,8 @@ class GraphAgentPlanner:
         state: AgentState,
         hints: dict[str, Any],
         used_tools: list[str],
-    ) -> list[dict[str, Any]]:
-        candidates: list[dict[str, Any]] = []
+    ) -> list[CandidatePlan]:
+        candidates: list[CandidatePlan] = []
         open_questions = list(getattr(state, "open_questions", []) or [])
         recent_failures = [item for item in getattr(state, "tool_failures", []) if isinstance(item, dict)]
         recent_ineffective = [item for item in getattr(state, "ineffective_tools", []) if isinstance(item, dict)]
@@ -939,23 +955,28 @@ class GraphAgentPlanner:
         ocr_keyword = hints.get("ocr_keyword")
         object_hint = hints.get("object_hint")
 
-        def add_candidate(priority: int, thought: str, tool: str, args: dict[str, Any]) -> None:
+        def add_candidate(cost: int, gain: int, risk: int, rationale: str, thought: str, tool: str, args: dict[str, Any]) -> None:
             if tool in blocked_tools:
                 return
             if tool in used_tools and tool not in {"query_time", "sample_sparse_frames", "extract_frames_for_range"}:
                 return
             candidates.append(
-                {
-                    "priority": priority,
-                    "tool": tool,
-                    "decision": PlannerDecision(thought=thought, tool=tool, args=args),
-                }
+                CandidatePlan(
+                    decision=PlannerDecision(thought=thought, tool=tool, args=args),
+                    cost=cost,
+                    gain=gain,
+                    risk=risk,
+                    rationale=rationale,
+                )
             )
 
         if "need_ocr_reading" in open_questions:
             if bbox and state.retrieved_frames:
                 add_candidate(
-                    10,
+                    2,
+                    5,
+                    1,
+                    "已有局部目标且直接解决 OCR 缺口，收益高成本低。",
                     "当前最缺 OCR 读数，优先对局部候选区域做 OCR。",
                     "run_ocr_on_region",
                     {
@@ -967,14 +988,20 @@ class GraphAgentPlanner:
                 )
             if state.retrieved_frames:
                 add_candidate(
-                    20,
+                    3,
+                    4,
+                    2,
+                    "已有帧但没有局部定位，整图 OCR 成本低于重新抽帧。",
                     "当前最缺 OCR 读数，退而求其次对整图做 OCR。",
                     "run_ocr_on_image",
                     {"image_path": state.retrieved_frames[-1]},
                 )
             if ocr_keyword:
                 add_candidate(
-                    30,
+                    1,
+                    3,
+                    1,
+                    "先查已有 OCR 记忆最便宜，可先尝试复用历史证据。",
                     "当前最缺 OCR 读数，先检索已有 OCR 记忆。",
                     "query_ocr",
                     {
@@ -986,27 +1013,39 @@ class GraphAgentPlanner:
                 )
         if "need_region_grounding" in open_questions and bbox and state.retrieved_frames:
             add_candidate(
-                15,
+                2,
+                4,
+                1,
+                "画框可快速确认目标是否对齐，成本低。",
                 "当前最缺区域定位证据，先画框确认目标。",
                 "render_bbox_overlay",
                 {"image_path": state.retrieved_frames[-1], "bbox": bbox, "tag": f"{state.task_family}_state_bbox"},
             )
             add_candidate(
-                25,
+                3,
+                4,
+                2,
+                "局部上下文图比整段重看更便宜，适合补区域细节。",
                 "当前最缺区域定位证据，再补局部上下文图。",
                 "extract_region_with_context",
                 {"image_path": state.retrieved_frames[-1], "bbox": bbox, "expand_ratio": 0.35, "tag": f"{state.task_family}_state_region"},
             )
             if combined_times:
                 add_candidate(
-                    35,
+                    4,
+                    5,
+                    3,
+                    "解析到 object track 收益高，但依赖更强。",
                     "当前最缺区域定位证据，尝试从 bbox 解析到 object track。",
                     "resolve_bbox_reference",
                     {"bbox": bbox, "reference_time": combined_times[0], "limit": 5},
                 )
         if "need_state_evidence" in open_questions:
             add_candidate(
-                18,
+                1,
+                4,
+                1,
+                "状态检索便宜且可能直接命中已有记忆。",
                 "当前最缺状态变化证据，先检索状态记忆。",
                 "query_state",
                 {
@@ -1018,7 +1057,10 @@ class GraphAgentPlanner:
             )
             if state.retrieved_frames:
                 add_candidate(
-                    28,
+                    4,
+                    5,
+                    2,
+                    "视觉观察成本更高，但能补图谱检索拿不到的新状态线索。",
                     "当前最缺状态变化证据，补一次视觉观察。",
                     "inspect_visual_evidence",
                     {
@@ -1031,7 +1073,10 @@ class GraphAgentPlanner:
                 )
         if "need_location_evidence" in open_questions:
             add_candidate(
-                18,
+                1,
+                4,
+                1,
+                "位置检索便宜，可优先尝试已有空间记忆。",
                 "当前最缺位置证据，先检索空间位置记忆。",
                 "query_location",
                 {
@@ -1043,7 +1088,10 @@ class GraphAgentPlanner:
             )
             if combined_times and state.task_family in {"3d_perception_fixture_location", "gaze_gaze_estimation"}:
                 add_candidate(
-                    24,
+                    2,
+                    5,
+                    2,
+                    "空间上下文针对 3D/gaze 题收益高。",
                     "当前最缺位置证据，补当前时刻的空间上下文。",
                     "query_spatial_context",
                     {"time_s": combined_times[0], "object_name": None, "limit": 12},
@@ -1051,13 +1099,19 @@ class GraphAgentPlanner:
         if "need_time_localization" in open_questions or "need_initial_observation" in open_questions:
             if combined_times:
                 add_candidate(
-                    12,
+                    1,
+                    4,
+                    1,
+                    "时间检索成本最低，应先试图复用已有时间记忆。",
                     "当前最缺时间定位/初始观察，先检索时间窗口记忆。",
                     "query_time",
                     {"start_time": min(combined_times), "end_time": max(combined_times), "limit": 20},
                 )
                 add_candidate(
-                    22,
+                    4,
+                    5,
+                    2,
+                    "稀疏抽帧更贵，但能直接补原始观察。",
                     "当前最缺时间定位/初始观察，回看原始视频做稀疏抽帧。",
                     "sample_sparse_frames",
                     {
@@ -1070,7 +1124,10 @@ class GraphAgentPlanner:
         if "need_disambiguating_evidence" in open_questions:
             if object_hint and bbox is None:
                 add_candidate(
-                    26,
+                    2,
+                    4,
+                    1,
+                    "对象区域检索有助于快速补区分性记忆。",
                     "当前缺少区分性证据，先检索对象/区域记忆。",
                     "query_region",
                     {
@@ -1082,7 +1139,10 @@ class GraphAgentPlanner:
                 )
             if ingredient_name and state.task_family == "ingredient_ingredient_weight" and combined_times:
                 add_candidate(
-                    16,
+                    1,
+                    5,
+                    1,
+                    "结构化称量记录对称重题收益高且成本低。",
                     "当前缺少区分性证据，先查结构化称量记录。",
                     "query_ingredient_measurement",
                     {
@@ -1094,7 +1154,10 @@ class GraphAgentPlanner:
                 )
             if state.task_family.startswith("recipe_"):
                 add_candidate(
-                    16,
+                    1,
+                    4,
+                    1,
+                    "recipe_step 检索对步骤题通常是最便宜的第一跳。",
                     "当前缺少区分性证据，先检索 recipe_step 事件。",
                     "query_event",
                     {
@@ -1106,7 +1169,10 @@ class GraphAgentPlanner:
                 )
         if "need_alternative_evidence_path" in open_questions and state.retrieved_frames:
             add_candidate(
-                40,
+                5,
+                5,
+                3,
+                "已有路径失败后，视觉观察可提供跨模态替代证据。",
                 "当前路径无效或失败，补一次视觉检查尝试换证据源。",
                 "inspect_visual_evidence",
                 {
@@ -1119,6 +1185,24 @@ class GraphAgentPlanner:
                 },
             )
         return candidates
+
+    def _state_add_memory(self, state: AgentState, text: str) -> None:
+        add_memory = getattr(state, "add_memory", None)
+        if callable(add_memory):
+            add_memory(text)
+            return
+        working_memory = getattr(state, "working_memory", None)
+        if isinstance(working_memory, list) and text not in working_memory:
+            working_memory.append(text)
+
+    def _state_add_hypothesis(self, state: AgentState, text: str) -> None:
+        add_hypothesis = getattr(state, "add_hypothesis", None)
+        if callable(add_hypothesis):
+            add_hypothesis(text)
+            return
+        hypotheses = getattr(state, "hypotheses", None)
+        if isinstance(hypotheses, list) and text not in hypotheses:
+            hypotheses.append(text)
 
     def _enforce_task_requirements(self, *, state: AgentState, hints: dict[str, Any], decision: PlannerDecision) -> PlannerDecision:
         used_tools = [entry.get("tool") for entry in state.tool_trace if isinstance(entry, dict)]
