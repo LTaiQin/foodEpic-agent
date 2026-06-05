@@ -63,8 +63,38 @@ def main() -> int:
         if row["vqa_id"] in completed_ids:
             print(f"[{index}/{len(rows)}] task={row['task_family']} skip_resume sample={row['vqa_id']}", flush=True)
             continue
-        result = agent.answer_vqa_row(row, max_steps=args.max_steps)
-        payload = result.to_dict(gold=int(row["correct_idx"]), include_row=row)
+        try:
+            result = agent.answer_vqa_row(row, max_steps=args.max_steps)
+            payload = result.to_dict(gold=int(row["correct_idx"]), include_row=row)
+        except Exception as exc:  # noqa: BLE001
+            payload = {
+                "vqa_id": row["vqa_id"],
+                "video_id": row["primary_video_id"],
+                "task_family": row["task_family"],
+                "prediction": None,
+                "gold": int(row["correct_idx"]),
+                "correct": False,
+                "answer_text": "",
+                "confidence": 0.0,
+                "elapsed_seconds": None,
+                "tool_trace": [],
+                "evidence_bundle": [],
+                "working_memory": [],
+                "retrieved_frames": [],
+                "raw_model_output": "",
+                "question": row.get("question"),
+                "choices_json": row.get("choices_json"),
+                "inputs_json": row.get("inputs_json"),
+                "failure_type": f"agent_error:{type(exc).__name__}",
+                "failure_message": str(exc),
+            }
+            outputs.append(payload)
+            write_result(out_path, payload, jsonl=args.append_jsonl)
+            print(
+                f"[{index}/{len(rows)}] task={row['task_family']} sample={row['vqa_id']} failure={payload['failure_type']}",
+                flush=True,
+            )
+            continue
         outputs.append(payload)
         write_result(out_path, payload, jsonl=args.append_jsonl)
         print(
@@ -121,6 +151,9 @@ def write_result(path: Path, payload: dict[str, object], *, jsonl: bool) -> None
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
         return
+    existing = load_existing_records(path)
+    existing.append(payload)
+    path.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 if __name__ == "__main__":

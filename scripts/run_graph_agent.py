@@ -51,26 +51,37 @@ def main() -> int:
     for row in rows:
         if row["vqa_id"] in completed_ids:
             continue
-        result = agent.answer_vqa_row(row, max_steps=args.max_steps)
-        payload = {
-            "vqa_id": row["vqa_id"],
-            "task_family": row["task_family"],
-            "prediction": result.prediction,
-            "gold": row["correct_idx"],
-            "correct": result.prediction == int(row["correct_idx"]),
-            "tool_trace": result.tool_trace,
-            "evidence_bundle": result.evidence_bundle,
-            "working_memory": result.working_memory,
-            "retrieved_frames": result.retrieved_frames,
-            "confidence": result.confidence,
-            "raw_model_output": result.raw_model_output,
-        }
+        try:
+            result = agent.answer_vqa_row(row, max_steps=args.max_steps)
+            payload = result.to_dict(gold=int(row["correct_idx"]), include_row=row)
+        except Exception as exc:  # noqa: BLE001
+            payload = {
+                "vqa_id": row["vqa_id"],
+                "video_id": row["primary_video_id"],
+                "task_family": row["task_family"],
+                "prediction": None,
+                "gold": int(row["correct_idx"]),
+                "correct": False,
+                "answer_text": "",
+                "confidence": 0.0,
+                "elapsed_seconds": None,
+                "tool_trace": [],
+                "evidence_bundle": [],
+                "working_memory": [],
+                "retrieved_frames": [],
+                "raw_model_output": "",
+                "question": row.get("question"),
+                "choices_json": row.get("choices_json"),
+                "inputs_json": row.get("inputs_json"),
+                "failure_type": f"agent_error:{type(exc).__name__}",
+                "failure_message": str(exc),
+            }
         outputs.append(payload)
         if out_path:
             write_result(out_path, payload, jsonl=args.append_jsonl)
         print(
-            f"{row['vqa_id']} pred={result.prediction} gold={row['correct_idx']} "
-            f"correct={result.prediction == int(row['correct_idx'])}",
+            f"{row['vqa_id']} pred={payload['prediction']} gold={row['correct_idx']} "
+            f"correct={payload['correct']} failure={payload.get('failure_type')}",
             flush=True,
         )
     if not out_path:
