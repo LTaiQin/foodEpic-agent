@@ -788,6 +788,10 @@ class GraphAgent:
             index = self._coerce_choice_index(raw_result.get("best_index"), state.choices)
             if index is None:
                 continue
+            if raw_result.get("need_more_evidence"):
+                reranked = self._resolve_unresolved_action_intent_answer(raw_result=raw_result, state=state)
+                if reranked is not None:
+                    return reranked
             confidence = self._coerce_confidence(raw_result.get("confidence"), default=0.78)
             if raw_result.get("need_more_evidence"):
                 confidence = min(confidence, 0.62)
@@ -796,6 +800,111 @@ class GraphAgent:
                 answer = str(state.choices[index])
             return index, answer, confidence
         return None
+
+    def _resolve_unresolved_action_intent_answer(
+        self,
+        *,
+        raw_result: dict[str, Any],
+        state: AgentState,
+    ) -> tuple[int, str, float] | None:
+        evidence_items = raw_result.get("candidate_evidence")
+        if not isinstance(evidence_items, list):
+            return None
+        ranked: list[tuple[float, int, str]] = []
+        for item in evidence_items:
+            if not isinstance(item, dict):
+                continue
+            index = self._coerce_choice_index(item.get("index"), state.choices)
+            if index is None:
+                continue
+            score = self._coerce_float(item.get("score"), default=0.0)
+            support = str(item.get("support") or "")
+            contradiction = str(item.get("contradiction") or "")
+            choice = str(state.choices[index])
+            adjusted_score = self._score_action_intent_candidate_evidence(
+                base_score=score,
+                choice=choice,
+                support=support,
+                contradiction=contradiction,
+            )
+            ranked.append((adjusted_score, index, choice))
+        if not ranked:
+            return None
+        ranked.sort(key=lambda row: (-row[0], row[1]))
+        best_score, best_index, best_choice = ranked[0]
+        state.add_memory(f"action_intent_unresolved_rerank_best_index={best_index} score={best_score:.2f}")
+        return best_index, best_choice, min(max(0.36 + max(best_score, 0.0) * 0.45, 0.36), 0.68)
+
+    def _score_action_intent_candidate_evidence(
+        self,
+        *,
+        base_score: float,
+        choice: str,
+        support: str,
+        contradiction: str,
+    ) -> float:
+        support_lc = support.lower()
+        contradiction_lc = contradiction.lower()
+        choice_lc = choice.lower()
+        adjusted = max(0.0, min(float(base_score), 1.0))
+        if self._action_intent_text_has_negative_evidence(contradiction_lc):
+            adjusted -= 0.18
+        if self._action_intent_text_has_negative_evidence(support_lc):
+            adjusted -= 0.12
+        if any(term in support_lc for term in ("theory", "theoretically", "could", "can be used", "compatible", "common", "常见", "理论", "可能")):
+            adjusted -= 0.08
+        if any(term in support_lc for term in ("least contradicted", "broadest", "最不矛盾", "最宽泛")):
+            adjusted -= 0.18
+        if "clean" in choice_lc and any(term in contradiction_lc for term in ("no actual cleaning", "no visible wiping", "没有任何明确清洁", "没有擦")):
+            adjusted -= 0.16
+        if "away" in choice_lc and any(term in contradiction_lc for term in ("not stored", "not put", "counter", "没有看到把", "暂时", "台面")):
+            adjusted -= 0.14
+        if "dry" in choice_lc and "hand" in choice_lc and any(term in contradiction_lc for term in ("no visible hand", "no clear wet-hand", "没有看到双手", "没有先洗手")):
+            adjusted -= 0.14
+        if self._action_intent_text_has_direct_positive_evidence(support_lc):
+            adjusted += 0.1
+        if self._action_intent_text_has_direct_positive_evidence(contradiction_lc):
+            adjusted -= 0.08
+        return min(adjusted, 1.0)
+
+    def _action_intent_text_has_negative_evidence(self, text: str) -> bool:
+        return any(
+            term in text
+            for term in (
+                "no ",
+                "not ",
+                "lack",
+                "missing",
+                "absence",
+                "without",
+                "contradict",
+                "没有",
+                "未",
+                "缺少",
+                "不足",
+            )
+        )
+
+    def _action_intent_text_has_direct_positive_evidence(self, text: str) -> bool:
+        return any(
+            term in text
+            for term in (
+                "shown",
+                "visible",
+                "actual",
+                "completed",
+                "direct",
+                "placed on the scale",
+                "wiped",
+                "poured",
+                "stored",
+                "returned",
+                "看到",
+                "明确",
+                "完成",
+                "直接",
+            )
+        )
 
     def _record_deterministic_finalize_marker(self, state: AgentState, *, prediction: int, confidence: float) -> None:
         marker = f"deterministic_finalize prediction={prediction} confidence={confidence:.2f}"
@@ -946,6 +1055,9 @@ class GraphAgent:
         return None
 
     def _coerce_confidence(self, value: Any, *, default: float) -> float:
+        return self._coerce_float(value, default=default)
+
+    def _coerce_float(self, value: Any, *, default: float) -> float:
         try:
             confidence = float(value)
         except Exception:  # noqa: BLE001
