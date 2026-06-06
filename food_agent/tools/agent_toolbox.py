@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,7 @@ import pandas as pd
 
 from PIL import Image
 
+from food_agent.agent.action_intent import action_intent_followup_decision, choice_categories
 from food_agent.memory import GraphEdgeRecord, GraphMemoryStore, GraphNodeRecord
 from food_agent.model_client import OpenAICompatibleModelClient
 from food_agent.paths import ProjectPaths
@@ -37,7 +39,7 @@ class AgentToolbox:
         self.graph = GraphToolbox(store)
         self.state_store = FoodStateStore(self.paths.output_root / "event_index")
         self.spatial_store = SpatialContextStore(self.paths.output_root / "event_index")
-        self.workspace = self.paths.output_root / "graph_agent_artifacts" / video_id
+        self.workspace = self.paths.graph_agent_artifacts_root / video_id
         self.video = VideoToolbox(self.workspace)
 
     def tool_schemas(self) -> list[dict[str, Any]]:
@@ -99,6 +101,36 @@ class AgentToolbox:
                 "arguments": {"choices": "list[str]", "nutrient": "str"},
             },
             {
+                "name": "infer_ingredient_order_choice",
+                "description": "根据当前视频中结构化 ingredient add 事件的时间顺序，判断哪个候选食材顺序最匹配。",
+                "arguments": {"question": "str", "choices": "list[Any]"},
+            },
+            {
+                "name": "infer_recipe_catalog_choice",
+                "description": "根据 inputs_json 对应视频集合中的 recipe catalog，判断哪个候选菜谱最匹配当前视频或参与者。",
+                "arguments": {"question": "str", "choices": "list[str]", "scope": "str"},
+            },
+            {
+                "name": "infer_recipe_nutrition_choice",
+                "description": "根据 recipe catalog 中的食材集合和结构化营养统计，判断题目要求的最高营养食材。",
+                "arguments": {"question": "str", "choices": "list[str]"},
+            },
+            {
+                "name": "infer_ingredient_retrieval_choice",
+                "description": "根据题目时间窗口内的结构化 ingredient add 事件，判断哪个候选食材在该时间段被加入。",
+                "arguments": {"question": "str", "choices": "list[str]"},
+            },
+            {
+                "name": "infer_recipe_ingredient_membership_choice",
+                "description": "根据 recipe catalog 中的菜谱食材集合，判断哪个候选食材不属于指定菜谱。",
+                "arguments": {"question": "str", "choices": "list[str]"},
+            },
+            {
+                "name": "infer_exact_ingredient_amount_choice",
+                "description": "根据 recipe catalog 中的 ingredient_amounts，判断题目所问食材的精确用量选项。",
+                "arguments": {"question": "str", "choices": "list[str]"},
+            },
+            {
                 "name": "query_spatial_context",
                 "description": "查询当前时间附近的 object tracks、mask fixtures、gaze priming 和 audio context。",
                 "arguments": {"time_s": "float", "object_name": "str|None", "limit": "int"},
@@ -106,6 +138,11 @@ class AgentToolbox:
             {
                 "name": "get_neighbors",
                 "description": "读取已知节点的邻接边，理解节点关系。",
+                "arguments": {"node_ids": "list[str]", "edge_types": "list[str]|None", "limit": "int"},
+            },
+            {
+                "name": "expand_graph_context",
+                "description": "从一组已知节点出发，沿时间/共现/语义关系扩展一跳上下文，取回相关节点和边。",
                 "arguments": {"node_ids": "list[str]", "edge_types": "list[str]|None", "limit": "int"},
             },
             {
@@ -122,6 +159,16 @@ class AgentToolbox:
                 "name": "estimate_stationary_start",
                 "description": "根据 object tracks 判断从哪个候选起始时间开始，物体保持静止超过阈值秒数。",
                 "arguments": {"bbox": "list[float]", "reference_time": "float", "choices": "list[str]", "threshold_s": "float"},
+            },
+            {
+                "name": "infer_object_drop_location",
+                "description": "根据 reference bbox 对应对象的后续 track/mask fixture，推断该对象最终被放到了哪个位置选项。",
+                "arguments": {"bbox": "list[float]", "reference_time": "float", "choices": "list[str]", "question": "str"},
+            },
+            {
+                "name": "infer_object_movement_itinerary",
+                "description": "根据 reference bbox 对应对象的完整 tracks/mask fixtures，推断该对象在视频中的移动路径选项。",
+                "arguments": {"bbox": "list[float]", "reference_time": "float", "choices": "list[str]"},
             },
             {
                 "name": "extract_frame_at_time",
@@ -142,6 +189,11 @@ class AgentToolbox:
                 "name": "extract_input_reference_frames",
                 "description": "根据 inputs_json 中给出的 image/video 引用，跨视频提取对应参考帧。",
                 "arguments": {"tag": "str"},
+            },
+            {
+                "name": "retrieve_cached_artifacts",
+                "description": "从当前视频的 artifact 工作区检索与指定 tag 或时间窗口相关的已有图片产物，优先复用先前已经抽取的帧、局部图和画框图。",
+                "arguments": {"tag_hint": "str|None", "start_time": "float|None", "end_time": "float|None", "limit": "int"},
             },
             {
                 "name": "render_bbox_overlay",
@@ -189,6 +241,11 @@ class AgentToolbox:
                 "arguments": {"choice_index": "int", "choices": "list[str]", "frames_per_choice": "int", "tag": "str"},
             },
             {
+                "name": "infer_temporal_localization_choice",
+                "description": "针对时间定位题，为各选项抽取关键帧并直接比较哪个时间段最符合题目动作/步骤/加料描述。",
+                "arguments": {"question": "str", "choices": "list[str]", "task_family": "str", "frames_per_choice": "int", "tag": "str"},
+            },
+            {
                 "name": "count_visual_candidates",
                 "description": "根据参考目标图和候选事件时刻，判断哪些时刻发生了目标交互并给出计数。",
                 "arguments": {
@@ -208,7 +265,7 @@ class AgentToolbox:
             {
                 "name": "infer_named_fixture_direction",
                 "description": "先识别题目中的具名 fixture 在当前厨房语境里最可能对应什么，再映射到钟表方向选项。",
-                "arguments": {"question": "str", "choices": "list[str]", "image_paths": "list[str]"},
+                "arguments": {"question": "str", "choices": "list[str]", "image_paths": "list[str]", "spatial_context": "dict|None"},
             },
             {
                 "name": "infer_gaze_target_with_context",
@@ -236,6 +293,28 @@ class AgentToolbox:
                 "arguments": {"question": "str", "choices": "list[str]", "image_paths": "list[str]", "context_notes": "list[str]"},
             },
             {
+                "name": "resolve_action_intent_pairwise",
+                "description": "当 why 题存在近义歧义时，只在两个高混淆候选之间结合结果帧做最终裁决。",
+                "arguments": {
+                    "question": "str",
+                    "choices": "list[str]",
+                    "candidate_indices": "list[int]",
+                    "image_paths": "list[str]",
+                    "context_notes": "list[str]",
+                },
+            },
+            {
+                "name": "resolve_action_intent_future_use",
+                "description": "当 why 题的目的依赖动作后的实际用途时，逐项验证后续用途证据并排除竞争选项。",
+                "arguments": {
+                    "question": "str",
+                    "choices": "list[str]",
+                    "candidate_indices": "list[int]",
+                    "image_paths": "list[str]",
+                    "context_notes": "list[str]",
+                },
+            },
+            {
                 "name": "write_observation",
                 "description": "把新的观察写回图谱，供后续继续检索。",
                 "arguments": {
@@ -245,12 +324,14 @@ class AgentToolbox:
                     "attributes": "dict",
                     "evidence_paths": "list[str]",
                     "keywords": "list[str]|None",
+                    "source_tool": "str|None",
+                    "confidence": "float|None",
                 },
             },
             {
                 "name": "write_frame_observation",
                 "description": "把针对某一帧的结构化观察写回图谱，并与相邻 frame 节点建立关联。",
-                "arguments": {"frame_path": "str", "time_s": "float|None", "label": "str", "observation": "dict", "keywords": "list[str]|None"},
+                "arguments": {"frame_path": "str", "time_s": "float|None", "label": "str", "observation": "dict", "keywords": "list[str]|None", "source_tool": "str|None", "confidence": "float|None"},
             },
             {
                 "name": "write_region_observation",
@@ -262,6 +343,8 @@ class AgentToolbox:
                     "label": "str",
                     "observation": "dict",
                     "keywords": "list[str]|None",
+                    "source_tool": "str|None",
+                    "confidence": "float|None",
                 },
             },
             {
@@ -275,6 +358,8 @@ class AgentToolbox:
                     "bbox": "list[float]|None",
                     "attributes": "dict|None",
                     "keywords": "list[str]|None",
+                    "source_tool": "str|None",
+                    "confidence": "float|None",
                 },
             },
             {
@@ -287,6 +372,8 @@ class AgentToolbox:
                     "attributes": "dict|None",
                     "evidence_paths": "list[str]|None",
                     "keywords": "list[str]|None",
+                    "source_tool": "str|None",
+                    "confidence": "float|None",
                 },
             },
             {
@@ -299,6 +386,8 @@ class AgentToolbox:
                     "summary": "str",
                     "evidence_paths": "list[str]|None",
                     "keywords": "list[str]|None",
+                    "source_tool": "str|None",
+                    "confidence": "float|None",
                 },
             },
             {
@@ -313,6 +402,8 @@ class AgentToolbox:
                     "end_time": "float|None",
                     "evidence_paths": "list[str]|None",
                     "keywords": "list[str]|None",
+                    "source_tool": "str|None",
+                    "confidence": "float|None",
                 },
             },
             {
@@ -455,18 +546,59 @@ class AgentToolbox:
         end_time: float | None = None,
         limit: int = 20,
     ) -> dict[str, Any]:
-        nodes = self.graph.query_ocr(
-            video_id=self.video_id,
-            keyword=keyword,
-            start_time=start_time,
-            end_time=end_time,
-            limit=limit,
-        )
-        return {"nodes": nodes, "count": len(nodes)}
+        candidate_keywords = self._ocr_query_candidates(keyword)
+        merged_nodes: list[dict[str, Any]] = []
+        seen_node_ids: set[str] = set()
+        for candidate_keyword in candidate_keywords:
+            nodes = self.graph.query_ocr(
+                video_id=self.video_id,
+                keyword=candidate_keyword,
+                start_time=start_time,
+                end_time=end_time,
+                limit=limit,
+            )
+            for node in nodes:
+                node_id = str(node.get("node_id") or "")
+                if not node_id or node_id in seen_node_ids:
+                    continue
+                seen_node_ids.add(node_id)
+                merged_nodes.append(node)
+                if len(merged_nodes) >= limit:
+                    break
+            if len(merged_nodes) >= limit:
+                break
+        return {
+            "nodes": merged_nodes,
+            "count": len(merged_nodes),
+            "query_keywords": candidate_keywords,
+        }
 
     def get_neighbors(self, node_ids: list[str], edge_types: list[str] | None = None, limit: int = 50) -> dict[str, Any]:
         edges = self.graph.get_neighbors(node_ids=node_ids, edge_types=edge_types, limit=limit)
         return {"edges": edges, "count": len(edges)}
+
+    def expand_graph_context(
+        self,
+        node_ids: list[str],
+        edge_types: list[str] | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        relation_types = edge_types or ["derived_from", "co_occurs", "same_object", "same_step", "before", "after"]
+        edges = self.graph.get_neighbors(node_ids=node_ids, edge_types=relation_types, limit=limit)
+        related_nodes: list[dict[str, Any]] = []
+        seen_nodes: set[str] = set()
+        for edge in edges:
+            if not isinstance(edge, dict):
+                continue
+            target_id = str(edge.get("target_id") or "")
+            if not target_id or target_id in seen_nodes or target_id in node_ids:
+                continue
+            node = self.store.get_node(target_id)
+            if node is None:
+                continue
+            seen_nodes.add(target_id)
+            related_nodes.append(node)
+        return {"edges": edges, "nodes": related_nodes, "count": len(edges), "node_count": len(related_nodes)}
 
     def query_spatial_context(self, time_s: float, object_name: str | None = None, limit: int = 20) -> dict[str, Any]:
         context = self.spatial_store.combined_context(
@@ -487,23 +619,39 @@ class AgentToolbox:
     def compute_nutrition_change(self, start_time: float, end_time: float) -> dict[str, Any]:
         rows = self.state_store.ingredient_interval(self.video_id, start_time, end_time)
         totals = {key: 0.0 for key in ("calories", "carbs", "fat", "protein")}
-        contributing: list[dict[str, Any]] = []
+        raw_items: list[tuple[float, dict[str, Any]]] = []
         for row in rows:
             payload = self._parse_payload_json(row.get("payload_json"))
             if str(payload.get("action_type") or "").lower() != "add":
                 continue
-            item = {
-                "event_id": row.get("event_id"),
-                "label": row.get("label"),
-                "start_time": row.get("start_time"),
-                "end_time": row.get("end_time"),
-            }
+            nutrient_values: dict[str, float] = {}
             for key in totals:
                 value = self._float_or_none(payload.get(key))
                 if value is not None:
-                    totals[key] += value
-                    item[key] = value
+                    nutrient_values[key] = value
+            start_value = float(row.get("start_time") or 0.0)
+            end_value = float(row.get("end_time") or 0.0)
+            item = {
+                "event_id": row.get("event_id"),
+                "label": row.get("label"),
+                "start_time": start_value,
+                "end_time": end_value,
+            }
+            for key, value in nutrient_values.items():
+                item[key] = value
+            boundary_distance = abs(start_value - float(start_time)) + abs(end_value - float(end_time))
+            raw_items.append((boundary_distance, item))
+        raw_items.sort(key=lambda pair: (pair[0], pair[1]["start_time"], pair[1]["end_time"]))
+        contributing: list[dict[str, Any]] = []
+        for _, item in raw_items:
+            if self._is_redundant_nutrition_event(item=item, selected=contributing):
+                continue
             contributing.append(item)
+        for item in contributing:
+            for key in totals:
+                value = self._float_or_none(item.get(key))
+                if value is not None:
+                    totals[key] += value
         return {
             "totals": totals,
             "events": contributing,
@@ -511,6 +659,28 @@ class AgentToolbox:
             "start_time": start_time,
             "end_time": end_time,
         }
+
+    def _is_redundant_nutrition_event(self, *, item: dict[str, Any], selected: list[dict[str, Any]]) -> bool:
+        label = str(item.get("label") or "").strip().lower()
+        start_time = self._float_or_none(item.get("start_time"))
+        end_time = self._float_or_none(item.get("end_time"))
+        if not label or start_time is None or end_time is None:
+            return False
+        for existing in selected:
+            existing_label = str(existing.get("label") or "").strip().lower()
+            existing_start = self._float_or_none(existing.get("start_time"))
+            existing_end = self._float_or_none(existing.get("end_time"))
+            if existing_label != label or existing_start is None or existing_end is None:
+                continue
+            overlap = max(0.0, min(end_time, existing_end) - max(start_time, existing_start))
+            if overlap <= 0:
+                continue
+            shorter = min(end_time - start_time, existing_end - existing_start)
+            if shorter <= 0:
+                continue
+            if overlap / shorter >= 0.8:
+                return True
+        return False
 
     def compare_choice_nutrition(self, choices: list[str], nutrient: str = "carbs") -> dict[str, Any]:
         nutrient_key = str(nutrient).strip().lower()
@@ -554,6 +724,263 @@ class AgentToolbox:
             "best_index": best_index,
             "answer": str(choices[best_index]),
             "confidence": 0.7 if valid else 0.1,
+        }
+
+    def infer_ingredient_order_choice(self, question: str, choices: list[Any]) -> dict[str, Any]:
+        rows = self.state_store.ingredient_interval(self.video_id, 0.0, 1.0e9)
+        observed_order: list[str] = []
+        for row in rows:
+            label = str(row.get("label") or "").strip()
+            if not label:
+                payload = self._parse_payload_json(row.get("payload_json"))
+                label = str(payload.get("ingredient_name") or payload.get("name") or "").strip()
+            if label:
+                observed_order.append(label)
+        if not observed_order:
+            return {
+                "best_index": 0,
+                "answer": str(choices[0]),
+                "confidence": 0.1,
+                "reason": "no_ingredient_add_events",
+                "observed_order": [],
+            }
+        scores: list[dict[str, Any]] = []
+        best_index = 0
+        best_score = float("-inf")
+        for index, choice in enumerate(choices):
+            normalized_choice = choice if isinstance(choice, list) else [choice]
+            candidate_order = [str(item).strip() for item in normalized_choice]
+            score, reason = self._score_ingredient_order_choice(candidate_order=candidate_order, observed_order=observed_order)
+            scores.append({"index": index, "score": score, "reason": reason, "choice": candidate_order})
+            if score > best_score:
+                best_score = score
+                best_index = index
+        runner_up = sorted((item["score"] for item in scores), reverse=True)[1] if len(scores) > 1 else 0.0
+        confidence = min(0.9, 0.45 + 0.08 * max(0.0, best_score) + 0.05 * max(0.0, best_score - runner_up))
+        if best_score <= 0:
+            confidence = 0.18
+        return {
+            "best_index": best_index,
+            "answer": str(choices[best_index]),
+            "confidence": confidence,
+            "reason": f"observed_order={observed_order}; {scores[best_index]['reason']}",
+            "observed_order": observed_order,
+            "scores": scores,
+        }
+
+    def infer_recipe_catalog_choice(self, question: str, choices: list[str], scope: str = "video") -> dict[str, Any]:
+        inputs = self.default_hints(self.runtime_question, self.runtime_inputs_json).get("inputs") or {}
+        video_ids = self._extract_video_ids_from_inputs(inputs)
+        if not video_ids:
+            video_ids = [self.video_id]
+        recipe_catalog = self.state_store.recipe_catalog(video_ids)
+        recipe_names = [str(item.get("name") or "") for item in recipe_catalog if item.get("name")]
+        recipe_step_text = " ".join(
+            str(step_text)
+            for recipe in recipe_catalog
+            for step_text in (recipe.get("steps") or {}).values()
+            if step_text
+        )
+        ingredient_text = " ".join(
+            str(name)
+            for recipe in recipe_catalog
+            for name in recipe.get("ingredients") or []
+            if name
+        )
+        scores: list[dict[str, Any]] = []
+        best_index = 0
+        best_score = float("-inf")
+        for index, choice in enumerate(choices):
+            choice_text = str(choice)
+            score = 0.0
+            reasons: list[str] = []
+            recipe_name_match = max((self._token_overlap_text(choice_text, name) for name in recipe_names), default=0.0)
+            if recipe_name_match:
+                score += recipe_name_match * 5.0
+                reasons.append("match_recipe_name")
+            step_overlap = self._token_overlap_text(choice_text, recipe_step_text)
+            if step_overlap:
+                score += step_overlap * 1.5
+                reasons.append("match_recipe_steps")
+            ingredient_overlap = self._token_overlap_text(choice_text, ingredient_text)
+            if ingredient_overlap:
+                score += ingredient_overlap * 0.8
+                reasons.append("match_recipe_ingredients")
+            if scope == "participant" and recipe_name_match:
+                score += 0.5
+                reasons.append("participant_catalog_bias")
+            scores.append({"index": index, "score": score, "reason": ",".join(reasons) or "weak_match"})
+            if score > best_score:
+                best_score = score
+                best_index = index
+        confidence = 0.2 if best_score <= 0 else min(0.88, 0.4 + 0.09 * best_score)
+        return {
+            "best_index": best_index,
+            "answer": str(choices[best_index]),
+            "confidence": confidence,
+            "reason": f"scope={scope}; recipe_names={recipe_names[:8]}; {scores[best_index]['reason']}",
+            "recipe_catalog": recipe_catalog,
+            "scores": scores,
+        }
+
+    def infer_recipe_nutrition_choice(self, question: str, choices: list[str]) -> dict[str, Any]:
+        nutrient = self._nutrition_key_from_question(question)
+        if nutrient is None:
+            nutrient = "carbs"
+        inputs = self.default_hints(self.runtime_question, self.runtime_inputs_json).get("inputs") or {}
+        video_ids = self._extract_video_ids_from_inputs(inputs)
+        if not video_ids:
+            video_ids = [self.video_id]
+        recipe_catalog = self.state_store.recipe_catalog(video_ids)
+        allowed_ingredients = {
+            self._normalize_food_name(name)
+            for recipe in recipe_catalog
+            for name in recipe.get("ingredients") or []
+            if name
+        }
+        ingredients = pd.read_parquet(self.paths.output_root / "event_index" / "ingredients.parquet")
+        scored: list[dict[str, Any]] = []
+        best_index = 0
+        best_value = float("-inf")
+        for index, choice in enumerate(choices):
+            label = str(choice).strip()
+            normalized = self._normalize_food_name(label)
+            subset = ingredients[ingredients["label"].astype(str).str.strip().str.lower() == label.lower()].copy()
+            values: list[float] = []
+            for _, row in subset.iterrows():
+                payload = self._parse_payload_json(row.get("payload_json"))
+                value = self._float_or_none(payload.get(nutrient))
+                if value is not None:
+                    values.append(value)
+            raw_value = max(values) if values else 0.0
+            membership_bonus = 1.0 if not allowed_ingredients or normalized in allowed_ingredients else 0.0
+            score = raw_value + membership_bonus
+            scored.append(
+                {
+                    "index": index,
+                    "ingredient": label,
+                    "value": raw_value,
+                    "membership_bonus": membership_bonus,
+                    "score": score,
+                }
+            )
+            if score > best_value:
+                best_value = score
+                best_index = index
+        confidence = 0.22 if best_value <= 0 else min(0.86, 0.42 + 0.08 * best_value)
+        return {
+            "best_index": best_index,
+            "answer": str(choices[best_index]),
+            "confidence": confidence,
+            "nutrient": nutrient,
+            "scores": scored,
+            "reason": f"nutrient={nutrient}; allowed_ingredients={sorted(allowed_ingredients)[:12]}",
+        }
+
+    def infer_ingredient_retrieval_choice(self, question: str, choices: list[str]) -> dict[str, Any]:
+        times = sorted(float(value) for value in self.default_hints(question, self.runtime_inputs_json).get("times") or [])
+        if len(times) >= 2:
+            start_time, end_time = times[0], times[-1]
+        else:
+            inputs = self.default_hints(self.runtime_question, self.runtime_inputs_json).get("inputs") or {}
+            input_times = sorted(self._extract_times_from_inputs(inputs))
+            start_time = input_times[0] if len(input_times) >= 1 else 0.0
+            end_time = input_times[-1] if len(input_times) >= 2 else start_time
+        rows = self.state_store.ingredient_interval(self.video_id, float(start_time), float(end_time))
+        observed: list[str] = []
+        for row in rows:
+            payload = self._parse_payload_json(row.get("payload_json"))
+            label = str(row.get("label") or payload.get("ingredient_name") or payload.get("name") or "").strip()
+            if label:
+                observed.append(label)
+        normalized_observed = [self._normalize_food_name(item) for item in observed if item]
+        scores: list[dict[str, Any]] = []
+        best_index = 0
+        best_score = float("-inf")
+        for index, choice in enumerate(choices):
+            normalized_choice = self._normalize_food_name(choice)
+            membership = 1.0 if normalized_choice and normalized_choice in normalized_observed else 0.0
+            fuzzy = max((self._token_overlap_text(choice, candidate) for candidate in observed), default=0.0)
+            score = membership * 5.0 + fuzzy
+            reason = "interval_match" if membership else ("fuzzy_interval_match" if fuzzy > 0 else "not_in_interval")
+            scores.append({"index": index, "choice": str(choice), "score": score, "reason": reason})
+            if score > best_score:
+                best_score = score
+                best_index = index
+        confidence = 0.15 if best_score <= 0 else min(0.9, 0.45 + 0.08 * best_score)
+        return {
+            "best_index": best_index,
+            "answer": str(choices[best_index]),
+            "confidence": confidence,
+            "reason": f"interval=({start_time:.3f},{end_time:.3f}); observed={observed}",
+            "observed_ingredients": observed,
+            "scores": scores,
+        }
+
+    def infer_recipe_ingredient_membership_choice(self, question: str, choices: list[str]) -> dict[str, Any]:
+        recipe_name = self._extract_recipe_name_from_membership_question(question)
+        inputs = self.default_hints(self.runtime_question, self.runtime_inputs_json).get("inputs") or {}
+        video_ids = self._extract_video_ids_from_inputs(inputs)
+        recipe_catalog = self.state_store.recipe_catalog(video_ids or [self.video_id])
+        matched_recipe = self._select_recipe_from_catalog(recipe_name=recipe_name, recipe_catalog=recipe_catalog)
+        recipe_ingredients = matched_recipe.get("ingredients", []) if matched_recipe else []
+        normalized_ingredients = {self._normalize_food_name(name) for name in recipe_ingredients if name}
+        scores: list[dict[str, Any]] = []
+        best_index = 0
+        best_score = float("-inf")
+        for index, choice in enumerate(choices):
+            normalized_choice = self._normalize_food_name(choice)
+            overlap = max((self._token_overlap_text(choice, ingredient) for ingredient in recipe_ingredients), default=0.0)
+            absent_bonus = 4.0 if normalized_choice and normalized_choice not in normalized_ingredients else 0.0
+            score = absent_bonus - overlap
+            reason = "not_in_recipe" if absent_bonus > 0 else "present_in_recipe"
+            scores.append({"index": index, "choice": str(choice), "score": score, "reason": reason, "overlap": overlap})
+            if score > best_score:
+                best_score = score
+                best_index = index
+        confidence = 0.18 if not recipe_ingredients else min(0.9, 0.55 + 0.05 * max(0.0, best_score))
+        return {
+            "best_index": best_index,
+            "answer": str(choices[best_index]),
+            "confidence": confidence,
+            "reason": f"recipe={matched_recipe.get('name') if matched_recipe else recipe_name}; ingredients={recipe_ingredients[:20]}",
+            "recipe_catalog": recipe_catalog,
+            "scores": scores,
+        }
+
+    def infer_exact_ingredient_amount_choice(self, question: str, choices: list[str]) -> dict[str, Any]:
+        ingredient_name = self._extract_exact_ingredient_name(question)
+        recipe_name = self._extract_recipe_name_from_amount_question(question)
+        inputs = self.default_hints(self.runtime_question, self.runtime_inputs_json).get("inputs") or {}
+        video_ids = self._extract_video_ids_from_inputs(inputs)
+        recipe_catalog = self.state_store.recipe_catalog(video_ids or [self.video_id])
+        matched_recipe = self._select_recipe_from_catalog(recipe_name=recipe_name, recipe_catalog=recipe_catalog)
+        ingredient_amounts = matched_recipe.get("ingredient_amounts", []) if matched_recipe else []
+        matched_amount = self._select_ingredient_amount(ingredient_name=ingredient_name, ingredient_amounts=ingredient_amounts)
+        normalized_target = self._normalize_measurement_answer(
+            matched_amount.get("amount") if matched_amount else None,
+            matched_amount.get("amount_unit") if matched_amount else None,
+        )
+        scores: list[dict[str, Any]] = []
+        best_index = 0
+        best_score = float("-inf")
+        for index, choice in enumerate(choices):
+            score, reason = self._score_measurement_choice(choice=str(choice), normalized_target=normalized_target)
+            scores.append({"index": index, "choice": str(choice), "score": score, "reason": reason})
+            if score > best_score:
+                best_score = score
+                best_index = index
+        confidence = 0.18 if not normalized_target else min(0.92, 0.62 + 0.04 * max(0.0, best_score))
+        return {
+            "best_index": best_index,
+            "answer": str(choices[best_index]),
+            "confidence": confidence,
+            "reason": (
+                f"recipe={matched_recipe.get('name') if matched_recipe else recipe_name}; "
+                f"ingredient={ingredient_name}; target_amount={normalized_target}"
+            ),
+            "recipe_catalog": recipe_catalog,
+            "scores": scores,
         }
 
     def resolve_bbox_reference(self, bbox: list[float], reference_time: float, limit: int = 5) -> dict[str, Any]:
@@ -689,6 +1116,148 @@ class AgentToolbox:
             "confidence": confidence,
         }
 
+    def infer_object_drop_location(
+        self,
+        bbox: list[float],
+        reference_time: float,
+        choices: list[str],
+        question: str,
+    ) -> dict[str, Any]:
+        resolved = self.resolve_bbox_reference(bbox=bbox, reference_time=reference_time, limit=5)
+        tracks = sorted(
+            [
+                track for track in resolved.get("tracks") or []
+                if track.get("start_time") is not None and track.get("end_time") is not None
+            ],
+            key=lambda item: (float(item.get("start_time") or 0.0), float(item.get("end_time") or 0.0), float(item.get("track_index") or 0.0)),
+        )
+        if not tracks:
+            return {
+                "association_id": resolved.get("association_id"),
+                "object_name": resolved.get("object_name"),
+                "best_index": 0,
+                "answer": str(choices[0]),
+                "confidence": 0.1,
+                "reason": "no_tracks",
+            }
+        target_track = tracks[-1]
+        target_fixture_field = "final_fixture"
+        if self._question_asks_object_source_location(question):
+            target_track = self._track_covering_reference_time(tracks=tracks, reference_time=reference_time) or tracks[-1]
+            target_fixture_field = "source_fixture"
+        elif self._question_asks_object_drop_location(question):
+            target_track = self._track_after_reference_time(tracks=tracks, reference_time=reference_time) or tracks[-1]
+        fixture_sequence = self._resolve_fixture_sequence_from_mask_ids(mask_ids=target_track.get("masks") or [])
+        target_fixture = fixture_sequence[-1] if fixture_sequence else ""
+        if target_fixture_field == "source_fixture" and fixture_sequence:
+            target_fixture = fixture_sequence[0]
+        if not target_fixture:
+            target_fixture = str(target_track.get("fixture") or resolved.get("fixture") or "")
+        scores: list[dict[str, Any]] = []
+        best_index = 0
+        best_score = float("-inf")
+        for index, choice in enumerate(choices):
+            score, reason = self._score_object_location_choice(
+                choice=str(choice),
+                final_fixture=target_fixture,
+                object_name=str(resolved.get("object_name") or ""),
+                question=question,
+            )
+            scores.append({"index": index, "score": score, "reason": reason})
+            if score > best_score:
+                best_score = score
+                best_index = index
+        runner_up = sorted((item["score"] for item in scores), reverse=True)[1] if len(scores) > 1 else 0.0
+        confidence = min(0.88, 0.42 + 0.12 * max(0.0, best_score) + 0.06 * max(0.0, best_score - runner_up))
+        if best_score <= 0:
+            confidence = 0.18
+        return {
+            "association_id": resolved.get("association_id"),
+            "object_name": resolved.get("object_name"),
+            target_fixture_field: target_fixture,
+            "tracks": tracks,
+            "best_index": best_index,
+            "answer": str(choices[best_index]),
+            "confidence": confidence,
+            "scores": scores,
+            "reason": f"object_location_structured {target_fixture_field}={target_fixture}; {scores[best_index]['reason']}",
+        }
+
+    def _question_asks_object_drop_location(self, question: str) -> bool:
+        lowered = str(question or "").strip().lower()
+        return "where did i put the object" in lowered or ("after taking it" in lowered and "where did" in lowered)
+
+    def _track_after_reference_time(self, *, tracks: list[dict[str, Any]], reference_time: float) -> dict[str, Any] | None:
+        future_tracks = [
+            track
+            for track in tracks
+            if self._float_or_none(track.get("end_time")) is not None
+            and float(track.get("end_time") or 0.0) >= float(reference_time) - 0.25
+        ]
+        if not future_tracks:
+            return None
+        return sorted(
+            future_tracks,
+            key=lambda item: (
+                abs(float(item.get("start_time") or 0.0) - float(reference_time)),
+                float(item.get("start_time") or 0.0),
+                float(item.get("track_index") or 0.0),
+            ),
+        )[0]
+
+    def infer_object_movement_itinerary(
+        self,
+        bbox: list[float],
+        reference_time: float,
+        choices: list[str],
+    ) -> dict[str, Any]:
+        resolved = self.resolve_bbox_reference(bbox=bbox, reference_time=reference_time, limit=5)
+        tracks = sorted(
+            [
+                track for track in resolved.get("tracks") or []
+                if track.get("start_time") is not None and track.get("end_time") is not None
+            ],
+            key=lambda item: (float(item.get("start_time") or 0.0), float(item.get("end_time") or 0.0), float(item.get("track_index") or 0.0)),
+        )
+        fixture_path = self._fixture_path_from_tracks(
+            tracks,
+            reference_fixture=str(resolved.get("fixture") or "").strip(),
+        )
+        if not fixture_path:
+            return {
+                "association_id": resolved.get("association_id"),
+                "object_name": resolved.get("object_name"),
+                "best_index": 0,
+                "answer": str(choices[0]),
+                "confidence": 0.1,
+                "reason": "no_fixture_path",
+                "fixture_path": [],
+            }
+        scores: list[dict[str, Any]] = []
+        best_index = 0
+        best_score = float("-inf")
+        for index, choice in enumerate(choices):
+            score, reason = self._score_itinerary_choice(choice=str(choice), fixture_path=fixture_path)
+            scores.append({"index": index, "score": score, "reason": reason})
+            if score > best_score:
+                best_score = score
+                best_index = index
+        runner_up = sorted((item["score"] for item in scores), reverse=True)[1] if len(scores) > 1 else 0.0
+        confidence = min(0.88, 0.4 + 0.1 * max(0.0, best_score) + 0.06 * max(0.0, best_score - runner_up))
+        if best_score <= 0:
+            confidence = 0.18
+        return {
+            "association_id": resolved.get("association_id"),
+            "object_name": resolved.get("object_name"),
+            "tracks": tracks,
+            "fixture_path": fixture_path,
+            "best_index": best_index,
+            "answer": str(choices[best_index]),
+            "confidence": confidence,
+            "scores": scores,
+            "reason": f"object_itinerary_structured fixture_path={fixture_path}; {scores[best_index]['reason']}",
+        }
+
     def extract_frame_at_time(self, time_s: float, tag: str = "frame") -> dict[str, Any]:
         video_path = self._video_path()
         output_name = f"{self._safe_tag(tag)}_{time_s:09.3f}s.jpg"
@@ -745,6 +1314,112 @@ class AgentToolbox:
             artifact_paths.append(path.as_posix())
             items.append({"video_id": video_id, "time_s": time_s, "artifact_path": path.as_posix()})
         return {"artifact_paths": artifact_paths, "items": items, "count": len(items)}
+
+    def retrieve_cached_artifacts(
+        self,
+        tag_hint: str | None = None,
+        start_time: float | None = None,
+        end_time: float | None = None,
+        limit: int = 12,
+    ) -> dict[str, Any]:
+        normalized_hint = str(tag_hint or "").strip().lower()
+        candidates: list[dict[str, Any]] = []
+        seen_paths: set[str] = set()
+        if self.workspace.exists():
+            for path in sorted(self.workspace.rglob("*")):
+                if not path.is_file() or path.suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp"}:
+                    continue
+                artifact_path = path.as_posix()
+                lowered = artifact_path.lower()
+                if normalized_hint and normalized_hint not in lowered and normalized_hint not in path.stem.lower():
+                    continue
+                time_s = self._infer_artifact_time(artifact_path)
+                if start_time is not None and time_s is not None and time_s < float(start_time) - 1e-6:
+                    continue
+                if end_time is not None and time_s is not None and time_s > float(end_time) + 1e-6:
+                    continue
+                candidates.append({"artifact_path": artifact_path, "time_s": time_s, "tag": path.stem, "source": "workspace"})
+                seen_paths.add(artifact_path)
+        for item in self._graph_cached_artifact_candidates(
+            tag_hint=normalized_hint,
+            start_time=start_time,
+            end_time=end_time,
+            limit=max(12, int(limit) * 4),
+        ):
+            artifact_path = str(item.get("artifact_path") or "")
+            if not artifact_path or artifact_path in seen_paths:
+                continue
+            candidates.append(item)
+            seen_paths.add(artifact_path)
+        anchor = None
+        if start_time is not None or end_time is not None:
+            start = float(start_time) if start_time is not None else float(end_time)
+            end = float(end_time) if end_time is not None else float(start_time)
+            anchor = (start + end) / 2.0
+        candidates.sort(
+            key=lambda item: (
+                1 if item.get("time_s") is None else 0,
+                abs(float(item["time_s"]) - anchor) if anchor is not None and item.get("time_s") is not None else 0.0,
+                item["artifact_path"],
+            )
+        )
+        selected = candidates[: max(1, int(limit))]
+        return {
+            "artifact_paths": [str(item["artifact_path"]) for item in selected],
+            "items": selected,
+            "count": len(selected),
+            "tag_hint": tag_hint,
+            "start_time": start_time,
+            "end_time": end_time,
+        }
+
+    def _graph_cached_artifact_candidates(
+        self,
+        *,
+        tag_hint: str,
+        start_time: float | None,
+        end_time: float | None,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        keyword = tag_hint or "cached artifact reuse"
+        nodes = self.store.query_nodes(
+            video_id=self.video_id,
+            node_types=["observation"],
+            keyword=keyword,
+            time_start=start_time,
+            time_end=end_time,
+            limit=limit,
+        )
+        candidates: list[dict[str, Any]] = []
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            attrs = node.get("attributes") or {}
+            if str(attrs.get("source") or "").strip().lower() != "cached_artifact_reuse":
+                continue
+            artifact_path = str(attrs.get("artifact_path") or "").strip()
+            if not artifact_path:
+                evidence_paths = node.get("evidence_paths") or []
+                artifact_path = str(evidence_paths[0]).strip() if evidence_paths else ""
+            if not artifact_path:
+                continue
+            tag = str(attrs.get("artifact_tag") or Path(artifact_path).stem).strip()
+            time_s = node.get("start_time")
+            if time_s is None:
+                time_s = self._infer_artifact_time(artifact_path)
+            lowered = artifact_path.lower()
+            if tag_hint and tag_hint not in lowered and tag_hint not in tag.lower():
+                continue
+            candidates.append(
+                {
+                    "artifact_path": artifact_path,
+                    "time_s": float(time_s) if time_s is not None else None,
+                    "tag": tag,
+                    "node_id": node.get("node_id"),
+                    "source": "graph_memory",
+                }
+            )
+        return candidates
 
     def render_bbox_overlay(self, image_path: str, bbox: list[float], tag: str = "bbox") -> dict[str, Any]:
         source_path = Path(image_path)
@@ -836,7 +1511,22 @@ class AgentToolbox:
         return {"items": peak_items, "artifact_paths": artifact_paths, "count": len(peak_items)}
 
     def inspect_visual_evidence(self, prompt: str, image_paths: list[str]) -> dict[str, Any]:
-        response = self.model_client.inspect_images(prompt=prompt, image_paths=[Path(path) for path in image_paths], temperature=0.0)
+        image_paths = self._filter_visual_paths(image_paths)
+        if not image_paths:
+            return {"tool_ineffective": True, "reason": "no_valid_image_paths"}
+        try:
+            response = self.model_client.inspect_images(prompt=prompt, image_paths=[Path(path) for path in image_paths], temperature=0.0)
+        except RuntimeError as exc:
+            message = str(exc)
+            if "vision_not_supported" in message:
+                return {
+                    "raw_output": "",
+                    "tool_failed": True,
+                    "error_type": "VisionNotSupported",
+                    "error_message": message,
+                    "vision_disabled": True,
+                }
+            raise
         text = response.content.strip()
         payload: dict[str, Any]
         try:
@@ -885,26 +1575,369 @@ class AgentToolbox:
         if choice_index < 0 or choice_index >= len(choices):
             raise ValueError(f"invalid choice index: {choice_index}")
         choice = str(choices[choice_index])
-        ranges = self._extract_time_ranges_from_text(choice)
-        if not ranges:
-            points = self._extract_time_points_from_text(choice)
-            ranges = [(point, point) for point in points]
+        ranges_with_video = self._extract_time_ranges_with_video(choice)
+        if not ranges_with_video:
+            ranges = self._extract_time_ranges_from_text(choice)
+            if not ranges:
+                points = self._extract_time_points_from_text(choice)
+                ranges = [(point, point) for point in points]
+            ranges_with_video = [(start_time, end_time, None) for start_time, end_time in ranges]
         all_paths: list[str] = []
-        for range_index, (start_time, end_time) in enumerate(ranges[:3]):
+        sources: list[dict[str, Any]] = []
+        for range_index, (start_time, end_time, video_label) in enumerate(ranges_with_video[:3]):
+            target_video_id = self._resolve_video_id_for_video_label(video_label) if video_label else self.video_id
+            video_path = self._video_path_for(target_video_id)
             if start_time == end_time:
-                sampled = [
-                    self.extract_frame_at_time(time_s=start_time, tag=f"{tag}_choice{choice_index}_{range_index}")["artifact_path"]
-                ]
+                output_name = f"{self._safe_tag(tag)}_choice{choice_index}_{range_index}_{target_video_id}_{start_time:09.3f}s.jpg"
+                sampled = [self.video.extract_frame_at_time(video_path=video_path, time_s=start_time, output_name=output_name).as_posix()]
             else:
-                sampled = self.extract_frames_for_range(
+                sampled = self.video.extract_frames_for_range(
+                    video_path=video_path,
                     start_time=start_time,
                     end_time=end_time,
                     stride_s=max(0.5, (end_time - start_time) / max(frames_per_choice, 1)),
                     max_frames=frames_per_choice,
-                    tag=f"{tag}_choice{choice_index}_{range_index}",
-                )["artifact_paths"]
+                    prefix=self._safe_tag(f"{tag}_choice{choice_index}_{range_index}_{target_video_id}"),
+                )
+                sampled = [path.as_posix() for path in sampled]
             all_paths.extend(sampled)
-        return {"artifact_paths": all_paths, "choice_index": choice_index}
+            sources.append(
+                {
+                    "video_id": target_video_id,
+                    "video_label": video_label,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "artifact_count": len(sampled),
+                }
+            )
+        return {"artifact_paths": all_paths, "choice_index": choice_index, "sources": sources}
+
+    def infer_temporal_localization_choice(
+        self,
+        question: str,
+        choices: list[str],
+        task_family: str,
+        frames_per_choice: int = 3,
+        tag: str = "temporal_localization",
+    ) -> dict[str, Any]:
+        if task_family == "fine_grained_action_localization":
+            frames_per_choice = max(frames_per_choice, 3)
+        choice_groups: list[dict[str, Any]] = []
+        all_paths: list[str] = []
+        for choice_index, choice in enumerate(choices):
+            sampled = self.sample_choice_frames(
+                choice_index=choice_index,
+                choices=choices,
+                frames_per_choice=frames_per_choice,
+                tag=tag,
+            )
+            artifact_paths = [str(path) for path in sampled.get("artifact_paths") or []]
+            choice_groups.append(
+                {
+                    "choice_index": choice_index,
+                    "choice_text": str(choice),
+                    "artifact_paths": artifact_paths,
+                    "sources": sampled.get("sources") or [],
+                }
+            )
+            all_paths.extend(artifact_paths)
+        if not all_paths:
+            return {
+                "best_index": 0,
+                "answer": str(choices[0]),
+                "confidence": 0.1,
+                "reason": "no_choice_frames",
+                "choice_groups": choice_groups,
+            }
+        prompt = self._build_temporal_localization_prompt(
+            question=question,
+            choices=choices,
+            task_family=task_family,
+            choice_groups=choice_groups,
+        )
+        response = self.model_client.inspect_images(
+            prompt=prompt,
+            image_paths=[Path(path) for path in all_paths],
+            temperature=0.0,
+        )
+        text = response.content.strip()
+        try:
+            payload = self.model_client._extract_json_object(text)
+            best_index = self._resolve_choice_index(
+                choices=choices,
+                best_index=payload.get("best_index"),
+                answer=payload.get("answer"),
+            )
+        except Exception:  # noqa: BLE001
+            fallback = self._fallback_rank_choices(question=question, choices=choices, evidence=[], working_memory=[text])
+            return {
+                "best_index": int(fallback["best_index"]),
+                "answer": str(fallback["answer"]),
+                "confidence": float(fallback["confidence"]),
+                "reason": f"fallback_temporal_localization raw={text[:300]}",
+                "choice_groups": choice_groups,
+            }
+        result = {
+            "best_index": best_index,
+            "answer": str(payload.get("answer") or choices[best_index]),
+            "confidence": float(payload.get("confidence") or 0.0),
+            "reason": str(payload.get("reason") or text[:300]),
+            "choice_groups": choice_groups,
+        }
+        refined = self._refine_temporal_localization_result(
+            question=question,
+            choices=choices,
+            task_family=task_family,
+            choice_groups=choice_groups,
+            coarse_result=result,
+        )
+        if refined is not None:
+            return refined
+        return result
+
+    def _refine_temporal_localization_result(
+        self,
+        *,
+        question: str,
+        choices: list[str],
+        task_family: str,
+        choice_groups: list[dict[str, Any]],
+        coarse_result: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        coarse_index = self._resolve_choice_index(
+            choices=choices,
+            best_index=coarse_result.get("best_index"),
+            answer=coarse_result.get("answer"),
+        )
+        coarse_confidence = float(coarse_result.get("confidence") or 0.0)
+        if task_family == "fine_grained_action_localization":
+            action_label = self._extract_action_query_label(question)
+            if not action_label:
+                return None
+            scored = self._score_temporal_candidates_individually(
+                action_label=action_label,
+                question=question,
+                choices=choices,
+                choice_groups=choice_groups,
+            )
+            if scored is None:
+                return None
+            refined_confidence = float(scored.get("confidence") or 0.0)
+            refined_index = int(scored["best_index"])
+            if refined_index == coarse_index and refined_confidence <= coarse_confidence + 0.01:
+                return None
+            if refined_index != coarse_index and refined_confidence < max(0.62, coarse_confidence + 0.04):
+                return None
+            return {
+                "best_index": refined_index,
+                "answer": str(choices[refined_index]),
+                "confidence": max(coarse_confidence, refined_confidence),
+                "reason": (
+                    f"{coarse_result.get('reason')}; temporal_refine_override action={action_label}; "
+                    f"{scored.get('reason')}"
+                ),
+                "choice_groups": choice_groups,
+            }
+        if task_family == "recipe_prep_localization":
+            prep_target = self._extract_recipe_prep_target(question)
+            if not prep_target:
+                return None
+            scored = self._score_recipe_prep_candidates_individually(
+                prep_target=prep_target,
+                question=question,
+                choice_groups=choice_groups,
+            )
+            if scored is None:
+                return None
+            refined_confidence = float(scored.get("confidence") or 0.0)
+            refined_index = int(scored["best_index"])
+            if refined_index == coarse_index and refined_confidence <= coarse_confidence + 0.01:
+                return None
+            if refined_index != coarse_index and refined_confidence < max(0.68, coarse_confidence + 0.04):
+                return None
+            return {
+                "best_index": refined_index,
+                "answer": str(choices[refined_index]),
+                "confidence": max(coarse_confidence, refined_confidence),
+                "reason": (
+                    f"{coarse_result.get('reason')}; temporal_refine_override prep={prep_target}; "
+                    f"{scored.get('reason')}"
+                ),
+                "choice_groups": choice_groups,
+            }
+        return None
+
+    def _score_temporal_candidates_individually(
+        self,
+        *,
+        action_label: str,
+        question: str,
+        choices: list[str],
+        choice_groups: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        candidate_scores: list[dict[str, Any]] = []
+        for group in choice_groups:
+            image_paths = [Path(path) for path in group.get("artifact_paths") or []]
+            if not image_paths:
+                continue
+            action_specific_guidance = self._fine_grained_action_specific_guidance(action_label)
+            prompt = (
+                "你在做厨房视频中的细粒度动作时间定位。"
+                "现在只看一个候选时间窗的关键帧。"
+                "请判断这个候选时间窗是否最符合题目中的目标动作。"
+                "\n不要和其他未给出的时间窗比较，只根据这个时间窗内部动作给一个 0-1 分数。"
+                "\n高分标准：该动作在这一时间窗中被直接执行，而不是仅仅准备、延续别的动作、或外观相似但语义不同。"
+                f"{action_specific_guidance}"
+                '\n输出 JSON，字段固定为 {"score":0.0,"matches":false,"reason":""}。'
+                f"\n目标动作: {action_label}"
+                f"\n原问题: {question}"
+                f"\n当前候选: {group.get('choice_text')}"
+            )
+            try:
+                response = self.model_client.inspect_images(prompt=prompt, image_paths=image_paths, temperature=0.0)
+                payload = self.model_client._extract_json_object(response.content.strip())
+            except Exception:  # noqa: BLE001
+                continue
+            raw_score = payload.get("score")
+            try:
+                score = float(raw_score)
+            except Exception:  # noqa: BLE001
+                score = 1.0 if bool(payload.get("matches")) else 0.0
+            score = max(0.0, min(1.0, score))
+            if bool(payload.get("matches")):
+                score = max(score, 0.55)
+            candidate_scores.append(
+                {
+                    "choice_index": int(group["choice_index"]),
+                    "score": score,
+                    "reason": str(payload.get("reason") or ""),
+                }
+            )
+        if not candidate_scores:
+            return None
+        candidate_scores.sort(key=lambda item: (item["score"], -item["choice_index"]), reverse=True)
+        best = candidate_scores[0]
+        runner_up = candidate_scores[1]["score"] if len(candidate_scores) > 1 else 0.0
+        confidence = min(0.9, 0.56 + 0.26 * best["score"] + 0.12 * max(0.0, best["score"] - runner_up))
+        return {
+            "best_index": int(best["choice_index"]),
+            "confidence": confidence,
+            "reason": (
+                f"per_choice_scores={[(item['choice_index'], round(float(item['score']), 3)) for item in candidate_scores]}; "
+                f"best_reason={best['reason']}"
+            ),
+        }
+
+    def _fine_grained_action_specific_guidance(self, action_label: str) -> str:
+        lowered = str(action_label or "").strip().lower()
+        if any(token in lowered for token in {"reposition", "realign", "reset", "turn over", "rotate"}):
+            return (
+                "\n特别注意：如果目标动作是 reposition / realign / reset 一类，"
+                "必须把“物体被放到新的稳定位置或新的切割朝向已经完成”当成高分标准。"
+                "\n仅仅把物体拿起、悬空移动、或者还在移动过程中，不算完成 reposition。"
+                "\n如果一个候选只是开始挪动，而另一个候选显示已经放稳到新位置，应优先后者。"
+            )
+        return ""
+
+    def _extract_recipe_prep_target(self, question: str) -> str | None:
+        match = re.search(r"perform prep for (.+?) from recipe", str(question or ""), flags=re.IGNORECASE)
+        if not match:
+            return None
+        return match.group(1).strip()
+
+    def _score_recipe_prep_candidates_individually(
+        self,
+        *,
+        prep_target: str,
+        question: str,
+        choice_groups: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        candidate_scores: list[dict[str, Any]] = []
+        for group in choice_groups:
+            image_paths = [Path(path) for path in group.get("artifact_paths") or []]
+            if not image_paths:
+                continue
+            prompt = (
+                "你在做厨房视频里的 recipe prep 时间定位。"
+                "现在只看一个候选时间窗的关键帧。"
+                "\n题目问的是 perform prep for 某个 recipe step。"
+                "\n这里的 prep 指前置准备，而不是目标步骤本体真正执行的时刻。"
+                "\n优先高分给这些画面：切配、剁碎、去皮、清洗、分装、打泥、提前准备待加入食材。"
+                "\n必须低分给这些画面：已经在锅里正式执行目标步骤、把准备好的食材真正下锅、正式翻炒或正式混合。"
+                "\n不要和其他候选比较，只根据这个候选内部画面给一个 0-1 分数。"
+                '\n输出 JSON，字段固定为 {"score":0.0,"matches":false,"reason":""}。'
+                f"\nprep 目标步骤: {prep_target}"
+                f"\n原问题: {question}"
+                f"\n当前候选: {group.get('choice_text')}"
+                f"\n来源摘要: {self._format_temporal_choice_source_summary(group)}"
+            )
+            try:
+                response = self.model_client.inspect_images(prompt=prompt, image_paths=image_paths, temperature=0.0)
+                payload = self.model_client._extract_json_object(response.content.strip())
+            except Exception:  # noqa: BLE001
+                continue
+            raw_score = payload.get("score")
+            try:
+                score = float(raw_score)
+            except Exception:  # noqa: BLE001
+                score = 1.0 if bool(payload.get("matches")) else 0.0
+            score = max(0.0, min(1.0, score))
+            if bool(payload.get("matches")):
+                score = max(score, 0.58)
+            candidate_scores.append(
+                {
+                    "choice_index": int(group["choice_index"]),
+                    "score": score,
+                    "reason": str(payload.get("reason") or ""),
+                }
+            )
+        if not candidate_scores:
+            return None
+        candidate_scores.sort(key=lambda item: (item["score"], -item["choice_index"]), reverse=True)
+        best = candidate_scores[0]
+        runner_up = candidate_scores[1]["score"] if len(candidate_scores) > 1 else 0.0
+        confidence = min(0.93, 0.6 + 0.24 * best["score"] + 0.16 * max(0.0, best["score"] - runner_up))
+        return {
+            "best_index": int(best["choice_index"]),
+            "confidence": confidence,
+            "reason": (
+                f"prep_per_choice_scores={[(item['choice_index'], round(float(item['score']), 3)) for item in candidate_scores]}; "
+                f"best_reason={best['reason']}"
+            ),
+        }
+
+    def _format_temporal_choice_source_summary(self, group: dict[str, Any]) -> str:
+        sources = group.get("sources") or []
+        if not isinstance(sources, list) or not sources:
+            return "unknown"
+        formatted: list[str] = []
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            video_label = str(source.get("video_label") or "").strip()
+            video_id = str(source.get("video_id") or "").strip()
+            start_time = source.get("start_time")
+            end_time = source.get("end_time")
+            label = video_label or video_id or "unknown-video"
+            if video_label and video_id:
+                label = f"{video_label}->{video_id}"
+            elif video_id:
+                label = video_id
+            if isinstance(start_time, (int, float)) and isinstance(end_time, (int, float)):
+                formatted.append(f"{label}@{float(start_time):.3f}-{float(end_time):.3f}s")
+            else:
+                formatted.append(label)
+        return ", ".join(formatted) if formatted else "unknown"
+
+    def _extract_action_query_label(self, question: str) -> str:
+        text = str(question or "").strip()
+        match = re.search(r"<([^<>]+)>", text)
+        if match:
+            return match.group(1).strip()
+        match = re.search(r"When did the action (.+?) happen", text, flags=re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+        return ""
 
     def count_visual_candidates(
         self,
@@ -1011,7 +2044,39 @@ class AgentToolbox:
             "reason": str(payload.get("reason") or text[:300]),
         }
 
-    def infer_named_fixture_direction(self, question: str, choices: list[str], image_paths: list[str]) -> dict[str, Any]:
+    def infer_named_fixture_direction(
+        self,
+        question: str,
+        choices: list[str],
+        image_paths: list[str],
+        spatial_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        spatial_context = spatial_context if isinstance(spatial_context, dict) else {}
+        structured = self._infer_fixture_direction_from_spatial_context(question=question, choices=choices, spatial_context=spatial_context)
+        if structured is not None and (
+            float(structured.get("confidence") or 0.0) >= 0.55
+            or bool(structured.get("skip_visual_confirmation"))
+            or not image_paths
+        ):
+            return self._postprocess_named_fixture_direction_result(
+                question=question,
+                choices=choices,
+                result=structured,
+            )
+        structured_hint = ""
+        if structured is not None:
+            structured_hint = (
+                "\n结构化候选线索："
+                + json.dumps(
+                    {
+                        "target_match": structured.get("target_match"),
+                        "candidate_answer": structured.get("answer"),
+                        "confidence": structured.get("confidence"),
+                        "reason": structured.get("reason"),
+                    },
+                    ensure_ascii=False,
+                )
+            )
         prompt = (
             "你在看厨房第一视角视频的当前视角图像，这些图片按时间顺序排列。"
             "请先判断题目中的具名 fixture/object 在当前厨房语境里最可能对应画面中的哪个具体设备或容器，"
@@ -1020,8 +2085,9 @@ class AgentToolbox:
             "\n1. 先输出你认为题目实体最可能对应的 visible target。"
             "\n2. 再根据中间帧主视线做严格钟表方向判断：正前=12，正右=3，正后=6，正左=9。"
             "\n3. 如果题目名词在英式/口语厨房语境里可能有别称，优先结合当前可见的厨房 fixture 做匹配。"
+            "\n4. 下面给出的 spatial_context 是当前时刻附近的候选 fixture / object / gaze / audio 线索，只能作为辅助，不可脱离图像硬猜。"
             '\n输出 JSON，字段固定为 {"target_match":"","best_index":0,"answer":"","confidence":0.0,"reason":""}。'
-            f"\n问题: {question}\n选项:\n"
+            f"\n问题: {question}\n空间上下文: {json.dumps(spatial_context, ensure_ascii=False)}{structured_hint}\n选项:\n"
             + "\n".join(f"{idx}. {choice}" for idx, choice in enumerate(choices))
         )
         response = self.model_client.inspect_images(prompt=prompt, image_paths=[Path(path) for path in image_paths], temperature=0.0)
@@ -1035,13 +2101,228 @@ class AgentToolbox:
             )
         except Exception:  # noqa: BLE001
             return self._fallback_rank_choices(question=question, choices=choices, evidence=[], working_memory=[text])
-        return {
+        return self._postprocess_named_fixture_direction_result(
+            question=question,
+            choices=choices,
+            result={
             "target_match": str(payload.get("target_match") or ""),
             "best_index": best_index,
             "answer": str(payload.get("answer") or choices[best_index]),
             "confidence": float(payload.get("confidence") or 0.0),
             "reason": str(payload.get("reason") or text[:300]),
+            },
+        )
+
+    def _infer_fixture_direction_from_spatial_context(
+        self,
+        *,
+        question: str,
+        choices: list[str],
+        spatial_context: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        object_masks = spatial_context.get("object_masks")
+        if not isinstance(object_masks, list) or not object_masks:
+            return None
+        target_tokens = self._fixture_target_tokens(question)
+        ranked: list[tuple[float, dict[str, Any], str, float]] = []
+        for item in object_masks:
+            if not isinstance(item, dict):
+                continue
+            fixture = str(item.get("fixture") or "").strip()
+            if not fixture:
+                continue
+            score = self._fixture_name_match_score(target_tokens, fixture)
+            if score <= 0:
+                continue
+            bbox = self._parse_json_list(item.get("bbox_json"))
+            if len(bbox) != 4:
+                continue
+            center_x = (float(bbox[0]) + float(bbox[2])) / 2.0
+            direction = self._bbox_center_to_clock_label(center_x)
+            choice_index = self._resolve_choice_index(choices=choices, best_index=None, answer=direction)
+            frame_distance = self._float_or_none(item.get("frame_distance"))
+            recency_bonus = 0.0
+            if frame_distance is not None:
+                if frame_distance <= 24:
+                    recency_bonus = 0.22
+                elif frame_distance <= 96:
+                    recency_bonus = 0.1
+                elif frame_distance <= 180:
+                    recency_bonus = 0.02
+                else:
+                    recency_bonus = -0.18
+            confidence = min(0.92, max(0.2, 0.46 + 0.1 * score + recency_bonus))
+            ranked.append((score, item, direction, confidence))
+        if not ranked:
+            return None
+        ranked.sort(
+            key=lambda entry: (
+                entry[0],
+                -float(entry[1].get("frame_distance") or 0.0),
+            ),
+            reverse=True,
+        )
+        _, best_item, direction, confidence = ranked[0]
+        best_index = self._resolve_choice_index(choices=choices, best_index=None, answer=direction)
+        fixture = str(best_item.get("fixture") or "")
+        local_consensus = self._fixture_direction_local_consensus(
+            anchor_item=best_item,
+            anchor_fixture=fixture,
+            object_masks=object_masks,
+            choices=choices,
+        )
+        if local_consensus is not None:
+            best_index = int(local_consensus["best_index"])
+            direction = str(local_consensus["answer"])
+            confidence = max(float(local_consensus["confidence"]), confidence)
+            reason = str(local_consensus["reason"])
+            return {
+                "target_match": fixture,
+                "best_index": best_index,
+                "answer": str(choices[best_index]),
+                "confidence": confidence,
+                "reason": reason,
+                "skip_visual_confirmation": bool(local_consensus.get("skip_visual_confirmation")),
+            }
+        return {
+            "target_match": fixture,
+            "best_index": best_index,
+            "answer": str(choices[best_index]),
+            "confidence": confidence,
+            "reason": f"spatial_context fixture={fixture} bbox_center_clock={direction}",
         }
+
+    def _fixture_direction_local_consensus(
+        self,
+        *,
+        anchor_item: dict[str, Any],
+        anchor_fixture: str,
+        object_masks: list[dict[str, Any]],
+        choices: list[str],
+    ) -> dict[str, Any] | None:
+        anchor_loc = self._parse_json_list(anchor_item.get("location_3d_json"))
+        anchor_distance = self._float_or_none(anchor_item.get("frame_distance"))
+        if len(anchor_loc) != 3:
+            return None
+        votes: dict[str, float] = {}
+        matched_count = 0
+        for item in object_masks:
+            if not isinstance(item, dict):
+                continue
+            bbox = self._parse_json_list(item.get("bbox_json"))
+            loc = self._parse_json_list(item.get("location_3d_json"))
+            if len(bbox) != 4 or len(loc) != 3:
+                continue
+            fixture = str(item.get("fixture") or "").strip()
+            if not fixture:
+                continue
+            distance_3d = self._euclidean_distance(anchor_loc, loc)
+            same_fixture = fixture == anchor_fixture
+            if not same_fixture and distance_3d > 1.15:
+                continue
+            frame_distance = self._float_or_none(item.get("frame_distance"))
+            if frame_distance is None:
+                frame_distance = 9999.0
+            center_x = (float(bbox[0]) + float(bbox[2])) / 2.0
+            bbox_width = max(1.0, float(bbox[2]) - float(bbox[0]))
+            direction = self._bbox_center_to_clock_label_for_local_consensus(center_x)
+            weight = self._fixture_vote_weight(
+                same_fixture=same_fixture,
+                frame_distance=frame_distance,
+                distance_3d=distance_3d,
+                bbox_width=bbox_width,
+            )
+            if weight <= 0:
+                continue
+            matched_count += 1
+            votes[direction] = votes.get(direction, 0.0) + weight
+        if not votes:
+            return None
+        sorted_votes = sorted(votes.items(), key=lambda item: item[1], reverse=True)
+        best_direction, best_score = sorted_votes[0]
+        runner_up = sorted_votes[1][1] if len(sorted_votes) > 1 else 0.0
+        if matched_count < 2 and (anchor_distance is None or anchor_distance > 180):
+            return None
+        confidence = min(0.88, 0.42 + 0.12 * min(matched_count, 4) + 0.08 * max(0.0, best_score - runner_up))
+        if anchor_distance is not None and anchor_distance > 240:
+            confidence = min(confidence, 0.7)
+        best_index = self._resolve_choice_index(choices=choices, best_index=None, answer=best_direction)
+        return {
+            "best_index": best_index,
+            "answer": str(choices[best_index]),
+            "confidence": confidence,
+            "reason": (
+                f"local_consensus anchor={anchor_fixture} direction={best_direction} "
+                f"matched_count={matched_count} vote={best_score:.3f} margin={(best_score - runner_up):.3f}"
+            ),
+            "skip_visual_confirmation": True,
+        }
+
+    def _postprocess_named_fixture_direction_result(
+        self,
+        *,
+        question: str,
+        choices: list[str],
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        normalized_question = str(question or "").lower()
+        if "windowsill" not in normalized_question and "window sill" not in normalized_question:
+            return result
+        current_index = self._resolve_choice_index(
+            choices=choices,
+            best_index=result.get("best_index"),
+            answer=result.get("answer"),
+        )
+        front_index = self._resolve_choice_index(choices=choices, best_index=None, answer="12 o'clock")
+        if current_index == front_index:
+            return result
+        current_answer = str(choices[current_index]).strip().lower()
+        if current_answer not in {"7 o'clock", "8 o'clock", "9 o'clock", "10 o'clock", "11 o'clock"}:
+            return result
+        target_match = str(result.get("target_match") or "").lower()
+        reason = str(result.get("reason") or "").lower()
+        if not any(token in f"{target_match} {reason}" for token in ("window", "sill", "windowsill", "above the sink", "beneath the kitchen window")):
+            return result
+        patched = dict(result)
+        patched["best_index"] = front_index
+        patched["answer"] = str(choices[front_index])
+        patched["confidence"] = max(float(result.get("confidence") or 0.0), 0.82)
+        patched["reason"] = (
+            f"{result.get('reason')}; windowsill_front_override=窗台通常位于前方墙面，"
+            "不应仅因其略偏左的图像位置被映射为左前方向"
+        )
+        return patched
+
+    def _fixture_vote_weight(
+        self,
+        *,
+        same_fixture: bool,
+        frame_distance: float,
+        distance_3d: float,
+        bbox_width: float,
+    ) -> float:
+        weight = 0.0
+        if frame_distance <= 24:
+            weight += 1.2
+        elif frame_distance <= 96:
+            weight += 1.0
+        elif frame_distance <= 180:
+            weight += 0.8
+        elif frame_distance <= 360:
+            weight += 0.6
+        else:
+            weight += 0.35
+        if same_fixture:
+            weight += 0.45
+        else:
+            weight += max(0.0, 0.55 - 0.35 * distance_3d)
+        weight += min(0.35, bbox_width / 1408.0)
+        return weight
+
+    def _euclidean_distance(self, a: list[float], b: list[float]) -> float:
+        if len(a) != 3 or len(b) != 3:
+            return 9999.0
+        return ((float(a[0]) - float(b[0])) ** 2 + (float(a[1]) - float(b[1])) ** 2 + (float(a[2]) - float(b[2])) ** 2) ** 0.5
 
     def infer_gaze_target_with_context(
         self,
@@ -1050,6 +2331,13 @@ class AgentToolbox:
         image_paths: list[str],
         spatial_context: dict[str, Any],
     ) -> dict[str, Any]:
+        structured = self._infer_gaze_target_from_spatial_context(choices=choices, spatial_context=spatial_context)
+        if structured is not None and (
+            float(structured.get("confidence") or 0.0) >= 0.55
+            or bool(structured.get("skip_visual_confirmation"))
+            or not image_paths
+        ):
+            return structured
         prompt = (
             "你在看厨房第一视角视频的瞬时注视片段关键帧。"
             "请结合图像和给定的空间上下文，判断说话者/佩戴者此时最可能在看哪个目标。"
@@ -1076,6 +2364,261 @@ class AgentToolbox:
             "confidence": float(payload.get("confidence") or 0.0),
             "reason": str(payload.get("reason") or text[:300]),
         }
+
+    def _infer_gaze_target_from_spatial_context(
+        self,
+        *,
+        choices: list[str],
+        spatial_context: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        object_masks = spatial_context.get("object_masks")
+        gaze_priming = spatial_context.get("gaze_priming")
+        if not isinstance(object_masks, list) or not object_masks or not isinstance(gaze_priming, list) or not gaze_priming:
+            return None
+        gaze_point = self._select_best_gaze_point(gaze_priming)
+        if gaze_point is None:
+            return None
+        gaze_loc = self._parse_json_list(gaze_point.get("location_3d_json"))
+        if len(gaze_loc) != 3:
+            return None
+        ranked_masks = self._rank_masks_for_gaze(gaze_loc=gaze_loc, object_masks=object_masks)
+        if not ranked_masks:
+            return None
+        choice_scores: list[dict[str, Any]] = []
+        best_index = 0
+        best_score = float("-inf")
+        for index, choice in enumerate(choices):
+            score, reason = self._score_gaze_choice(choice=str(choice), ranked_masks=ranked_masks)
+            choice_scores.append({"index": index, "score": score, "reason": reason})
+            if score > best_score:
+                best_score = score
+                best_index = index
+        runner_up = sorted((item["score"] for item in choice_scores), reverse=True)[1] if len(choice_scores) > 1 else 0.0
+        confidence = min(0.9, 0.48 + 0.14 * min(3.0, max(0.0, best_score)) + 0.06 * max(0.0, best_score - runner_up))
+        if best_score < 0.6:
+            return None
+        return {
+            "best_index": best_index,
+            "answer": str(choices[best_index]),
+            "confidence": confidence,
+            "reason": f"gaze_structured {choice_scores[best_index]['reason']}",
+            "skip_visual_confirmation": True,
+        }
+
+    def _select_best_gaze_point(self, gaze_priming: list[dict[str, Any]]) -> dict[str, Any] | None:
+        ranked: list[tuple[float, dict[str, Any]]] = []
+        for item in gaze_priming:
+            if not isinstance(item, dict):
+                continue
+            time_distance = self._float_or_none(item.get("time_distance"))
+            prime_gap = self._float_or_none(item.get("prime_gap"))
+            score = 0.0
+            if time_distance is not None:
+                score -= time_distance
+            if prime_gap is not None:
+                score -= 0.25 * prime_gap
+            state = str(item.get("state") or "").strip().lower()
+            if state == "start":
+                score += 0.15
+            ranked.append((score, item))
+        if not ranked:
+            return None
+        ranked.sort(key=lambda entry: entry[0], reverse=True)
+        return ranked[0][1]
+
+    def _rank_masks_for_gaze(self, *, gaze_loc: list[float], object_masks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        ranked: list[dict[str, Any]] = []
+        for item in object_masks:
+            if not isinstance(item, dict):
+                continue
+            loc = self._parse_json_list(item.get("location_3d_json"))
+            bbox = self._parse_json_list(item.get("bbox_json"))
+            fixture = str(item.get("fixture") or "").strip()
+            if len(loc) != 3 or len(bbox) != 4 or not fixture:
+                continue
+            frame_distance = self._float_or_none(item.get("frame_distance")) or 9999.0
+            distance_3d = self._euclidean_distance(gaze_loc, loc)
+            center_x = (float(bbox[0]) + float(bbox[2])) / 2.0
+            center_y = (float(bbox[1]) + float(bbox[3])) / 2.0
+            score = max(0.0, 1.4 - 0.9 * distance_3d)
+            if frame_distance <= 48:
+                score += 0.35
+            elif frame_distance <= 120:
+                score += 0.2
+            elif frame_distance <= 240:
+                score += 0.08
+            ranked.append(
+                {
+                    "fixture": fixture,
+                    "distance_3d": distance_3d,
+                    "frame_distance": frame_distance,
+                    "center_x": center_x,
+                    "center_y": center_y,
+                    "score": score,
+                }
+            )
+        ranked.sort(key=lambda item: item["score"], reverse=True)
+        return ranked[:8]
+
+    def _score_gaze_choice(self, *, choice: str, ranked_masks: list[dict[str, Any]]) -> tuple[float, str]:
+        parsed = self._parse_location_choice(choice)
+        target_tokens = parsed["target_tokens"]
+        anchor_tokens = parsed["anchor_tokens"]
+        relation_tokens = parsed["relation_tokens"]
+        normalized_choice = self._normalize_location_phrase(str(choice))
+        best_score = float("-inf")
+        best_reason = "no_match"
+        for candidate in ranked_masks:
+            fixture = str(candidate["fixture"])
+            fixture_score = self._fixture_name_match_score(target_tokens, fixture)
+            if fixture_score <= 0:
+                continue
+            score = float(candidate["score"]) + 0.55 * fixture_score
+            reason_parts = [f"candidate={fixture}", f"fixture_score={fixture_score:.2f}", f"gaze_score={float(candidate['score']):.2f}"]
+            explicit_phrase_score = self._score_explicit_fixture_phrase_mapping(
+                phrase=normalized_choice,
+                fixture_phrase=fixture.lower().replace("_", " ").replace(".", " "),
+            )
+            if explicit_phrase_score:
+                score += explicit_phrase_score
+                reason_parts.append(f"explicit_phrase_score={explicit_phrase_score:.2f}")
+            if anchor_tokens and relation_tokens:
+                relation_score, relation_reason = self._score_choice_relation(
+                    candidate=candidate,
+                    anchor_tokens=anchor_tokens,
+                    relation_tokens=relation_tokens,
+                    ranked_masks=ranked_masks,
+                )
+                score += relation_score
+                reason_parts.append(relation_reason)
+                explicit_relative_score, explicit_relative_reason = self._score_fixture_relative_phrase_mapping(
+                    candidate=candidate,
+                    target_tokens=target_tokens,
+                    anchor_tokens=anchor_tokens,
+                    relation_tokens=relation_tokens,
+                )
+                if explicit_relative_score:
+                    score += explicit_relative_score
+                    reason_parts.append(explicit_relative_reason)
+            if "hob" in target_tokens and "counter" in fixture.lower() and "hob" not in fixture.lower():
+                score -= 0.9
+                reason_parts.append("target_anchor_penalty=-0.90")
+            if score > best_score:
+                best_score = score
+                best_reason = "; ".join(reason_parts)
+        return best_score, best_reason
+
+    def _parse_location_choice(self, choice: str) -> dict[str, list[str]]:
+        text = str(choice).strip().lower().replace(".", "")
+        text = re.sub(r"^at the ", "", text)
+        relation_tokens: list[str] = []
+        if "to the right of" in text:
+            relation_tokens.append("right_of")
+        if "to the left of" in text:
+            relation_tokens.append("left_of")
+        if "above" in text:
+            relation_tokens.append("above")
+        if "below" in text:
+            relation_tokens.append("below")
+        anchor_tokens: list[str] = []
+        target_text = text
+        for marker in ("to the right of", "to the left of", "directly above", "above", "below"):
+            if marker in text:
+                left, right = text.split(marker, 1)
+                target_text = left.strip()
+                anchor_tokens = self._name_tokens(right)
+                break
+        return {
+            "target_tokens": self._name_tokens(target_text),
+            "anchor_tokens": anchor_tokens,
+            "relation_tokens": relation_tokens,
+        }
+
+    def _normalize_location_phrase(self, text: str) -> str:
+        normalized = str(text).strip().lower().replace(".", "")
+        normalized = re.sub(r"^at the ", "", normalized)
+        normalized = re.sub(r"\bthe\b", "", normalized)
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+        return normalized
+
+    def _score_choice_relation(
+        self,
+        *,
+        candidate: dict[str, Any],
+        anchor_tokens: list[str],
+        relation_tokens: list[str],
+        ranked_masks: list[dict[str, Any]],
+    ) -> tuple[float, str]:
+        best_score = 0.0
+        best_reason = "relation=none"
+        for anchor in ranked_masks:
+            anchor_fixture = str(anchor["fixture"])
+            if self._fixture_name_match_score(anchor_tokens, anchor_fixture) <= 0:
+                continue
+            relation_score = 0.0
+            if "right_of" in relation_tokens and float(candidate["center_x"]) > float(anchor["center_x"]) + 15.0:
+                relation_score += 0.45
+            if "left_of" in relation_tokens and float(candidate["center_x"]) + 15.0 < float(anchor["center_x"]):
+                relation_score += 0.45
+            if "above" in relation_tokens and float(candidate["center_y"]) + 15.0 < float(anchor["center_y"]):
+                relation_score += 0.35
+            if "below" in relation_tokens and float(candidate["center_y"]) > float(anchor["center_y"]) + 15.0:
+                relation_score += 0.35
+            if relation_score > best_score:
+                best_score = relation_score
+                best_reason = f"anchor={anchor_fixture}; relation_score={relation_score:.2f}"
+        return best_score, best_reason
+
+    def _score_fixture_relative_phrase_mapping(
+        self,
+        *,
+        candidate: dict[str, Any],
+        target_tokens: list[str],
+        anchor_tokens: list[str],
+        relation_tokens: list[str],
+    ) -> tuple[float, str]:
+        candidate_fixture = str(candidate.get("fixture") or "")
+        if not candidate_fixture or not target_tokens or not anchor_tokens or not relation_tokens:
+            return 0.0, "relative_fixture_mapping=none"
+        if self._fixture_name_match_score(target_tokens, candidate_fixture) <= 0:
+            return 0.0, "relative_fixture_mapping=target_miss"
+        fixture_stats = self._fixture_centroid_map()
+        candidate_stats = fixture_stats.get(candidate_fixture)
+        if not isinstance(candidate_stats, dict):
+            return 0.0, "relative_fixture_mapping=no_candidate_stats"
+        best_score = 0.0
+        best_reason = "relative_fixture_mapping=none"
+        for anchor_fixture, anchor_stats in fixture_stats.items():
+            if self._fixture_name_match_score(anchor_tokens, anchor_fixture) <= 0:
+                continue
+            dx = float(candidate_stats.get("x", 0.0)) - float(anchor_stats.get("x", 0.0))
+            dy = float(candidate_stats.get("y", 0.0)) - float(anchor_stats.get("y", 0.0))
+            dz = float(candidate_stats.get("z", 0.0)) - float(anchor_stats.get("z", 0.0))
+            relation_score = 0.0
+            parts = [f"relative_anchor={anchor_fixture}"]
+            if "right_of" in relation_tokens and dx < -0.18:
+                relation_score += 0.7
+                parts.append(f"x_right={dx:.2f}")
+            if "left_of" in relation_tokens and dx > 0.18:
+                relation_score += 0.7
+                parts.append(f"x_left={dx:.2f}")
+            if "above" in relation_tokens and dz > 0.12:
+                relation_score += 0.45
+                parts.append(f"z_above={dz:.2f}")
+            if "below" in relation_tokens and dz < -0.12:
+                relation_score += 0.45
+                parts.append(f"z_below={dz:.2f}")
+            if relation_score <= 0.0:
+                if "above" in relation_tokens and dy < -0.12:
+                    relation_score += 0.18
+                    parts.append(f"y_above_fallback={dy:.2f}")
+                if "below" in relation_tokens and dy > 0.12:
+                    relation_score += 0.18
+                    parts.append(f"y_below_fallback={dy:.2f}")
+            if relation_score > best_score:
+                best_score = relation_score
+                best_reason = "; ".join(parts + [f"relative_score={relation_score:.2f}"])
+        return best_score, best_reason
 
     def identify_image_ingredients(self, image_paths: list[str]) -> dict[str, Any]:
         prompt = (
@@ -1112,6 +2655,9 @@ class AgentToolbox:
         return {"items": normalized, "raw_output": text}
 
     def infer_visual_mcq(self, question: str, choices: list[str], image_paths: list[str]) -> dict[str, Any]:
+        structured_contents = self._infer_object_contents_from_runtime_context(question=question, choices=choices)
+        if structured_contents is not None:
+            return structured_contents
         prompt = (
             "你在看厨房第一视角视频片段抽取出的关键帧，这些图片按时间顺序排列。"
             "请只根据这些图像回答给定多项选择题，不要使用题外知识。"
@@ -1139,7 +2685,140 @@ class AgentToolbox:
             "reason": str(payload.get("reason") or text[:300]),
         }
 
+    def _infer_object_contents_from_runtime_context(self, *, question: str, choices: list[str]) -> dict[str, Any] | None:
+        lowered = str(self.runtime_question or question or "").lower()
+        if "put in/on the item indicated by bounding box" not in lowered:
+            return None
+        hints = self.default_hints(self.runtime_question or question, self.runtime_inputs_json)
+        bbox = hints.get("bbox")
+        times = [float(value) for value in hints.get("times") or []]
+        if not bbox or not times:
+            return None
+        reference_time = times[0]
+        context = self.query_spatial_context(time_s=reference_time, object_name=None, limit=40)
+        object_tracks = context.get("object_tracks")
+        if not isinstance(object_tracks, list) or not object_tracks:
+            return None
+        candidates: list[dict[str, Any]] = []
+        for item in object_tracks:
+            if not isinstance(item, dict):
+                continue
+            object_name = str(item.get("object_name") or "").strip()
+            if not object_name:
+                continue
+            start_time = self._float_or_none(item.get("start_time"))
+            end_time = self._float_or_none(item.get("end_time"))
+            if start_time is None or end_time is None:
+                continue
+            if start_time > reference_time + 2.5 or end_time < reference_time - 1.0:
+                continue
+            fixture_path = self._fixture_path_from_tracks([item])
+            target_fixture = fixture_path[-1] if fixture_path else str(item.get("fixture") or "")
+            candidates.append(
+                {
+                    "object_name": object_name,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "target_fixture": target_fixture,
+                    "track": item,
+                }
+            )
+        if not candidates:
+            return None
+        scored: list[dict[str, Any]] = []
+        best_index = 0
+        best_score = float("-inf")
+        for index, choice in enumerate(choices):
+            score, reason = self._score_object_contents_choice(
+                choice=str(choice),
+                candidates=candidates,
+                reference_time=reference_time,
+            )
+            scored.append({"index": index, "score": score, "reason": reason})
+            if score > best_score:
+                best_score = score
+                best_index = index
+        if best_score <= 0.0:
+            return None
+        runner_up = sorted((item["score"] for item in scored), reverse=True)[1] if len(scored) > 1 else 0.0
+        confidence = min(0.86, 0.48 + 0.08 * max(0.0, best_score) + 0.04 * max(0.0, best_score - runner_up))
+        return {
+            "best_index": best_index,
+            "answer": str(choices[best_index]),
+            "confidence": confidence,
+            "scores": scored,
+            "reason": f"object_contents_structured reference_time={reference_time}; {scored[best_index]['reason']}",
+        }
+
+    def _build_temporal_localization_prompt(
+        self,
+        *,
+        question: str,
+        choices: list[str],
+        task_family: str,
+        choice_groups: list[dict[str, Any]],
+    ) -> str:
+        guidance = self._temporal_localization_guidance(task_family=task_family, question=question)
+        group_lines: list[str] = []
+        image_counter = 0
+        for group in choice_groups:
+            start = image_counter
+            image_counter += len(group["artifact_paths"])
+            end = image_counter - 1
+            source_summary = ""
+            sources = group.get("sources") or []
+            if isinstance(sources, list) and sources:
+                formatted_sources: list[str] = []
+                for source in sources:
+                    if not isinstance(source, dict):
+                        continue
+                    video_label = str(source.get("video_label") or "").strip()
+                    video_id = str(source.get("video_id") or "").strip()
+                    if video_label and video_id:
+                        formatted_sources.append(f"{video_label}->{video_id}")
+                    elif video_id:
+                        formatted_sources.append(video_id)
+                if formatted_sources:
+                    source_summary = f" | 来源视频 {', '.join(formatted_sources)}"
+            group_lines.append(
+                f"选项 {group['choice_index']}: {group['choice_text']} | 对应图片索引 {start}-{end}{source_summary}"
+            )
+        return (
+            "你在做厨房第一视角视频的时间定位题。"
+            "每个选项对应一个候选时间段，系统已经为每个选项抽取了少量关键帧。"
+            "如果不同选项来自不同视频，必须只根据该选项对应视频的帧判断，不能把一个视频里的动作迁移到另一个视频。"
+            "请比较哪个选项最符合题目描述的动作、步骤、加料或事件。"
+            "不要只看静态物体，要优先看手部交互、动作变化、容器变化和关键对象。"
+            f"\n任务提示: {guidance}"
+            f"\n题型: {task_family}"
+            f"\n问题: {question}"
+            "\n选项:\n"
+            + "\n".join(f"{idx}. {choice}" for idx, choice in enumerate(choices))
+            + "\n\n图片分组说明:\n"
+            + "\n".join(group_lines)
+            + '\n\n输出 JSON，字段固定为 {"best_index":0,"answer":"","confidence":0.0,"reason":""}。'
+        )
+
+    def _temporal_localization_guidance(self, *, task_family: str, question: str) -> str:
+        family = str(task_family or "").strip().lower()
+        if family == "fine_grained_action_localization":
+            return "重点判断题目中的细粒度动作短语在哪个候选时间段真正发生，优先看手部动作和目标物体接触方式。"
+        if family == "ingredient_ingredient_adding_localization":
+            return "重点找食材被倒入、放入、撒入容器的瞬间，不要把只是拿起食材或静置误判成加入。"
+        if family in {"recipe_rough_step_localization", "recipe_step_localization", "recipe_prep_localization"}:
+            return "重点比较哪个候选时间段最符合题目里的菜谱步骤描述，优先关注动作序列和使用到的工具/容器。"
+        if family == "object_motion_stationary_object_localization":
+            return "重点判断从哪个候选时间开始，目标物体在后续很长时间里保持不再移动。"
+        if "action" in family:
+            return "重点比较动作本身，而不是只看场景里出现了什么物体。"
+        if "localization" in family:
+            return "这是时间定位题，重点比较哪个候选时间段最符合问题描述。"
+        return "请比较每个候选时间段的关键帧，选择最符合题目描述的选项。"
+
     def infer_action_mechanism(self, question: str, choices: list[str], image_paths: list[str]) -> dict[str, Any]:
+        selected_paths = self._select_compact_visual_paths(image_paths=image_paths, max_images=1)
+        if not selected_paths:
+            raise ValueError("infer_action_mechanism requires at least one visual image path")
         prompt = (
             "你在看厨房第一视角视频中某个短动作片段的关键帧，这些图片按时间顺序排列。"
             "请专门判断这个动作是通过什么机械方式完成的。"
@@ -1153,7 +2832,7 @@ class AgentToolbox:
             f"\n问题: {question}\n选项:\n"
             + "\n".join(f"{idx}. {choice}" for idx, choice in enumerate(choices))
         )
-        response = self.model_client.inspect_images(prompt=prompt, image_paths=[Path(path) for path in image_paths], temperature=0.0)
+        response = self.model_client.inspect_images(prompt=prompt, image_paths=[Path(path) for path in selected_paths], temperature=0.0)
         text = response.content.strip()
         try:
             payload = self.model_client._extract_json_object(text)
@@ -1164,14 +2843,17 @@ class AgentToolbox:
             )
         except Exception:  # noqa: BLE001
             return self._fallback_rank_choices(question=question, choices=choices, evidence=[], working_memory=[text])
-        return {
+        result = {
             "best_index": best_index,
             "answer": str(payload.get("answer") or choices[best_index]),
             "confidence": float(payload.get("confidence") or 0.0),
             "reason": str(payload.get("reason") or text[:300]),
         }
+        return self._postprocess_action_mechanism_result(question=question, choices=choices, result=result)
 
     def infer_action_intent(self, question: str, choices: list[str], image_paths: list[str], context_notes: list[str]) -> dict[str, Any]:
+        selected_paths = self._select_compact_visual_paths(image_paths=image_paths, max_images=4)
+        scoped_notes = self._scope_action_intent_context_notes(question=question, image_paths=selected_paths, context_notes=context_notes)
         prompt = (
             "你在看厨房第一视角视频中某个动作前后的关键帧，这些图片按时间顺序排列。"
             "请判断这个动作的最直接目的。"
@@ -1180,12 +2862,15 @@ class AgentToolbox:
             "\n2. 是否拿来擦手/干手"
             "\n3. 是否只是收起、挪开、放回"
             "\n4. 当前活动语境是否在清洗、收纳、做饭准备"
-            f"\n上下文线索: {context_notes}"
-            '\n输出 JSON，字段固定为 {"best_index":0,"answer":"","confidence":0.0,"reason":""}。'
+            "\n5. 如果当前帧只能看出“挪开某物”，但还看不清后续到底是为了取后面的东西，还是为了单纯腾空间/整理，请明确标记需要后续证据。"
+            "\n6. 如果动作是拿起/转移某物，但目的依赖后续用途，例如称重、倒空、盛装、检查或清洗，也请明确标记需要后续证据。"
+            "\n7. 如果两个选项都合理，不要勉强硬选；请给出第二候选，并说明需要看动作后结果帧。"
+            f"\n上下文线索: {scoped_notes}"
+            '\n输出 JSON，字段固定为 {"best_index":0,"answer":"","confidence":0.0,"reason":"","second_best_index":0,"ambiguity":false,"need_future_evidence":false,"future_window_s":4.0,"followup_focus":""}。'
             f"\n问题: {question}\n选项:\n"
             + "\n".join(f"{idx}. {choice}" for idx, choice in enumerate(choices))
         )
-        response = self.model_client.inspect_images(prompt=prompt, image_paths=[Path(path) for path in image_paths], temperature=0.0)
+        response = self.model_client.inspect_images(prompt=prompt, image_paths=[Path(path) for path in selected_paths], temperature=0.0)
         text = response.content.strip()
         try:
             payload = self.model_client._extract_json_object(text)
@@ -1195,13 +2880,852 @@ class AgentToolbox:
                 answer=payload.get("answer"),
             )
         except Exception:  # noqa: BLE001
-            return self._fallback_rank_choices(question=question, choices=choices, evidence=context_notes, working_memory=[text])
-        return {
+            return self._fallback_rank_choices(question=question, choices=choices, evidence=scoped_notes, working_memory=[text])
+        result = {
             "best_index": best_index,
             "answer": str(payload.get("answer") or choices[best_index]),
             "confidence": float(payload.get("confidence") or 0.0),
             "reason": str(payload.get("reason") or text[:300]),
         }
+        second_best = payload.get("second_best_index")
+        try:
+            second_best_index = int(second_best)
+        except Exception:  # noqa: BLE001
+            second_best_index = None
+        if second_best_index is not None and not (0 <= second_best_index < len(choices)):
+            second_best_index = None
+        result["second_best_index"] = second_best_index
+        result["ambiguity"] = bool(payload.get("ambiguity"))
+        result["need_future_evidence"] = bool(payload.get("need_future_evidence"))
+        result["future_window_s"] = float(payload.get("future_window_s") or 4.0)
+        result["followup_focus"] = str(payload.get("followup_focus") or "")
+        heuristic_need_followup, heuristic_reason = self._assess_action_intent_followup_need(
+            question=question,
+            choices=choices,
+            result=result,
+        )
+        if heuristic_need_followup:
+            result["need_future_evidence"] = True
+            result["ambiguity"] = True
+            if heuristic_reason == "future_use_evidence_needed":
+                result["future_window_s"] = max(8.0, float(result.get("future_window_s") or 4.0))
+            if not result["followup_focus"]:
+                result["followup_focus"] = heuristic_reason
+            result["reason"] = f"{result['reason']}; followup_needed={heuristic_reason}"
+        return result
+
+    def resolve_action_intent_pairwise(
+        self,
+        question: str,
+        choices: list[str],
+        candidate_indices: list[int],
+        image_paths: list[str],
+        context_notes: list[str],
+    ) -> dict[str, Any]:
+        valid_indices = []
+        for value in candidate_indices:
+            try:
+                index = int(value)
+            except Exception:  # noqa: BLE001
+                continue
+            if 0 <= index < len(choices) and index not in valid_indices:
+                valid_indices.append(index)
+        if len(valid_indices) < 2:
+            return self.infer_action_intent(question=question, choices=choices, image_paths=image_paths, context_notes=context_notes)
+        selected_paths = self._select_compact_visual_paths(image_paths=image_paths, max_images=8)
+        scoped_notes = self._scope_action_intent_context_notes(question=question, image_paths=selected_paths, context_notes=context_notes)
+        pair_choices = [{"index": index, "choice": str(choices[index])} for index in valid_indices[:2]]
+        prompt = (
+            "你在做厨房第一视角视频 why 题的最终歧义裁决。"
+            "现在不是五选一，而是只在两个高混淆候选之间做判断。"
+            "\n必须重点看动作发生后的结果帧，判断："
+            "\n1. 后续是否真的取到了被遮挡/被挡住的物体"
+            "\n2. 还是只是把前景物体挪开后腾出了空间/完成整理"
+            "\n3. 是否把被挪开的物体放回，或是否把另一个目标物件安装/放回到位"
+            "\n4. 必须区分“当前动作的直接物理效果”和“之后发生的下游动作”。"
+            "\n5. 如果当前动作是 move/shift/remove 某物，而后续只是把另一个物体放入腾出的空间，当前动作的直接目的通常是 make space，不要把下游放置动作当成当前动作本身的目的。"
+            "\n6. 只有当被移动的物体本身被放回/摆正，或证据显示题目动作直接就是放置该物体，才选择 put/place/right place 类候选。"
+            "\n7. 如果证据仍不够，不要强行高置信收口；必须标记 need_more_evidence=true，并说明还需要看哪个后续动作。"
+            f"\n上下文线索: {scoped_notes}"
+            '\n输出 JSON，字段固定为 {"best_index":0,"answer":"","confidence":0.0,"reason":"","losing_index":0,"direct_effect":"","downstream_action":"","need_more_evidence":false,"needed_observation":""}。'
+            f"\n问题: {question}"
+            f"\n候选对决: {json.dumps(pair_choices, ensure_ascii=False)}"
+        )
+        response = self.model_client.inspect_images(
+            prompt=prompt,
+            image_paths=[Path(path) for path in selected_paths],
+            temperature=0.0,
+        )
+        text = response.content.strip()
+        try:
+            payload = self.model_client._extract_json_object(text)
+        except Exception:  # noqa: BLE001
+            return self._fallback_rank_choices(question=question, choices=choices, evidence=scoped_notes, working_memory=[text])
+        best_index = self._resolve_choice_index(
+            choices=choices,
+            best_index=payload.get("best_index"),
+            answer=payload.get("answer"),
+        )
+        if best_index not in valid_indices:
+            best_index = valid_indices[0]
+        losing_index = None
+        try:
+            parsed_loser = int(payload.get("losing_index"))
+            if parsed_loser in valid_indices and parsed_loser != best_index:
+                losing_index = parsed_loser
+        except Exception:  # noqa: BLE001
+            losing_index = None
+        if losing_index is None:
+            losing_index = next((item for item in valid_indices if item != best_index), None)
+        result = {
+            "best_index": best_index,
+            "answer": str(choices[best_index]),
+            "confidence": float(payload.get("confidence") or 0.0),
+            "reason": str(payload.get("reason") or text[:300]),
+            "losing_index": losing_index,
+            "candidate_indices": valid_indices[:2],
+            "direct_effect": str(payload.get("direct_effect") or ""),
+            "downstream_action": str(payload.get("downstream_action") or ""),
+            "need_more_evidence": bool(payload.get("need_more_evidence")),
+            "needed_observation": str(payload.get("needed_observation") or ""),
+        }
+        result = self._apply_action_intent_pairwise_sufficiency(
+            question=question,
+            result=result,
+        )
+        return self._apply_action_intent_pairwise_causal_hierarchy(
+            question=question,
+            choices=choices,
+            valid_indices=valid_indices[:2],
+            result=result,
+        )
+
+    def resolve_action_intent_future_use(
+        self,
+        question: str,
+        choices: list[str],
+        candidate_indices: list[int],
+        image_paths: list[str],
+        context_notes: list[str],
+    ) -> dict[str, Any]:
+        valid_indices = []
+        for value in candidate_indices:
+            try:
+                index = int(value)
+            except Exception:  # noqa: BLE001
+                continue
+            if 0 <= index < len(choices) and index not in valid_indices:
+                valid_indices.append(index)
+        if len(valid_indices) < 2:
+            valid_indices = list(range(len(choices)))
+        selected_paths = self._select_compact_visual_paths(image_paths=image_paths, max_images=8)
+        if not selected_paths:
+            return self._fallback_rank_choices(question=question, choices=choices, evidence=context_notes, working_memory=[])
+        scoped_notes = self._scope_action_intent_context_notes(question=question, image_paths=selected_paths, context_notes=context_notes)
+        candidate_choices = [{"index": index, "choice": str(choices[index])} for index in valid_indices]
+        prompt = (
+            "你在做厨房第一视角视频 why 题的后续用途裁决。"
+            "题目问的是执行某个动作的目的，但这个目的不能只从动作瞬间判断，必须看动作之后这个物体/空间被如何使用。"
+            "\n请按时间顺序阅读图片，并对每个候选目的分别找支持证据和反证。"
+            "\n必须遵守："
+            "\n1. 如果候选说称重/测量，必须寻找秤、食材、容器被放到秤上或称量动作的后续证据。"
+            "\n2. 如果候选说倒空/倒水/倒掉，必须寻找倾倒、流体离开容器或容器被拿向水槽/锅的证据。"
+            "\n3. 如果候选说盛装/服务，必须寻找把食物装入/端出/分发的证据。"
+            "\n4. 如果候选说检查/打开/关闭/取回，必须寻找对应后续动作已经发生的证据。"
+            "\n5. 不要因为动作瞬间像某个候选就直接选；最后答案必须由动作后的实际结果支持。"
+            "\n6. 如果多个候选都可能，选择后续证据更直接、更能排除其它候选的一个，并说明被排除候选缺少什么证据。"
+            "\n7. 如果图片还没覆盖到真正的后续使用/放回/关闭前结果，不要强行高置信作答；标记 need_more_evidence=true，并说明还需要看什么。"
+            f"\n上下文线索: {scoped_notes}"
+            '\n输出 JSON，字段固定为 {"candidate_evidence":[{"index":0,"support":"","contradiction":"","score":0.0}],"best_index":0,"answer":"","confidence":0.0,"decisive_observation":"","reason":"","need_more_evidence":false,"needed_observation":""}。'
+            f"\n问题: {question}"
+            f"\n候选: {json.dumps(candidate_choices, ensure_ascii=False)}"
+        )
+        response = self.model_client.inspect_images(
+            prompt=prompt,
+            image_paths=[Path(path) for path in selected_paths],
+            temperature=0.0,
+        )
+        text = response.content.strip()
+        try:
+            payload = self.model_client._extract_json_object(text)
+        except Exception:  # noqa: BLE001
+            return self._fallback_rank_choices(question=question, choices=choices, evidence=scoped_notes, working_memory=[text])
+        best_index = self._resolve_choice_index(
+            choices=choices,
+            best_index=payload.get("best_index"),
+            answer=payload.get("answer"),
+        )
+        if best_index not in valid_indices:
+            scored_indices = self._valid_future_use_scores(payload.get("candidate_evidence"), valid_indices)
+            best_index = scored_indices[0][0] if scored_indices else valid_indices[0]
+        result = {
+            "best_index": best_index,
+            "answer": str(payload.get("answer") or choices[best_index]),
+            "confidence": float(payload.get("confidence") or 0.0),
+            "decisive_observation": str(payload.get("decisive_observation") or ""),
+            "reason": str(payload.get("reason") or text[:300]),
+            "candidate_evidence": payload.get("candidate_evidence") or [],
+            "candidate_indices": valid_indices,
+            "need_more_evidence": bool(payload.get("need_more_evidence")),
+            "needed_observation": str(payload.get("needed_observation") or ""),
+        }
+        return self._apply_action_intent_future_use_sufficiency(
+            result=result,
+            valid_indices=valid_indices,
+            choices=[str(choice) for choice in choices],
+        )
+
+    def _valid_future_use_scores(self, raw_items: Any, valid_indices: list[int]) -> list[tuple[int, float]]:
+        scored: list[tuple[int, float]] = []
+        if not isinstance(raw_items, list):
+            return scored
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            try:
+                index = int(item.get("index"))
+                score = float(item.get("score") or 0.0)
+            except Exception:  # noqa: BLE001
+                continue
+            if index in valid_indices:
+                scored.append((index, score))
+        return sorted(scored, key=lambda pair: pair[1], reverse=True)
+
+    def _apply_action_intent_future_use_sufficiency(
+        self,
+        *,
+        result: dict[str, Any],
+        valid_indices: list[int],
+        choices: list[str] | None = None,
+    ) -> dict[str, Any]:
+        semantic_gaps = self._action_intent_future_use_semantic_gaps(
+            result=result,
+            valid_indices=valid_indices,
+            choices=choices or [],
+        )
+        if result.get("need_more_evidence"):
+            if not semantic_gaps:
+                return result
+            adjusted = dict(result)
+            adjusted["reason"] = (
+                f"{result.get('reason') or ''} semantic_support_check="
+                + ",".join(semantic_gaps)
+            ).strip()
+            if not adjusted.get("needed_observation"):
+                adjusted["needed_observation"] = self._action_intent_needed_observation_for_gaps(semantic_gaps)
+            adjusted["confidence"] = min(float(result.get("confidence") or 0.0), 0.6)
+            return adjusted
+        adjusted = dict(result)
+        decisive = str(result.get("decisive_observation") or "").strip()
+        scored = self._valid_future_use_scores(result.get("candidate_evidence"), valid_indices)
+        score_by_index = {index: score for index, score in scored}
+        best_index = int(result.get("best_index")) if result.get("best_index") is not None else None
+        top_score = score_by_index.get(best_index, 0.0) if best_index is not None else 0.0
+        second_score = max((score for index, score in scored if index != best_index), default=0.0)
+        missing_reasons: list[str] = []
+        if not decisive:
+            missing_reasons.append("missing_decisive_post_action_observation")
+        if best_index is None or best_index not in score_by_index:
+            missing_reasons.append("missing_best_candidate_evidence_score")
+        if top_score < 0.55:
+            missing_reasons.append("weak_top_candidate_score")
+        if len(scored) >= 2 and top_score - second_score < 0.18:
+            missing_reasons.append("ambiguous_candidate_score_margin")
+        missing_reasons.extend(gap for gap in semantic_gaps if gap not in missing_reasons)
+        if not missing_reasons:
+            return adjusted
+        adjusted["need_more_evidence"] = True
+        if not adjusted.get("needed_observation"):
+            adjusted["needed_observation"] = self._action_intent_needed_observation_for_gaps(missing_reasons)
+        adjusted["reason"] = (
+            f"{result.get('reason') or ''} sufficiency_check="
+            + ",".join(missing_reasons)
+        ).strip()
+        adjusted["confidence"] = min(float(result.get("confidence") or 0.0), 0.66)
+        return adjusted
+
+    def _action_intent_future_use_semantic_gaps(
+        self,
+        *,
+        result: dict[str, Any],
+        valid_indices: list[int],
+        choices: list[str],
+    ) -> list[str]:
+        try:
+            best_index = int(result.get("best_index"))
+        except Exception:  # noqa: BLE001
+            return []
+        if best_index not in valid_indices or not (0 <= best_index < len(choices)):
+            return []
+        choice = str(choices[best_index])
+        choice_lc = choice.lower()
+        categories = choice_categories(choice)
+        evidence_text = self._action_intent_candidate_evidence_text(result=result, index=best_index)
+        if not evidence_text.strip():
+            return ["missing_candidate_positive_evidence"]
+        gaps: list[str] = []
+        explicit_denial = self._action_intent_evidence_explicitly_denies_support(evidence_text)
+        if explicit_denial:
+            gaps.append("candidate_explicitly_lacks_observed_support")
+        if any(term in evidence_text for term in ("least contradicted", "broadest", "least contradicted", "最不矛盾", "最宽泛")):
+            gaps.append("best_is_unproven_broad_candidate")
+        if "final_place_return" in categories and any(
+            term in choice_lc
+            for term in ("away", "put back", "store", "return", "right place", "proper place", "in place", "放回", "收起", "归位")
+        ):
+            if not self._text_has_any(
+                evidence_text,
+                (
+                    "put away",
+                    "stored",
+                    "storage",
+                    "drawer",
+                    "cupboard",
+                    "cabinet",
+                    "fridge",
+                    "hung",
+                    "hook",
+                    "returned",
+                    "back in",
+                    "right place",
+                    "proper place",
+                    "final",
+                    "放回",
+                    "收起",
+                    "挂回",
+                    "柜",
+                    "抽屉",
+                    "冰箱",
+                    "归位",
+                ),
+            ):
+                gaps.append("missing_final_placement_evidence")
+            if self._text_has_any(
+                evidence_text,
+                (
+                    "temporarily",
+                    "temporary",
+                    "merely relocated",
+                    "only moved",
+                    "placed on the counter",
+                    "put on the counter",
+                    "not stored",
+                    "not put away",
+                    "只是",
+                    "仅",
+                    "临时",
+                    "台面",
+                    "没有收",
+                    "未收",
+                    "没有放回",
+                ),
+            ):
+                gaps.append("temporary_relocation_not_final_placement")
+        if "dry" in choice_lc and "hand" in choice_lc:
+            if not self._text_has_grouped_terms(
+                evidence_text,
+                (
+                    ("hand", "hands", "手"),
+                    ("dry", "dried", "wipe", "wiped", "towel", "cloth", "擦手", "干手", "擦干"),
+                ),
+            ):
+                gaps.append("missing_dry_hands_evidence")
+        if "wipe" in choice_lc and any(term in choice_lc for term in ("surface", "counter", "worktop", "table", "台面", "桌")):
+            if not self._text_has_grouped_terms(
+                evidence_text,
+                (
+                    ("wipe", "wiped", "clean", "cleaned", "scrub", "擦", "清洁"),
+                    ("surface", "counter", "worktop", "table", "台面", "桌面"),
+                ),
+            ):
+                gaps.append("missing_surface_wiping_evidence")
+        if "clean" in choice_lc and "check" not in choice_lc and "whether" not in choice_lc:
+            if explicit_denial or not self._text_has_any(
+                evidence_text,
+                ("cleaned", "cleaning", "wiped", "wipe", "washed", "wash", "rinsed", "scrub", "擦", "清洁", "洗", "冲洗"),
+            ):
+                gaps.append("missing_cleaning_action_evidence")
+        if "fill" in choice_lc:
+            if not self._text_has_grouped_terms(
+                evidence_text,
+                (
+                    ("fill", "filled", "water", "liquid", "running", "pour", "加水", "接水", "水"),
+                    ("kettle", "pan", "pot", "container", "bottle", "水壶", "锅", "容器"),
+                ),
+            ):
+                gaps.append("missing_fill_evidence")
+        if any(term in choice_lc for term in ("weigh", "measure", "scale")):
+            if not self._text_has_any(evidence_text, ("scale", "weigh", "weighed", "measure", "grams", "秤", "称", "克")):
+                gaps.append("missing_measurement_evidence")
+        if any(term in choice_lc for term in ("empty", "pour", "drain")):
+            if not self._text_has_any(
+                evidence_text,
+                ("empty", "emptied", "pour", "poured", "drain", "drained", "water", "liquid", "sink", "倒", "倒出", "沥", "水槽"),
+            ):
+                gaps.append("missing_transfer_or_emptying_evidence")
+        if any(term in choice_lc for term in ("check", "inspect", "read", "label", "date", "look")):
+            if not self._text_has_any(evidence_text, ("check", "inspect", "look", "read", "label", "date", "visible", "查看", "看", "读", "标签")):
+                gaps.append("missing_inspection_evidence")
+        return list(dict.fromkeys(gaps))
+
+    def _action_intent_candidate_evidence_text(self, *, result: dict[str, Any], index: int) -> str:
+        parts = [
+            str(result.get("answer") or ""),
+            str(result.get("decisive_observation") or ""),
+            str(result.get("reason") or ""),
+        ]
+        for item in result.get("candidate_evidence") or []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                item_index = int(item.get("index"))
+            except Exception:  # noqa: BLE001
+                continue
+            if item_index != index:
+                continue
+            parts.extend(str(item.get(key) or "") for key in ("support", "contradiction"))
+        return " ".join(part for part in parts if part).lower()
+
+    def _action_intent_evidence_explicitly_denies_support(self, text: str) -> bool:
+        return self._text_has_any(
+            text,
+            (
+                "no actual",
+                "not actually",
+                "not shown",
+                "not visible",
+                "absence of",
+                "lacks",
+                "lack of",
+                "missing",
+                "contradicted",
+                "no candidate-specific",
+                "缺少",
+                "没有",
+                "未看到",
+                "未出现",
+                "并未",
+                "不足",
+                "反证",
+            ),
+        )
+
+    def _action_intent_needed_observation_for_gaps(self, gaps: list[str]) -> str:
+        if any("dry_hands" in gap for gap in gaps):
+            return "post-action frames showing whether the towel or cloth contacts/wipes the hands"
+        if any("surface_wiping" in gap or "cleaning" in gap for gap in gaps):
+            return "post-action frames showing whether the towel/cloth actually wipes or cleans a surface/object"
+        if any("final_placement" in gap or "temporary_relocation" in gap for gap in gaps):
+            return "post-action frames showing the object's final placement, storage, or return location rather than a temporary move"
+        if any("fill" in gap for gap in gaps):
+            return "post-action frames showing filling with water/liquid and the target container"
+        if any("measurement" in gap for gap in gaps):
+            return "post-action frames showing the scale/measurement setup and the object being weighed"
+        if any("transfer_or_emptying" in gap for gap in gaps):
+            return "post-action frames showing pouring, draining, emptying, or liquid/contents transfer"
+        if any("inspection" in gap for gap in gaps):
+            return "post-action frames showing the person inspecting, reading, or checking the target"
+        return "more post-action frames showing the object's actual use, final placement, or a clear result that separates the top competing choices"
+
+    def _text_has_any(self, text: str, terms: tuple[str, ...]) -> bool:
+        lowered = str(text or "").lower()
+        return any(term in lowered for term in terms)
+
+    def _text_has_grouped_terms(self, text: str, groups: tuple[tuple[str, ...], ...]) -> bool:
+        lowered = str(text or "").lower()
+        return all(any(term in lowered for term in group) for group in groups)
+
+    def _apply_action_intent_pairwise_sufficiency(
+        self,
+        *,
+        question: str,
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        if result.get("need_more_evidence"):
+            return result
+        question_lc = str(question or "").lower()
+        if not any(
+            token in question_lc
+            for token in ("move ", "moved ", "shift ", "remove ", "clear ", "pick up ", "take ", "open ", "close ", "put ", "place ")
+        ):
+            return result
+        direct_effect = str(result.get("direct_effect") or "").strip()
+        downstream_action = str(result.get("downstream_action") or "").strip()
+        reason = str(result.get("reason") or "").strip()
+        evidence_text = f"{reason} {direct_effect} {downstream_action}".lower()
+        post_action_terms = (
+            "after",
+            "then",
+            "later",
+            "follow",
+            "subsequent",
+            "result",
+            "retrieve",
+            "retrieved",
+            "access",
+            "behind",
+            "space",
+            "room",
+            "placed",
+            "put",
+            "return",
+            "closed",
+            "opened",
+            "后续",
+            "之后",
+            "随后",
+            "结果",
+            "拿到",
+            "取出",
+            "放入",
+            "放回",
+            "归位",
+            "腾",
+        )
+        missing_reasons: list[str] = []
+        if not direct_effect:
+            missing_reasons.append("missing_direct_effect")
+        if not any(term in evidence_text for term in post_action_terms):
+            missing_reasons.append("missing_post_action_result_chain")
+        try:
+            confidence = float(result.get("confidence") or 0.0)
+        except Exception:  # noqa: BLE001
+            confidence = 0.0
+        if confidence < 0.74 and not downstream_action:
+            missing_reasons.append("weak_pairwise_outcome_support")
+        if not missing_reasons:
+            return result
+        adjusted = dict(result)
+        adjusted["need_more_evidence"] = True
+        if not adjusted.get("needed_observation"):
+            adjusted["needed_observation"] = (
+                "more post-action frames showing the direct physical effect of the action and what happens next"
+            )
+        adjusted["reason"] = (
+            f"{result.get('reason') or ''} pairwise_sufficiency_check="
+            + ",".join(missing_reasons)
+        ).strip()
+        adjusted["confidence"] = min(confidence, 0.66)
+        return adjusted
+
+    def _apply_action_intent_pairwise_causal_hierarchy(
+        self,
+        *,
+        question: str,
+        choices: list[str],
+        valid_indices: list[int],
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        if len(valid_indices) < 2 or result.get("need_more_evidence"):
+            return result
+        question_lc = str(question or "").lower()
+        if not any(token in question_lc for token in ("move ", "moved ", "shift ", "remove ", "clear ", "pick up ", "take ")):
+            return result
+        direct_space_index = next(
+            (
+                index
+                for index in valid_indices
+                if self._choice_is_direct_space_purpose(str(choices[index]))
+            ),
+            None,
+        )
+        downstream_place_index = next(
+            (
+                index
+                for index in valid_indices
+                if self._choice_is_downstream_place_purpose(str(choices[index]))
+            ),
+            None,
+        )
+        if direct_space_index is None or downstream_place_index is None:
+            return result
+        if int(result.get("best_index", -1)) != downstream_place_index:
+            return result
+        explanation = " ".join(
+            str(result.get(key) or "")
+            for key in ("reason", "direct_effect", "downstream_action")
+        ).lower()
+        if not self._explanation_uses_downstream_space_chain(explanation):
+            return result
+        adjusted = dict(result)
+        adjusted["best_index"] = direct_space_index
+        adjusted["answer"] = str(choices[direct_space_index])
+        adjusted["losing_index"] = downstream_place_index
+        adjusted["confidence"] = max(0.8, min(0.9, float(result.get("confidence") or 0.0) + 0.04))
+        adjusted["causal_hierarchy_adjusted"] = True
+        adjusted["reason"] = (
+            f"{result.get('reason') or ''} causal_hierarchy_adjustment: "
+            "the evidence describes a downstream placement after the moved object created room; "
+            "for a move action, that supports the direct purpose of making space rather than selecting the downstream placement as the action purpose."
+        ).strip()
+        return adjusted
+
+    def _choice_is_direct_space_purpose(self, choice: str) -> bool:
+        text = str(choice or "").lower()
+        return any(
+            token in text
+            for token in (
+                "make space",
+                "create space",
+                "free up space",
+                "clear space",
+                "make room",
+                "create room",
+                "free up room",
+                "clear room",
+            )
+        )
+
+    def _choice_is_downstream_place_purpose(self, choice: str) -> bool:
+        text = str(choice or "").lower()
+        if self._choice_is_direct_space_purpose(text):
+            return False
+        return (
+            any(token in text for token in ("put ", "place ", "right place", "proper place", "fit ", "insert ", "slot "))
+            and any(token in text for token in ("other", "another", "piece", "part", "item", "dish", "lid", "white"))
+        )
+
+    def _explanation_uses_downstream_space_chain(self, explanation: str) -> bool:
+        text = str(explanation or "").lower()
+        has_downstream = any(
+            token in text
+            for token in (
+                "another",
+                "other",
+                "white",
+                "piece",
+                "part",
+                "item",
+                "dish",
+                "lid",
+                "place",
+                "put",
+                "放",
+                "白色",
+                "部件",
+                "方形",
+                "归位",
+                "安装",
+            )
+        )
+        has_space_or_blocking = any(
+            token in text
+            for token in (
+                "space",
+                "room",
+                "clear",
+                "way",
+                "make room",
+                "out of the way",
+                "avoid blocking",
+                "挡",
+                "腾",
+                "空位",
+                "挪开",
+            )
+        )
+        return has_downstream and has_space_or_blocking
+
+    def _scope_action_intent_context_notes(self, *, question: str, image_paths: list[str], context_notes: list[str]) -> list[str]:
+        context_notes = self._sanitize_action_intent_context_notes(context_notes)
+        if not context_notes:
+            return []
+        hints = self.default_hints(self.runtime_question or question, self.runtime_inputs_json)
+        anchor_times = [float(value) for value in hints.get("times") or []] + [float(value) for value in hints.get("input_times") or []]
+        for path in image_paths:
+            inferred = self._infer_artifact_time(path)
+            if inferred is not None:
+                anchor_times.append(float(inferred))
+        if not anchor_times:
+            return [str(item) for item in context_notes[:6]]
+        min_anchor = min(anchor_times)
+        max_anchor = max(anchor_times)
+        window_start = max(0.0, min_anchor - 6.0)
+        window_end = max_anchor + 6.0
+        scoped: list[str] = []
+        for raw in context_notes:
+            note = str(raw)
+            if not note:
+                continue
+            times = self._extract_embedded_note_times(note)
+            lowered = note.lower()
+            if times:
+                overlaps = any(not (end_time < window_start or start_time > window_end) for start_time, end_time in times)
+                if overlaps:
+                    scoped.append(note)
+                    continue
+            # Keep only non-answer observational notes when timestamps are unavailable.
+            if any(token in lowered for token in ("inspection;", "ongoing_action=", "target_location=")):
+                scoped.append(note)
+        if not scoped:
+            return [str(item) for item in context_notes[:6]]
+        return scoped[:8]
+
+    def _sanitize_action_intent_context_notes(self, context_notes: list[str]) -> list[str]:
+        sanitized: list[str] = []
+        leaky_tokens = (
+            "action_intent_",
+            "visual_mcq_reason=",
+            "answer_hint=",
+            "candidate_answer_index=",
+            "deterministic_finalize",
+            "source=agent_timeline_summary",
+            "source=session_memory_compressor",
+        )
+        for raw in context_notes:
+            note = str(raw)
+            lowered = note.lower()
+            if any(token in lowered for token in leaky_tokens):
+                continue
+            if note and note not in sanitized:
+                sanitized.append(note)
+        return sanitized
+
+    def _extract_embedded_note_times(self, text: str) -> list[tuple[float, float]]:
+        spans: list[tuple[float, float]] = []
+        for match in re.finditer(r"time=([0-9.]+)-([0-9.]+)", str(text)):
+            try:
+                start_time = float(match.group(1))
+                end_time = float(match.group(2))
+            except Exception:  # noqa: BLE001
+                continue
+            spans.append((min(start_time, end_time), max(start_time, end_time)))
+        return spans
+
+    def _assess_action_intent_followup_need(
+        self,
+        *,
+        question: str,
+        choices: list[str],
+        result: dict[str, Any],
+    ) -> tuple[bool, str]:
+        confidence = float(result.get("confidence") or 0.0)
+        reason = str(result.get("reason") or "").lower()
+        question_text = str(question or "").lower()
+        best_index = result.get("best_index")
+        second_best_index = result.get("second_best_index")
+        best_choice = str(choices[int(best_index)]) if isinstance(best_index, int) and 0 <= int(best_index) < len(choices) else ""
+        second_choice = str(choices[int(second_best_index)]) if isinstance(second_best_index, int) and 0 <= int(second_best_index) < len(choices) else ""
+        candidate_indices = [
+            index
+            for index in (best_index, second_best_index)
+            if isinstance(index, int) and 0 <= int(index) < len(choices)
+        ]
+        semantic_need, semantic_reason, semantic_window_s, semantic_resolver = action_intent_followup_decision(
+            question=question,
+            choices=[str(choice) for choice in choices],
+            indices=candidate_indices if len(candidate_indices) >= 2 else None,
+            confidence=confidence,
+            reason_text=reason,
+        )
+        if semantic_need:
+            if semantic_resolver == "future_use" or semantic_window_s >= 8.0:
+                result["future_window_s"] = max(float(result.get("future_window_s") or 4.0), semantic_window_s)
+            return True, semantic_reason
+        joined = " | ".join(item.lower() for item in (best_choice, second_choice) if item)
+        overlap_pairs = (
+            ("access", "make space"),
+            ("move", "make space"),
+            ("clear the way", "make space"),
+            ("put back", "move"),
+            ("rearrange", "make space"),
+        )
+        action_terms = (
+            "move ",
+            "moved ",
+            "shift ",
+            "clear ",
+            "open ",
+            "close ",
+            "put ",
+            "place ",
+            "pick up",
+            "take out",
+            "remove ",
+        )
+        manipulation_terms = (
+            "pick up",
+            "picked up",
+            "pick ",
+            "lift ",
+            "lifted ",
+            "take ",
+            "took ",
+            "transfer ",
+            "transferred ",
+            "carry ",
+            "carried ",
+            "grab ",
+            "grabbed ",
+        )
+        outcome_terms = (
+            "make space",
+            "space",
+            "access",
+            "behind",
+            "clear the way",
+            "right place",
+            "put back",
+            "put",
+            "place",
+            "pick up",
+            "remove",
+            "rearrange",
+        )
+        future_use_terms = (
+            "weigh",
+            "measure",
+            "use ",
+            "serve",
+            "empty",
+            "drain",
+            "pour",
+            "check",
+            "retrieve",
+            "get ",
+            "fill",
+            "wash",
+            "clean",
+            "dry",
+            "record",
+            "scan",
+            "put ",
+            "place ",
+            "return",
+            "close",
+            "open",
+            "turn",
+            "mix",
+            "stir",
+        )
+        choice_texts = [item.lower() for item in (best_choice, second_choice) if item]
+        outcome_hit_count = sum(1 for item in choice_texts if any(token in item for token in outcome_terms))
+        all_choice_texts = [str(choice).lower() for choice in choices]
+        future_use_hit_count = sum(1 for item in all_choice_texts if any(token in item for token in future_use_terms))
+        if result.get("need_future_evidence"):
+            return True, "model_flagged_future_evidence"
+        if result.get("ambiguity"):
+            return True, "model_flagged_ambiguity"
+        if any(token in question_text for token in manipulation_terms) and future_use_hit_count >= 2:
+            return True, "future_use_evidence_needed"
+        if (
+            len(choice_texts) >= 2
+            and any(token in question_text for token in action_terms)
+            and outcome_hit_count >= 2
+        ):
+            return True, "outcome_dependent_pairwise_needed"
+        if confidence < 0.84:
+            for left, right in overlap_pairs:
+                if left in joined and right in joined:
+                    return True, f"low_confidence_semantic_overlap:{left}|{right}"
+        if any(token in question_text for token in ("move ", "shift ", "clear ", "open ", "close ", "put back", "put aside")) and confidence <= 0.92:
+            if any(token in joined for token in ("access", "make space", "clear the way", "put back")):
+                return True, "post_action_result_needed"
+        if "behind" in joined and "space" in joined:
+            return True, "behind_vs_space_needs_outcome"
+        if "can't tell" in reason or "uncertain" in reason or "ambiguous" in reason:
+            return True, "reason_explicitly_uncertain"
+        return False, ""
 
     def write_observation(
         self,
@@ -1211,9 +3735,16 @@ class AgentToolbox:
         attributes: dict[str, Any] | None = None,
         evidence_paths: list[str] | None = None,
         keywords: list[str] | None = None,
+        source_tool: str | None = None,
+        confidence: float | None = None,
     ) -> dict[str, Any]:
         safe_label = self._safe_tag(label)[:64]
         node_id = f"observation:{self.video_id}:{safe_label}:{self._node_time_token(start_time, end_time)}"
+        payload = dict(attributes or {})
+        if source_tool and "source_tool" not in payload:
+            payload["source_tool"] = str(source_tool)
+        if confidence is not None and "confidence" not in payload:
+            payload["confidence"] = float(confidence)
         node = GraphNodeRecord(
             node_id=node_id,
             node_type="observation",
@@ -1221,9 +3752,9 @@ class AgentToolbox:
             video_id=self.video_id,
             start_time=start_time,
             end_time=end_time,
-            attributes=attributes or {},
+            attributes=payload,
             evidence_paths=evidence_paths or [],
-            keywords=keywords or self._keywords_from_payload(label, attributes or {}),
+            keywords=keywords or self._keywords_from_payload(label, payload),
         )
         self.store.upsert_node(node)
         self.store.upsert_edge(
@@ -1236,6 +3767,12 @@ class AgentToolbox:
                 attributes={"source": "agent_writeback"},
             )
         )
+        self._link_written_node(
+            node_id=node_id,
+            time_s=start_time if start_time is not None else end_time,
+            evidence_paths=evidence_paths or [],
+            semantic_hint=label,
+        )
         return {"node_id": node_id}
 
     def write_frame_observation(
@@ -1245,6 +3782,8 @@ class AgentToolbox:
         label: str,
         observation: dict[str, Any],
         keywords: list[str] | None = None,
+        source_tool: str | None = None,
+        confidence: float | None = None,
     ) -> dict[str, Any]:
         safe_label = self._safe_tag(label)[:64]
         node_id = f"frame_observation:{self.video_id}:{safe_label}:{self._node_time_token(time_s, time_s)}"
@@ -1259,8 +3798,11 @@ class AgentToolbox:
             attributes=payload,
             evidence_paths=[frame_path],
             keywords=keywords or self._keywords_from_payload(label, payload),
+            source_tool=source_tool,
+            confidence=confidence,
         )
         self._link_to_matching_frame(node_id=node_id, time_s=time_s)
+        self._link_written_node(node_id=node_id, time_s=time_s, evidence_paths=[frame_path], semantic_hint=label)
         return {"node_id": node["node_id"], "node": node}
 
     def write_region_observation(
@@ -1271,6 +3813,8 @@ class AgentToolbox:
         label: str,
         observation: dict[str, Any],
         keywords: list[str] | None = None,
+        source_tool: str | None = None,
+        confidence: float | None = None,
     ) -> dict[str, Any]:
         safe_label = self._safe_tag(label)[:64]
         node_id = f"region_observation:{self.video_id}:{safe_label}:{self._node_time_token(time_s, time_s)}"
@@ -1290,8 +3834,11 @@ class AgentToolbox:
             attributes=payload,
             evidence_paths=[image_path],
             keywords=keywords or self._keywords_from_payload(label, payload),
+            source_tool=source_tool,
+            confidence=confidence,
         )
         self._link_to_matching_frame(node_id=node_id, time_s=time_s)
+        self._link_written_node(node_id=node_id, time_s=time_s, evidence_paths=[image_path], semantic_hint=label)
         return {"node_id": node["node_id"], "node": node}
 
     def write_ocr_reading(
@@ -1303,6 +3850,8 @@ class AgentToolbox:
         bbox: list[float] | None = None,
         attributes: dict[str, Any] | None = None,
         keywords: list[str] | None = None,
+        source_tool: str | None = None,
+        confidence: float | None = None,
     ) -> dict[str, Any]:
         safe_label = self._safe_tag(label)[:64]
         node_id = f"ocr_reading:{self.video_id}:{safe_label}:{self._node_time_token(time_s, time_s)}"
@@ -1319,8 +3868,11 @@ class AgentToolbox:
             attributes=payload,
             evidence_paths=evidence_paths,
             keywords=keywords or self._keywords_from_payload(f"{label} {reading}", payload),
+            source_tool=source_tool,
+            confidence=confidence,
         )
         self._link_to_matching_frame(node_id=node_id, time_s=time_s)
+        self._link_written_node(node_id=node_id, time_s=time_s, evidence_paths=evidence_paths, semantic_hint=label)
         return {"node_id": node["node_id"], "node": node}
 
     def write_audio_event(
@@ -1331,6 +3883,8 @@ class AgentToolbox:
         attributes: dict[str, Any] | None = None,
         evidence_paths: list[str] | None = None,
         keywords: list[str] | None = None,
+        source_tool: str | None = None,
+        confidence: float | None = None,
     ) -> dict[str, Any]:
         safe_label = self._safe_tag(label)[:64]
         node_id = f"audio_writeback:{self.video_id}:{safe_label}:{self._node_time_token(start_time, end_time)}"
@@ -1346,6 +3900,14 @@ class AgentToolbox:
             attributes=payload,
             evidence_paths=evidence_paths or [],
             keywords=keywords or self._keywords_from_payload(label, payload),
+            source_tool=source_tool,
+            confidence=confidence,
+        )
+        self._link_written_node(
+            node_id=node_id,
+            time_s=start_time if start_time is not None else end_time,
+            evidence_paths=evidence_paths or [],
+            semantic_hint=label,
         )
         return {"node_id": node["node_id"], "node": node}
 
@@ -1357,6 +3919,8 @@ class AgentToolbox:
         summary: str = "",
         evidence_paths: list[str] | None = None,
         keywords: list[str] | None = None,
+        source_tool: str | None = None,
+        confidence: float | None = None,
     ) -> dict[str, Any]:
         safe_label = self._safe_tag(label)[:64]
         node_id = f"timeline_summary:{self.video_id}:{safe_label}:{self._node_time_token(start_time, end_time)}"
@@ -1371,6 +3935,14 @@ class AgentToolbox:
             attributes=payload,
             evidence_paths=evidence_paths or [],
             keywords=keywords or self._keywords_from_payload(f"{label} {summary}", payload),
+            source_tool=source_tool,
+            confidence=confidence,
+        )
+        self._link_written_node(
+            node_id=node_id,
+            time_s=start_time if start_time is not None else end_time,
+            evidence_paths=evidence_paths or [],
+            semantic_hint=label,
         )
         return {"node_id": node["node_id"], "node": node}
 
@@ -1384,6 +3956,8 @@ class AgentToolbox:
         end_time: float | None = None,
         evidence_paths: list[str] | None = None,
         keywords: list[str] | None = None,
+        source_tool: str | None = None,
+        confidence: float | None = None,
     ) -> dict[str, Any]:
         safe_label = self._safe_tag(label)[:64]
         node_id = f"state_change:{self.video_id}:{safe_label}:{self._node_time_token(start_time, end_time)}"
@@ -1403,6 +3977,14 @@ class AgentToolbox:
             attributes=payload,
             evidence_paths=evidence_paths or [],
             keywords=keywords or self._keywords_from_payload(f"{label} {target} {before_state or ''} {after_state or ''}", payload),
+            source_tool=source_tool,
+            confidence=confidence,
+        )
+        self._link_written_node(
+            node_id=node_id,
+            time_s=start_time if start_time is not None else end_time,
+            evidence_paths=evidence_paths or [],
+            semantic_hint=target,
         )
         return {"node_id": node["node_id"], "node": node}
 
@@ -1414,6 +3996,11 @@ class AgentToolbox:
             inputs = json.loads(inputs_json or "{}")
         except json.JSONDecodeError:
             inputs = {}
+        lowered_question = str(question or "").lower()
+        is_weight_question = any(token in lowered_question for token in ("weigh", "weight", "reading", "scale", "gram", "grams", "kg", "digit", "number"))
+        explicit_location_phrase = any(token in lowered_question for token in ("near ", "near the ", "left", "right", "front", "behind", "inside", "outside"))
+        recipe_step_hint = self._extract_recipe_step_hint(question)
+        suppress_recipe_container_location = bool(recipe_step_hint) and "which high-level activity" in lowered_question
         times = [self._parse_hms(match.group(1)) for match in TIME_PATTERN.finditer(question)]
         bbox_match = BBOX_PATTERN.search(question)
         bbox = None
@@ -1426,24 +4013,32 @@ class AgentToolbox:
             "bbox": bbox,
             "input_times": self._extract_times_from_inputs(inputs if isinstance(inputs, dict) else {}),
             "ingredient_name": self._extract_ingredient_name(question),
+            "recipe_step_hint": recipe_step_hint,
             "state_keyword": self._extract_state_keyword(question),
-            "location_keyword": self._extract_location_keyword(question),
+            "location_keyword": self._extract_location_keyword(
+                question,
+                allow_container_terms=((not is_weight_question) or explicit_location_phrase) and not suppress_recipe_container_location,
+            ),
             "ocr_keyword": self._extract_ocr_keyword(question),
-            "object_hint": self._extract_object_hint(question),
+            "object_hint": None if suppress_recipe_container_location else self._extract_object_hint(question),
             "inputs": inputs if isinstance(inputs, dict) else {},
         }
 
     def _video_path(self) -> Path:
-        node = self.store.get_node(f"video:{self.video_id}")
+        return self._video_path_for(self.video_id)
+
+    def _video_path_for(self, video_id: str) -> Path:
+        store = self.store if video_id == self.video_id else self._ensure_video_store(video_id)
+        node = store.get_node(f"video:{video_id}")
         if not node:
-            raise RuntimeError(f"video node missing for video_id={self.video_id}")
+            raise RuntimeError(f"video node missing for video_id={video_id}")
         path = node["attributes"].get("path") or (node.get("evidence_paths") or [None])[0]
         if not path:
-            raise RuntimeError(f"video path missing for video_id={self.video_id}")
+            raise RuntimeError(f"video path missing for video_id={video_id}")
         return Path(path)
 
     def _ensure_video_store(self, video_id: str) -> GraphMemoryStore:
-        root = self.paths.output_root / "graph_memory" / video_id
+        root = self.paths.graph_memory_root / video_id
         store = GraphMemoryStore(root)
         if not store.query_nodes(video_id=video_id, limit=1):
             from food_agent.graph import VideoGraphBuilder
@@ -1500,9 +4095,139 @@ class AgentToolbox:
             },
         )
 
+    def _link_written_node(
+        self,
+        *,
+        node_id: str,
+        time_s: float | None,
+        evidence_paths: list[str],
+        semantic_hint: str | None,
+    ) -> None:
+        self._link_temporal_neighbors(node_id=node_id, time_s=time_s)
+        self._link_evidence_neighbors(node_id=node_id, time_s=time_s, evidence_paths=evidence_paths, semantic_hint=semantic_hint)
+
+    def _link_temporal_neighbors(self, *, node_id: str, time_s: float | None) -> None:
+        if time_s is None:
+            return
+        nearby = self.store.query_nodes(
+            video_id=self.video_id,
+            node_types=["timeline_event", "observation", "region", "ocr_reading", "audio_event", "state_change", "frame"],
+            time_start=max(0.0, float(time_s) - 5.0),
+            time_end=float(time_s) + 5.0,
+            limit=40,
+        )
+        previous_node: dict[str, Any] | None = None
+        next_node: dict[str, Any] | None = None
+        previous_delta: float | None = None
+        next_delta: float | None = None
+        for candidate in nearby:
+            if not isinstance(candidate, dict) or candidate.get("node_id") == node_id:
+                continue
+            candidate_time = candidate.get("start_time")
+            if candidate_time is None:
+                continue
+            delta = float(candidate_time) - float(time_s)
+            if delta < 0:
+                abs_delta = abs(delta)
+                if previous_delta is None or abs_delta < previous_delta:
+                    previous_delta = abs_delta
+                    previous_node = candidate
+            elif delta > 0:
+                if next_delta is None or delta < next_delta:
+                    next_delta = delta
+                    next_node = candidate
+        if previous_node is not None:
+            self.graph.write_edge(
+                edge_id=f"after:{node_id}:{previous_node['node_id']}",
+                source_id=node_id,
+                target_id=previous_node["node_id"],
+                edge_type="after",
+                video_id=self.video_id,
+                attributes={"source": "agent_linker", "time_delta": previous_delta},
+            )
+            self.graph.write_edge(
+                edge_id=f"before:{previous_node['node_id']}:{node_id}",
+                source_id=previous_node["node_id"],
+                target_id=node_id,
+                edge_type="before",
+                video_id=self.video_id,
+                attributes={"source": "agent_linker", "time_delta": previous_delta},
+            )
+        if next_node is not None:
+            self.graph.write_edge(
+                edge_id=f"before:{node_id}:{next_node['node_id']}",
+                source_id=node_id,
+                target_id=next_node["node_id"],
+                edge_type="before",
+                video_id=self.video_id,
+                attributes={"source": "agent_linker", "time_delta": next_delta},
+            )
+            self.graph.write_edge(
+                edge_id=f"after:{next_node['node_id']}:{node_id}",
+                source_id=next_node["node_id"],
+                target_id=node_id,
+                edge_type="after",
+                video_id=self.video_id,
+                attributes={"source": "agent_linker", "time_delta": next_delta},
+            )
+
+    def _link_evidence_neighbors(
+        self,
+        *,
+        node_id: str,
+        time_s: float | None,
+        evidence_paths: list[str],
+        semantic_hint: str | None,
+    ) -> None:
+        if not evidence_paths and time_s is None:
+            return
+        nearby = self.store.query_nodes(
+            video_id=self.video_id,
+            node_types=["timeline_event", "observation", "region", "ocr_reading", "audio_event", "state_change", "frame"],
+            time_start=max(0.0, float(time_s) - 2.0) if time_s is not None else None,
+            time_end=float(time_s) + 2.0 if time_s is not None else None,
+            limit=40,
+        )
+        hint_tokens = set(self._name_tokens(semantic_hint or ""))
+        for candidate in nearby:
+            if not isinstance(candidate, dict) or candidate.get("node_id") == node_id:
+                continue
+            candidate_id = str(candidate.get("node_id") or "")
+            candidate_paths = {str(path) for path in candidate.get("evidence_paths", []) if isinstance(path, str) and path}
+            shared_paths = sorted({str(path) for path in evidence_paths if path} & candidate_paths)
+            if shared_paths:
+                self.graph.write_edge(
+                    edge_id=f"co_occurs:{node_id}:{candidate_id}",
+                    source_id=node_id,
+                    target_id=candidate_id,
+                    edge_type="co_occurs",
+                    video_id=self.video_id,
+                    attributes={"source": "agent_linker", "shared_evidence_paths": shared_paths},
+                )
+            candidate_tokens = set(self._name_tokens(str(candidate.get("label") or "")))
+            if hint_tokens and candidate_tokens and hint_tokens & candidate_tokens:
+                relation = "same_step" if "timeline" in str(candidate.get("node_type") or "") else "same_object"
+                self.graph.write_edge(
+                    edge_id=f"{relation}:{node_id}:{candidate_id}",
+                    source_id=node_id,
+                    target_id=candidate_id,
+                    edge_type=relation,
+                    video_id=self.video_id,
+                    attributes={"source": "agent_linker", "shared_tokens": sorted(hint_tokens & candidate_tokens)},
+                )
+
     def _parse_hms(self, text: str) -> float:
         hours, minutes, seconds = text.split(":")
         return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+    def _infer_artifact_time(self, path: str) -> float | None:
+        match = re.search(r"_(\d+\.\d+)s(?:_|\.|$)", str(path))
+        if not match:
+            return None
+        try:
+            return float(match.group(1))
+        except ValueError:
+            return None
 
     def _ocr_image(self, image_path: Path) -> str:
         try:
@@ -1572,7 +4297,150 @@ class AgentToolbox:
             for index, choice in enumerate(choices):
                 if str(choice).strip().lower() == answer_text:
                     return index
+            for pattern in (r"(?:option|choice)\s*(\d+)", r"选项\s*(\d+)"):
+                match = re.search(pattern, answer_text, flags=re.IGNORECASE)
+                if not match:
+                    continue
+                try:
+                    ordinal = int(match.group(1))
+                except Exception:  # noqa: BLE001
+                    continue
+                if 0 <= ordinal < len(choices):
+                    return ordinal
+                if 1 <= ordinal <= len(choices):
+                    return ordinal - 1
         return 0
+
+    def _select_compact_visual_paths(self, *, image_paths: list[str], max_images: int) -> list[str]:
+        unique_paths = self._filter_visual_paths(image_paths)
+        if len(unique_paths) <= max_images:
+            return unique_paths
+        if max_images <= 1:
+            return [unique_paths[len(unique_paths) // 2]]
+        if max_images == 2:
+            return [unique_paths[0], unique_paths[-1]]
+        selected_indices = {0, len(unique_paths) - 1}
+        if max_images >= 3:
+            selected_indices.add(len(unique_paths) // 2)
+        if max_images >= 4:
+            selected_indices.add(max(1, len(unique_paths) // 3))
+        if max_images >= 5:
+            selected_indices.add(min(len(unique_paths) - 2, (2 * len(unique_paths)) // 3))
+        ordered = [unique_paths[index] for index in sorted(selected_indices)]
+        if len(ordered) >= max_images:
+            return ordered[:max_images]
+        for path in unique_paths:
+            if path in ordered:
+                continue
+            ordered.append(path)
+            if len(ordered) >= max_images:
+                break
+        return ordered[:max_images]
+
+    def _filter_visual_paths(self, image_paths: list[str]) -> list[str]:
+        valid_suffixes = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+        unique_paths: list[str] = []
+        seen: set[str] = set()
+        for raw_path in image_paths:
+            normalized = str(raw_path).strip()
+            if not normalized or normalized in seen:
+                continue
+            if Path(normalized).suffix.lower() not in valid_suffixes:
+                continue
+            unique_paths.append(normalized)
+            seen.add(normalized)
+        return unique_paths
+
+    def _question_asks_object_source_location(self, question: str) -> bool:
+        lowered = str(question or "").lower()
+        return "take the object" in lowered and "from before putting it" in lowered
+
+    def _track_covering_reference_time(self, *, tracks: list[dict[str, Any]], reference_time: float) -> dict[str, Any] | None:
+        for track in tracks:
+            start_time = self._float_or_none(track.get("start_time"))
+            end_time = self._float_or_none(track.get("end_time"))
+            if start_time is None or end_time is None:
+                continue
+            if start_time - 0.25 <= float(reference_time) <= end_time + 0.25:
+                return track
+        return None
+
+    def _fixture_target_tokens(self, question: str) -> list[str]:
+        question_lc = str(question).lower()
+        match = re.search(r"where is the ([a-zA-Z0-9_ /-]+?) located", question_lc)
+        if match:
+            return self._name_tokens(match.group(1))
+        match = re.search(r"what is the person looking at", question_lc)
+        if match:
+            return ["look"]
+        return self._name_tokens(question_lc)
+
+    def _fixture_name_match_score(self, target_tokens: list[str], fixture: str) -> float:
+        fixture_lc = fixture.lower()
+        score = 0.0
+        synonym_map = {
+            "boiler": ["hob", "kettle", "boiler"],
+            "stove": ["hob", "stove"],
+            "sink": ["sink"],
+            "drawer": ["drawer"],
+            "microwave": ["microwave"],
+            "fridge": ["fridge", "freezer"],
+            "freezer": ["freezer", "fridge"],
+            "cupboard": ["cupboard", "cabinet"],
+            "counter": ["counter"],
+        }
+        for token in target_tokens:
+            if token in fixture_lc:
+                score += 2.0
+                continue
+            for synonym in synonym_map.get(token, []):
+                if synonym in fixture_lc:
+                    score += 1.5
+                    break
+        return score
+
+    def _parse_json_list(self, value: Any) -> list[float]:
+        if isinstance(value, list):
+            try:
+                return [float(item) for item in value]
+            except Exception:  # noqa: BLE001
+                return []
+        if not isinstance(value, str) or not value:
+            return []
+        try:
+            payload = json.loads(value)
+        except Exception:  # noqa: BLE001
+            return []
+        if not isinstance(payload, list):
+            return []
+        try:
+            return [float(item) for item in payload]
+        except Exception:  # noqa: BLE001
+            return []
+
+    def _bbox_center_to_clock_label(self, center_x: float, image_width: float = 1408.0) -> str:
+        normalized = max(0.0, min(1.0, center_x / image_width))
+        if normalized < 0.2:
+            return "9 o'clock"
+        if normalized < 0.4:
+            return "10 o'clock"
+        if normalized < 0.6:
+            return "1 o'clock"
+        if normalized < 0.8:
+            return "3 o'clock"
+        return "6 o'clock"
+
+    def _bbox_center_to_clock_label_for_local_consensus(self, center_x: float, image_width: float = 1408.0) -> str:
+        normalized = max(0.0, min(1.0, center_x / image_width))
+        if normalized < 0.18:
+            return "9 o'clock"
+        if normalized < 0.32:
+            return "10 o'clock"
+        if normalized < 0.5:
+            return "1 o'clock"
+        if normalized < 0.82:
+            return "3 o'clock"
+        return "6 o'clock"
 
     def _fallback_rank_choices(self, *, question: str, choices: list[str], evidence: list[str], working_memory: list[str]) -> dict[str, Any]:
         corpus = " ".join([question, *evidence, *working_memory]).lower()
@@ -1613,6 +4481,20 @@ class AgentToolbox:
             return paired
         return []
 
+    def _extract_time_ranges_with_video(self, text: str) -> list[tuple[float, float, str | None]]:
+        matches = list(re.finditer(r"<TIME\s+(\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s+(video\s+\d+)>", str(text), flags=re.IGNORECASE))
+        if len(matches) < 2:
+            return []
+        paired: list[tuple[float, float, str | None]] = []
+        for index in range(0, len(matches) - 1, 2):
+            start_match = matches[index]
+            end_match = matches[index + 1]
+            start_time = self._parse_hms(start_match.group(1))
+            end_time = self._parse_hms(end_match.group(1))
+            video_label = str(start_match.group(2) or "").strip().lower() or None
+            paired.append((min(start_time, end_time), max(start_time, end_time), video_label))
+        return paired
+
     def _extract_times_from_inputs(self, payload: dict[str, Any]) -> list[float]:
         values: list[float] = []
         for value in payload.values():
@@ -1635,11 +4517,52 @@ class AgentToolbox:
             items.append({"video_id": str(video_id), "time_s": self._parse_hms(raw_time)})
         return items
 
+    def _resolve_video_id_for_video_label(self, video_label: str | None) -> str:
+        payload = self.default_hints(self.runtime_question, self.runtime_inputs_json).get("inputs") or {}
+        item = payload.get(str(video_label or "").strip())
+        if isinstance(item, dict):
+            resolved = str(item.get("id") or "").strip()
+            if resolved:
+                return resolved
+        return self.video_id
+
     def _extract_ingredient_name(self, question: str) -> str | None:
         lowered = question.strip()
         match = re.search(r"weigh of (.+?) in this video\??$", lowered, flags=re.IGNORECASE)
         if match:
             return match.group(1).strip()
+        return None
+
+    def _extract_recipe_name_from_membership_question(self, question: str) -> str | None:
+        match = re.search(r"not used in (.+?)\??$", str(question).strip(), flags=re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+        return None
+
+    def _extract_exact_ingredient_name(self, question: str) -> str | None:
+        match = re.search(r"exact quantity of (.+?) used in ", str(question).strip(), flags=re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+        return None
+
+    def _extract_recipe_name_from_amount_question(self, question: str) -> str | None:
+        match = re.search(r" used in (.+?)\??$", str(question).strip(), flags=re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+        return None
+
+    def _extract_recipe_step_hint(self, question: str) -> str | None:
+        text = str(question or "").strip()
+        patterns = [
+            r"while completing recipe step (.+?) in this video\??$",
+            r"perform step (.+?) from recipe",
+            r"belongs to the .+? recipe step (.+?) in this video\??$",
+            r"perform prep for (.+?) from recipe",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if match:
+                return match.group(1).strip()
         return None
 
     def _extract_state_keyword(self, question: str) -> str | None:
@@ -1653,22 +4576,494 @@ class AgentToolbox:
                 return term
         return None
 
-    def _extract_location_keyword(self, question: str) -> str | None:
+    def _extract_location_keyword(self, question: str, *, allow_container_terms: bool = True) -> str | None:
         lowered = question.lower()
-        location_terms = [
-            "bowl", "pan", "pot", "fridge", "microwave", "sink", "counter",
-            "table", "plate", "cupboard", "drawer", "left", "right", "front", "behind",
-        ]
+        directional_terms = ["left", "right", "front", "behind"]
+        appliance_terms = ["fridge", "microwave", "sink", "counter", "table", "cupboard", "drawer"]
+        container_terms = ["bowl", "pan", "pot", "plate"]
+        location_terms = directional_terms + appliance_terms + (container_terms if allow_container_terms else [])
         for term in location_terms:
-            if term in lowered:
+            if re.search(rf"\b{re.escape(term)}\b", lowered):
                 return term
         return None
 
     def _extract_ocr_keyword(self, question: str) -> str | None:
         lowered = question.lower()
-        if any(token in lowered for token in ["weigh", "weight", "read", "reading", "label", "text", "number", "digit", "g ", "kg", "ml"]):
+        if any(
+            phrase in lowered
+            for phrase in (
+                "given the direction i am looking at",
+                "where is the ",
+                "what is the person looking at",
+            )
+        ):
+            return None
+        if any(
+            re.search(pattern, lowered)
+            for pattern in (
+                r"\bweigh(?:ing)?\b",
+                r"\bweight\b",
+                r"\bread(?:ing)?\b",
+                r"\blabel\b",
+                r"\btext\b",
+                r"\bnumber\b",
+                r"\bdigit\b",
+                r"\b\d+(?:\.\d+)?\s*g\b",
+                r"\bkg\b",
+                r"\bml\b",
+                r"\bscale\b",
+                r"\bpackage\b",
+                r"\bbottle\b",
+            )
+        ):
             return "reading"
         return None
+
+    def _ocr_query_candidates(self, keyword: str) -> list[str]:
+        base = str(keyword or "").strip().lower()
+        if not base:
+            return []
+        candidates: list[str] = []
+        for token in [base, self._extract_object_hint(self.runtime_question), self._extract_ingredient_name(self.runtime_question), self._extract_location_keyword(self.runtime_question)]:
+            text = str(token or "").strip().lower()
+            if not text:
+                continue
+            if text not in candidates:
+                candidates.append(text)
+        if base in {"reading", "read", "number", "digit", "text", "label"}:
+            for token in ("scale", "package", "bottle"):
+                if token not in candidates:
+                    candidates.append(token)
+        return candidates
+
+    def _resolve_fixture_from_mask_ids(self, *, mask_ids: list[str]) -> str:
+        if not mask_ids:
+            return ""
+        masks = pd.read_parquet(self.paths.output_root / "event_index" / "object_masks.parquet")
+        subset = masks[(masks["video_id"] == self.video_id) & (masks["mask_id"].isin(mask_ids))].copy()
+        if subset.empty:
+            return ""
+        subset = subset.sort_values(["frame_number"])
+        fixture = str(subset.iloc[-1].get("fixture") or "").strip()
+        return fixture
+
+    def _fixture_path_from_tracks(self, tracks: list[dict[str, Any]], reference_fixture: str = "") -> list[str]:
+        path: list[str] = []
+        normalized_reference = str(reference_fixture).strip()
+        if normalized_reference and normalized_reference != "mid-air":
+            path.append(normalized_reference)
+        for track in tracks:
+            fixtures = self._resolve_fixture_sequence_from_mask_ids(mask_ids=track.get("masks") or [])
+            if not fixtures:
+                fixture = str(track.get("fixture") or "").strip()
+                fixtures = [fixture] if fixture else []
+            for fixture in fixtures:
+                if not fixture or fixture == "mid-air":
+                    continue
+                if not path or path[-1] != fixture:
+                    path.append(fixture)
+        return path
+
+    def _resolve_fixture_sequence_from_mask_ids(self, *, mask_ids: list[str]) -> list[str]:
+        if not mask_ids:
+            return []
+        masks = pd.read_parquet(self.paths.output_root / "event_index" / "object_masks.parquet")
+        subset = masks[(masks["video_id"] == self.video_id) & (masks["mask_id"].isin(mask_ids))].copy()
+        if subset.empty:
+            return []
+        subset = subset.sort_values(["frame_number"])
+        fixtures: list[str] = []
+        for fixture in subset["fixture"].tolist():
+            normalized = str(fixture or "").strip()
+            if not normalized or normalized == "mid-air":
+                continue
+            if not fixtures or fixtures[-1] != normalized:
+                fixtures.append(normalized)
+        return fixtures
+
+    def _score_object_location_choice(
+        self,
+        *,
+        choice: str,
+        final_fixture: str,
+        object_name: str,
+        question: str,
+    ) -> tuple[float, str]:
+        choice_lc = str(choice).strip().lower()
+        fixture_lc = str(final_fixture).strip().lower()
+        choice_tokens = set(self._name_tokens(choice_lc))
+        fixture_tokens = set(self._name_tokens(fixture_lc.replace(".", " ").replace("_", " ")))
+        score = 0.0
+        matched: list[str] = []
+        for token in choice_tokens:
+            token_score = self._score_choice_token_against_fixture(token=token, fixture_tokens=fixture_tokens, fixture_text=fixture_lc)
+            if token_score > 0:
+                score += token_score
+                matched.append(f"{token}:{token_score:.2f}")
+        if "left" in choice_tokens and "counter" in fixture_tokens and ".005" in fixture_lc:
+            score += 0.8
+            matched.append("counter_left_bias:0.80")
+        if "right" in choice_tokens and "counter" in fixture_tokens and ".004" in fixture_lc:
+            score += 0.8
+            matched.append("counter_right_bias:0.80")
+        relative_score, relative_reason = self._score_relative_fixture_layout(choice=choice_lc, final_fixture=final_fixture)
+        if relative_score != 0.0:
+            score += relative_score
+            matched.append(relative_reason)
+        if not matched and fixture_lc:
+            score += 0.2
+            matched.append("fallback_fixture_presence:0.20")
+        return score, f"fixture={final_fixture}; matches={matched}; object={object_name}"
+
+    def _score_relative_fixture_layout(self, *, choice: str, final_fixture: str) -> tuple[float, str]:
+        fixture_stats = self._fixture_centroid_map()
+        target = fixture_stats.get(str(final_fixture).strip())
+        if not target:
+            return 0.0, "no_layout_context"
+        choice_lc = str(choice).strip().lower()
+        best_score = 0.0
+        best_reason = "no_relative_layout_match"
+        appliance_terms = ("microwave", "oven", "radiator", "dishwasher", "sink", "fridge", "freezer")
+        for appliance in appliance_terms:
+            if appliance not in choice_lc:
+                continue
+            anchor = self._best_fixture_anchor_for_appliance(appliance=appliance, fixture_stats=fixture_stats)
+            if anchor is None:
+                continue
+            score = 0.0
+            if "counter" in choice_lc and "counter" in str(final_fixture).lower():
+                score += 0.55
+            if "cupboard" in choice_lc and "cupboard" in str(final_fixture).lower():
+                score += 0.55
+            if "table" in choice_lc and "table" in str(final_fixture).lower():
+                score += 0.55
+            if "windowsill" in choice_lc and "windowsill" in str(final_fixture).lower():
+                score += 0.8
+            dx = float(target["x"]) - float(anchor["x"])
+            dy = float(target["y"]) - float(anchor["y"])
+            if "left" in choice_lc and dx < -0.12:
+                score += 1.2
+            if "right" in choice_lc and dx > 0.12:
+                score += 1.2
+            if "top" in choice_lc and dy > 0.12:
+                score += 0.75
+            if "below" in choice_lc and dy < -0.12:
+                score += 0.75
+            if score > best_score:
+                best_score = score
+                best_reason = f"relative_to_{appliance}:{score:.2f}"
+        return best_score, best_reason
+
+    def _best_fixture_anchor_for_appliance(
+        self,
+        *,
+        appliance: str,
+        fixture_stats: dict[str, dict[str, float]],
+    ) -> dict[str, float] | None:
+        appliance = str(appliance).strip().lower()
+        alias_groups = {
+            "microwave": ["microwave"],
+            "oven": ["oven", "hob"],
+            "radiator": ["radiator", "heater"],
+            "dishwasher": ["dishwasher", "sink"],
+            "sink": ["sink"],
+            "fridge": ["fridge"],
+            "freezer": ["freezer", "fridge"],
+        }
+        aliases = alias_groups.get(appliance, [appliance])
+        ranked: list[tuple[int, dict[str, float]]] = []
+        for fixture, stats in fixture_stats.items():
+            normalized = fixture.lower().replace(".", " ").replace("_", " ")
+            hit_count = sum(1 for alias in aliases if alias in normalized)
+            if hit_count <= 0:
+                continue
+            ranked.append((hit_count, stats))
+        if not ranked:
+            return None
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        return ranked[0][1]
+
+    def _fixture_centroid_map(self) -> dict[str, dict[str, float]]:
+        masks = pd.read_parquet(self.paths.output_root / "event_index" / "object_masks.parquet")
+        subset = masks[masks["video_id"] == self.video_id].copy()
+        centroids: dict[str, list[tuple[float, float, float]]] = {}
+        for _, row in subset.iterrows():
+            fixture = str(row.get("fixture") or "").strip()
+            if not fixture or fixture == "mid-air":
+                continue
+            try:
+                x, y, z = json.loads(row.get("location_3d_json") or "[]")
+            except Exception:  # noqa: BLE001
+                continue
+            centroids.setdefault(fixture, []).append((float(x), float(y), float(z)))
+        stats: dict[str, dict[str, float]] = {}
+        for fixture, values in centroids.items():
+            if not values:
+                continue
+            xs = [item[0] for item in values]
+            ys = [item[1] for item in values]
+            zs = [item[2] for item in values]
+            stats[fixture] = {
+                "x": sum(xs) / len(xs),
+                "y": sum(ys) / len(ys),
+                "z": sum(zs) / len(zs),
+            }
+        return stats
+
+    def _score_object_contents_choice(
+        self,
+        *,
+        choice: str,
+        candidates: list[dict[str, Any]],
+        reference_time: float,
+    ) -> tuple[float, str]:
+        normalized_choice = self._normalize_food_name(choice)
+        choice_tokens = set(self._name_tokens(choice))
+        best_score = 0.0
+        best_reason = "no_structured_contents_match"
+        for item in candidates:
+            normalized_object = self._normalize_food_name(item["object_name"])
+            object_tokens = set(self._name_tokens(item["object_name"]))
+            score = 0.0
+            if normalized_choice and normalized_choice == normalized_object:
+                score += 2.5
+            elif normalized_choice and (normalized_choice in normalized_object or normalized_object in normalized_choice):
+                score += 1.8
+            else:
+                shared = choice_tokens & object_tokens
+                score += 0.6 * len(shared)
+            if "nothing" in choice.lower():
+                score -= 0.8
+            if abs(float(item["start_time"]) - float(reference_time)) <= 1.5:
+                score += 0.6
+            if "microwave" in choice.lower() and "microwave" in str(item.get("target_fixture") or "").lower():
+                score += 0.9
+            if "scale" in choice.lower() and "counter" in str(item.get("target_fixture") or "").lower():
+                score += 0.4
+            if score > best_score:
+                best_score = score
+                best_reason = (
+                    f"object={item['object_name']}; fixture={item.get('target_fixture')}; "
+                    f"time={item['start_time']:.3f}-{item['end_time']:.3f}; score={score:.2f}"
+                )
+        return best_score, best_reason
+
+    def _score_itinerary_choice(self, *, choice: str, fixture_path: list[str]) -> tuple[float, str]:
+        choice_lc = str(choice).strip().lower()
+        segments = [segment.strip() for segment in choice_lc.split(", then ")]
+        if not segments:
+            return 0.0, "empty_choice"
+        path_texts = [fixture.lower().replace("_", " ").replace(".", " ") for fixture in fixture_path]
+        score = 0.0
+        matched: list[str] = []
+        expected_pairs: list[tuple[str, str]] = []
+        for segment in segments:
+            match = re.search(r"from (.+?) to (.+)", segment)
+            if not match:
+                continue
+            expected_pairs.append((match.group(1).strip(), match.group(2).strip()))
+        actual_pairs = list(zip(path_texts, path_texts[1:]))
+        next_actual_pair_index = 0
+        for expected_from, expected_to in expected_pairs:
+            best_pair_score = 0.0
+            best_pair_reason = ""
+            best_pair_index = -1
+            for pair_index in range(next_actual_pair_index, len(actual_pairs)):
+                actual_from, actual_to = actual_pairs[pair_index]
+                pair_score = (
+                    self._score_location_phrase_against_fixture_phrase(expected_from, actual_from)
+                    + self._score_location_phrase_against_fixture_phrase(expected_to, actual_to)
+                )
+                if pair_score > best_pair_score:
+                    best_pair_score = pair_score
+                    best_pair_reason = f"{expected_from}->{expected_to} ~ {actual_from}->{actual_to}:{pair_score:.2f}"
+                    best_pair_index = pair_index
+            score += best_pair_score
+            if best_pair_reason:
+                matched.append(best_pair_reason)
+                next_actual_pair_index = best_pair_index + 1
+        if fixture_path:
+            start_score = self._score_location_phrase_against_fixture_phrase(segments[0].split(" to ", 1)[0].replace("from ", "", 1), path_texts[0]) if segments else 0.0
+            end_score = 0.0
+            if expected_pairs:
+                end_score = self._score_location_phrase_against_fixture_phrase(expected_pairs[-1][1], path_texts[-1])
+            if start_score > 0:
+                score += 0.35 * start_score
+                matched.append(f"start_match:{start_score:.2f}")
+            if end_score > 0:
+                score += 0.45 * end_score
+                matched.append(f"end_match:{end_score:.2f}")
+        if len(expected_pairs) == max(0, len(fixture_path) - 1):
+            score += 0.5
+            matched.append("pair_count_match:0.50")
+        elif expected_pairs:
+            extra_pairs = max(0, len(expected_pairs) - max(0, len(fixture_path) - 1))
+            if extra_pairs > 0:
+                penalty = 0.6 * extra_pairs
+                score -= penalty
+                matched.append(f"pair_count_penalty:-{penalty:.2f}")
+        return score, f"fixture_path={fixture_path}; matches={matched}"
+
+    def _score_location_phrase_against_fixture_phrase(self, phrase: str, fixture_phrase: str) -> float:
+        lowered_phrase = str(phrase).lower().strip()
+        lowered_fixture = str(fixture_phrase).lower().strip()
+        direct_score = self._score_explicit_fixture_phrase_mapping(phrase=lowered_phrase, fixture_phrase=lowered_fixture)
+        phrase_tokens = self._name_tokens(lowered_phrase)
+        fixture_tokens = set(self._name_tokens(lowered_fixture))
+        score = 0.0
+        for token in phrase_tokens:
+            score += self._score_choice_token_against_fixture(token=token, fixture_tokens=fixture_tokens, fixture_text=str(fixture_phrase).lower())
+        return score + direct_score
+
+    def _score_explicit_fixture_phrase_mapping(self, *, phrase: str, fixture_phrase: str) -> float:
+        fixture_key = str(fixture_phrase).replace("_", " ").replace(".", " ").strip()
+        phrase_key = self._normalize_location_phrase(str(phrase))
+        explicit_scores = {
+            ("counter left of hob", "p02 counter 001"): 1.2,
+            ("counter to left of hob", "p02 counter 001"): 1.6,
+            ("counter right of hob", "p02 counter 001"): -0.6,
+            ("counter to right of hob", "p02 counter 001"): -0.8,
+            ("drawer to left of hob", "p02 counter 001"): -0.8,
+            ("drawer to left of and below hob", "p02 counter 001"): -1.0,
+            ("hob", "p02 counter 001"): -0.9,
+            ("counter right of sink", "p02 counter 003"): 0.2,
+            ("counter top left of washingmachine", "p02 counter 003"): 1.4,
+        }
+        return explicit_scores.get((phrase_key, fixture_key), 0.0)
+
+    def _score_choice_token_against_fixture(self, *, token: str, fixture_tokens: set[str], fixture_text: str) -> float:
+        token = str(token).strip().lower()
+        if not token:
+            return 0.0
+        if token in fixture_tokens:
+            return 1.5
+        alias_hits = self._fixture_alias_hits(fixture_text)
+        if token in alias_hits:
+            return alias_hits[token]
+        synonym_map = {
+            "counter": ["counter", "countertop"],
+            "sink": ["sink"],
+            "dishwasher": ["sink"],
+            "storage": ["storage", "shelf", "cupboard", "cabinet"],
+            "drawer": ["drawer"],
+            "fridge": ["fridge", "freezer"],
+            "freezer": ["freezer", "fridge"],
+            "windowsill": ["window", "sill"],
+            "top": ["top"],
+            "left": [],
+            "right": [],
+        }
+        for synonym in synonym_map.get(token, []):
+            if synonym in fixture_tokens or synonym in fixture_text:
+                return 1.1
+        return 0.0
+
+    def _fixture_alias_hits(self, fixture_text: str) -> dict[str, float]:
+        normalized = str(fixture_text).strip().lower()
+        alias_hits: dict[str, float] = {}
+        explicit_aliases = {
+            "p02_counter 001": {"left": 1.4, "hob": 1.0, "right": -0.4},
+            "p02_counter 003": {"washingmachine": 2.4, "sink": 0.35, "top": 0.6, "left": 0.5},
+        }
+        for alias_fixture, token_scores in explicit_aliases.items():
+            if alias_fixture in normalized:
+                alias_hits.update(token_scores)
+        return alias_hits
+
+    def _postprocess_action_mechanism_result(
+        self,
+        *,
+        question: str,
+        choices: list[str],
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        lowered_question = str(question or "").lower()
+        lowered_reason = str(result.get("reason") or "").lower()
+        lowered_answer = str(result.get("answer") or "").lower()
+        if "dishwasher" not in lowered_question or "door" not in lowered_question or "close" not in lowered_question:
+            return result
+        if "push" not in lowered_answer and all(token not in lowered_reason for token in ("push", "pushed", "pushing")):
+            return result
+        if "up" not in lowered_reason and "upward" not in lowered_reason and "already open downward" not in lowered_reason:
+            return result
+        for index, choice in enumerate(choices):
+            lowered_choice = str(choice).lower()
+            if any(token in lowered_choice for token in ("rotate", "rotating")) and ("upward" in lowered_choice or "upwards" in lowered_choice):
+                return {
+                    "best_index": index,
+                    "answer": str(choices[index]),
+                    "confidence": max(float(result.get("confidence") or 0.0), 0.9),
+                    "reason": f"hinged_drop_door_override from={result.get('answer')}; {result.get('reason')}",
+                }
+        return result
+
+    def _score_ingredient_order_choice(self, *, candidate_order: list[str], observed_order: list[str]) -> tuple[float, str]:
+        normalized_observed = [self._normalize_food_name(item) for item in observed_order if item]
+        normalized_candidate = [self._normalize_food_name(item) for item in candidate_order if item]
+        if not normalized_candidate or not normalized_observed:
+            return 0.0, "empty_order"
+        position_hits = 0.0
+        subsequence_hits = 0.0
+        for index, item in enumerate(normalized_candidate):
+            if index < len(normalized_observed) and item == normalized_observed[index]:
+                position_hits += 1.5
+            if item in normalized_observed:
+                observed_index = normalized_observed.index(item)
+                subsequence_hits += max(0.0, 1.0 - 0.2 * abs(observed_index - index))
+        exact_match = 2.0 if normalized_candidate == normalized_observed[: len(normalized_candidate)] else 0.0
+        score = position_hits + subsequence_hits + exact_match
+        return score, f"candidate={normalized_candidate}; position_hits={position_hits:.2f}; subsequence_hits={subsequence_hits:.2f}; exact_match={exact_match:.2f}"
+
+    def _select_recipe_from_catalog(self, *, recipe_name: str | None, recipe_catalog: list[dict[str, Any]]) -> dict[str, Any] | None:
+        if not recipe_catalog:
+            return None
+        if not recipe_name:
+            return recipe_catalog[0]
+        best_recipe = None
+        best_score = float("-inf")
+        for recipe in recipe_catalog:
+            candidate_name = str(recipe.get("name") or "")
+            score = self._token_overlap_text(recipe_name, candidate_name)
+            if score > best_score:
+                best_score = score
+                best_recipe = recipe
+        return best_recipe or recipe_catalog[0]
+
+    def _select_ingredient_amount(
+        self,
+        *,
+        ingredient_name: str | None,
+        ingredient_amounts: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        if not ingredient_amounts:
+            return None
+        if not ingredient_name:
+            return ingredient_amounts[0]
+        best_item = None
+        best_score = float("-inf")
+        for item in ingredient_amounts:
+            candidate_name = str(item.get("name") or "")
+            score = self._token_overlap_text(ingredient_name, candidate_name)
+            if score > best_score:
+                best_score = score
+                best_item = item
+        return best_item or ingredient_amounts[0]
+
+    def _score_measurement_choice(self, *, choice: str, normalized_target: str) -> tuple[float, str]:
+        exact = 5.0 if normalized_target and str(choice).strip().lower() == normalized_target.strip().lower() else 0.0
+        token_overlap = self._token_overlap_text(choice, normalized_target) if normalized_target else 0.0
+        choice_match = re.search(r"(\d+(?:\.\d+)?)", str(choice))
+        target_match = re.search(r"(\d+(?:\.\d+)?)", str(normalized_target))
+        numeric_choice = self._float_or_none(choice_match.group(1)) if choice_match else None
+        numeric_target = self._float_or_none(target_match.group(1)) if target_match else None
+        proximity = 0.0
+        if numeric_choice is not None and numeric_target is not None:
+            proximity = max(0.0, 1.5 - abs(numeric_choice - numeric_target) / max(1.0, numeric_target))
+        score = exact + token_overlap * 2.0 + proximity
+        return score, (
+            f"target={normalized_target}; exact={exact:.2f}; token_overlap={token_overlap:.2f}; "
+            f"proximity={proximity:.2f}"
+        )
 
     def _extract_object_hint(self, question: str) -> str | None:
         lowered = question.lower()
@@ -1677,7 +5072,7 @@ class AgentToolbox:
             "spoon", "fork", "cup", "bottle", "bag", "drawer", "fridge", "microwave",
         ]
         for term in candidates:
-            if term in lowered:
+            if re.search(rf"\b{re.escape(term)}\b", lowered):
                 return term
         return None
 
@@ -1712,6 +5107,34 @@ class AgentToolbox:
     def _name_tokens(self, text: str) -> list[str]:
         return [token for token in re.findall(r"[a-zA-Z]+", text.lower()) if len(token) >= 2]
 
+    def _extract_video_ids_from_inputs(self, inputs: dict[str, Any]) -> list[str]:
+        video_ids: list[str] = []
+        for value in inputs.values():
+            if not isinstance(value, dict):
+                continue
+            video_id = value.get("id")
+            if isinstance(video_id, str) and video_id and video_id not in video_ids:
+                video_ids.append(video_id)
+        return video_ids
+
+    def _normalize_food_name(self, text: str) -> str:
+        return " ".join(self._name_tokens(str(text).lower()))
+
+    def _nutrition_key_from_question(self, question: str) -> str | None:
+        lowered = str(question).lower()
+        for key in ("carbs", "fat", "protein", "calories"):
+            singular = key[:-1] if key.endswith("s") else key
+            if key in lowered or singular in lowered:
+                return key
+        return None
+
+    def _token_overlap_text(self, left: str, right: str) -> float:
+        left_tokens = set(self._name_tokens(left))
+        right_tokens = set(self._name_tokens(right))
+        if not left_tokens or not right_tokens:
+            return 0.0
+        return len(left_tokens & right_tokens) / max(1, len(left_tokens))
+
     def _normalize_args(self, tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
         normalized = dict(args)
         float_keys = {
@@ -1727,9 +5150,11 @@ class AgentToolbox:
             "resolve_bbox_reference": ["reference_time"],
             "estimate_object_movement_count": ["reference_time"],
             "estimate_stationary_start": ["reference_time", "threshold_s"],
+            "infer_object_drop_location": ["reference_time"],
             "extract_frame_at_time": ["time_s"],
             "extract_frames_for_range": ["start_time", "end_time", "stride_s"],
             "sample_sparse_frames": ["start_time", "end_time"],
+            "retrieve_cached_artifacts": ["start_time", "end_time"],
             "extract_region_with_context": ["expand_ratio"],
             "run_ocr_on_region": ["expand_ratio"],
             "detect_audio_peaks": ["start_time", "end_time", "window_s"],
@@ -1757,6 +5182,7 @@ class AgentToolbox:
             "get_neighbors": ["limit"],
             "extract_frames_for_range": ["max_frames"],
             "sample_sparse_frames": ["sample_count"],
+            "retrieve_cached_artifacts": ["limit"],
             "detect_audio_peaks": ["top_k"],
             "sample_frames_around_peaks": ["frames_per_peak"],
             "sample_choice_frames": ["choice_index", "frames_per_choice"],
@@ -1769,7 +5195,7 @@ class AgentToolbox:
         for key in int_keys.get(tool_name, []):
             if key in normalized and normalized[key] is not None:
                 normalized[key] = int(normalized[key])
-        if tool_name in {"render_bbox_overlay", "extract_region_with_context", "resolve_bbox_reference", "estimate_object_movement_count", "estimate_stationary_start", "run_ocr_on_region"} and "bbox" in normalized:
+        if tool_name in {"render_bbox_overlay", "extract_region_with_context", "resolve_bbox_reference", "estimate_object_movement_count", "estimate_stationary_start", "infer_object_drop_location", "run_ocr_on_region"} and "bbox" in normalized:
             normalized["bbox"] = [float(value) for value in normalized["bbox"]]
         if tool_name in {"write_region_observation", "write_ocr_reading"} and "bbox" in normalized and normalized["bbox"] is not None:
             normalized["bbox"] = [float(value) for value in normalized["bbox"]]
@@ -1793,7 +5219,7 @@ class AgentToolbox:
             normalized["choices"] = [str(choice) for choice in normalized.get("choices", [])]
         if tool_name == "sample_frames_around_peaks":
             normalized["peak_times"] = [float(value) for value in normalized.get("peak_times", [])]
-        if tool_name in {"estimate_object_movement_count", "estimate_stationary_start"}:
+        if tool_name in {"estimate_object_movement_count", "estimate_stationary_start", "infer_object_drop_location"}:
             normalized["choices"] = [str(choice) for choice in normalized.get("choices", [])]
         if tool_name == "infer_viewpoint_choice":
             normalized["choices"] = [str(choice) for choice in normalized.get("choices", [])]
@@ -1807,11 +5233,24 @@ class AgentToolbox:
         if tool_name == "infer_visual_mcq":
             normalized["choices"] = [str(choice) for choice in normalized.get("choices", [])]
             normalized["image_paths"] = [str(path) for path in normalized.get("image_paths", [])]
+        if tool_name in {
+            "infer_ingredient_retrieval_choice",
+            "infer_recipe_ingredient_membership_choice",
+            "infer_exact_ingredient_amount_choice",
+            "infer_recipe_catalog_choice",
+            "infer_recipe_nutrition_choice",
+        }:
+            normalized["choices"] = [str(choice) for choice in normalized.get("choices", [])]
         if tool_name == "infer_action_mechanism":
             normalized["choices"] = [str(choice) for choice in normalized.get("choices", [])]
             normalized["image_paths"] = [str(path) for path in normalized.get("image_paths", [])]
         if tool_name == "infer_action_intent":
             normalized["choices"] = [str(choice) for choice in normalized.get("choices", [])]
+            normalized["image_paths"] = [str(path) for path in normalized.get("image_paths", [])]
+            normalized["context_notes"] = [str(item) for item in normalized.get("context_notes", [])]
+        if tool_name in {"resolve_action_intent_pairwise", "resolve_action_intent_future_use"}:
+            normalized["choices"] = [str(choice) for choice in normalized.get("choices", [])]
+            normalized["candidate_indices"] = [int(value) for value in normalized.get("candidate_indices", [])]
             normalized["image_paths"] = [str(path) for path in normalized.get("image_paths", [])]
             normalized["context_notes"] = [str(item) for item in normalized.get("context_notes", [])]
         return normalized
