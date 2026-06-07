@@ -380,6 +380,31 @@ why 题专用裁决工具入口：
   - 真正倾倒/清空
   - 真正准备上菜
 
+进展补充：
+
+- [x] 已把 inspection 专项 hierarchy 接入 `agent_toolbox._apply_action_intent_future_use_causal_hierarchy(...)`：
+  - 当 evidence 明确显示 `brief lift / look inside / near hob or in-container check / no tilt / no serving destination / no transfer away` 时
+  - 会把答案从 `serve / pour / empty / drain` 一类泛化后续用途，翻到更直接的 `check / inspect / boiling / doneness / consistency`
+- [x] 这轮不是写死单样例，而是按语义簇扩展到多种容器与检查目标：
+  - `pot / saucepan` 的 `boiling water / doneness check`
+  - `frying pan` 的 `contents check`
+  - `mixing bowl` 的 `consistency check`
+- [x] 已新增并通过 `3` 条 inspection 专项 hierarchy 定向测试：
+  - `empty -> boiling check`
+  - `serve -> contents check`
+  - `pour out -> consistency check`
+- [x] 已补跑局部回归：
+  - `pytest -q tests/test_graph_agent.py -k 'future_use_causal_hierarchy or future_use_sufficiency'`
+  - 结果：`19 passed, 424 deselected`
+- [x] 已补跑专项总回归：
+  - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+  - 结果：`120 passed, 323 deselected`
+
+当前剩余缺口：
+
+- [ ] `inspection` 与 `measure / weigh / open-close` 的更细粒度边界还可继续压
+- [ ] 真实 replay 上还未统计这组 inspection 规则实际翻正了多少样例
+
 完成标准：
 
 - inspection 类 why 题不再被泛化结果动作吞掉

@@ -3227,6 +3227,39 @@ class AgentToolbox:
                 "while an exact detergent-bottle pickup is not yet directly established."
             ).strip()
             return adjusted
+        inspection_index = next(
+            (
+                index
+                for index in valid_indices
+                if self._choice_is_brief_cooking_inspection_future_use_purpose(
+                    str(choices[index]).lower(),
+                    action_object=action_object,
+                )
+            ),
+            None,
+        )
+        disposal_or_serving_indices = {
+            index
+            for index in valid_indices
+            if self._choice_is_disposal_or_serving_future_use_purpose(str(choices[index]).lower())
+        }
+        if (
+            inspection_index is not None
+            and best_index in disposal_or_serving_indices
+            and best_index != inspection_index
+            and self._explanation_uses_brief_cooking_inspection_chain(explanation, action_object=action_object)
+        ):
+            adjusted = dict(result)
+            adjusted["best_index"] = inspection_index
+            adjusted["answer"] = str(choices[inspection_index])
+            adjusted["confidence"] = max(0.8, min(0.9, float(result.get("confidence") or 0.0) + 0.04))
+            adjusted["causal_hierarchy_adjusted"] = True
+            adjusted["reason"] = (
+                f"{result.get('reason') or ''} causal_hierarchy_adjustment: "
+                "the evidence shows a brief near-hob inspection/check without tilt, pouring, plating, or transfer away from the cooking area, "
+                "so the direct purpose is checking the contents/doneness rather than emptying, pouring out, or serving."
+            ).strip()
+            return adjusted
         immediate_reuse_index = next(
             (
                 index
@@ -4571,6 +4604,72 @@ class AgentToolbox:
         )
         return re.sub(r"\s+", " ", text).strip()
 
+    def _choice_is_brief_cooking_inspection_future_use_purpose(self, choice: str, *, action_object: str) -> bool:
+        text = str(choice or "").lower()
+        if action_object and not any(
+            token in action_object
+            for token in ("pot", "pan", "saucepan", "frying pan", "bowl", "mixture", "water", "soup", "vegetable", "pasta", "rice")
+        ):
+            return False
+        has_explicit_inspection = any(
+            token in text
+            for token in (
+                "check",
+                "inspect",
+                "look at",
+                "look inside",
+                "look into",
+                "see inside",
+                "check inside",
+                "check the contents",
+                "check the consistency",
+                "see if it is cooked",
+                "see whether it is cooked",
+                "done",
+                "doneness",
+                "cooked",
+                "consistency",
+                "boiling",
+                "检查",
+                "看看",
+                "确认",
+                "熟了",
+                "沸腾",
+            )
+        )
+        has_specialized_check_goal = any(
+            token in text
+            for token in (
+                "consistency",
+                "done",
+                "doneness",
+                "cooked",
+                "boiling",
+                "熟了",
+                "沸腾",
+            )
+        )
+        return has_explicit_inspection or has_specialized_check_goal
+
+    def _choice_is_disposal_or_serving_future_use_purpose(self, choice: str) -> bool:
+        text = str(choice or "").lower()
+        return any(
+            token in text
+            for token in (
+                "empty",
+                "pour out",
+                "pour",
+                "drain",
+                "serve",
+                "tip out",
+                "倒掉",
+                "倒出",
+                "沥干",
+                "盛出",
+                "上菜",
+            )
+        )
+
     def _choice_is_immediate_reuse_future_use_purpose(self, choice: str) -> bool:
         text = str(choice or "").lower()
         return any(
@@ -4730,6 +4829,128 @@ class AgentToolbox:
             )
         )
         return has_reuse_signal and (has_nonstorage_signal or not has_true_storage_signal)
+
+    def _explanation_uses_brief_cooking_inspection_chain(self, explanation: str, *, action_object: str) -> bool:
+        text = str(explanation or "").lower()
+        if action_object and not any(
+            token in text
+            for token in (
+                action_object,
+                "pot",
+                "pan",
+                "saucepan",
+                "frying pan",
+                "bowl",
+                "mixture",
+                "water",
+                "soup",
+                "pasta",
+                "rice",
+                "vegetable",
+            )
+        ):
+            return False
+        has_cooking_context = any(
+            token in text
+            for token in (
+                "hob",
+                "stove",
+                "burner",
+                "boiling",
+                "water",
+                "steam",
+                "contents",
+                "liquid",
+                "simmer",
+                "cooking",
+                "pot",
+                "pan",
+                "saucepan",
+                "灶",
+                "锅",
+                "沸腾",
+                "水",
+                "蒸汽",
+                "内容物",
+            )
+        )
+        has_container_check_context = any(
+            token in text
+            for token in (
+                "bowl",
+                "mixing bowl",
+                "mixture",
+                "batter",
+                "contents",
+                "inside",
+                "container",
+                "碗",
+                "混合物",
+                "内容物",
+                "里面",
+            )
+        )
+        has_brief_check_signal = any(
+            token in text
+            for token in (
+                "briefly raised",
+                "raised near the hob",
+                "briefly lifted",
+                "brief lift",
+                "quick check",
+                "checks the contents",
+                "looks inside",
+                "look inside",
+                "check the contents",
+                "check the consistency",
+                "see if it is done",
+                "see if it is cooked",
+                "check the boil",
+                "check the boiling",
+                "before continuing cooking",
+                "stays near the hob",
+                "remains above the hob",
+                "quick inspection",
+                "brief inspection",
+                "shortly lifted to inspect",
+                "短暂拿起",
+                "快速检查",
+                "看一下里面",
+                "查看内容物",
+                "检查状态",
+                "检查是否沸腾",
+            )
+        )
+        has_nontransfer_signal = any(
+            token in text
+            for token in (
+                "not tilted",
+                "no tilt",
+                "no pouring",
+                "not poured",
+                "not moved to a plate",
+                "not moved to a bowl",
+                "not moved to a serving destination",
+                "not carried away from the stove",
+                "not taken away from the hob",
+                "not toward the sink",
+                "not carried to the sink",
+                "rather than emptying",
+                "rather than serving",
+                "rather than pouring out",
+                "没有倾倒",
+                "没有倒出",
+                "没有拿去盘子里",
+                "没有拿去碗里",
+                "没有拿离灶台",
+                "没有拿去水槽",
+                "not directed toward another container",
+                "no serving destination",
+                "没有朝另一个容器",
+                "没有上菜目标",
+            )
+        )
+        return (has_cooking_context or has_container_check_context) and has_brief_check_signal and has_nontransfer_signal
 
     def _explanation_uses_exact_final_placement_chain(self, explanation: str) -> bool:
         text = str(explanation or "").lower()
