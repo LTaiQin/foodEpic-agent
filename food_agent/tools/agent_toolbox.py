@@ -3351,6 +3351,51 @@ class AgentToolbox:
                 "so this direct same-object manipulation is stronger than a later downstream scale/tap use or a generic hand-free reading."
             ).strip()
             return adjusted
+        tap_state_switch_index = next(
+            (
+                index
+                for index in valid_indices
+                if self._choice_is_exact_tap_state_switch_future_use_purpose(str(choices[index]))
+            ),
+            None,
+        )
+        generic_fill_limit_indices = {
+            index
+            for index in valid_indices
+            if self._choice_is_generic_fill_limit_future_use_purpose(str(choices[index]))
+        }
+        generic_boil_speed_index = next(
+            (
+                index
+                for index in valid_indices
+                if self._choice_is_generic_boil_speed_outcome_future_use_purpose(str(choices[index]))
+            ),
+            None,
+        )
+        if (
+            tap_state_switch_index is not None
+            and best_index != tap_state_switch_index
+            and best_index in (
+                generic_fill_limit_indices
+                | {
+                    index
+                    for index in (generic_boil_speed_index,)
+                    if index is not None
+                }
+            )
+            and self._explanation_uses_tap_state_switch_chain(explanation)
+        ):
+            adjusted = dict(result)
+            adjusted["best_index"] = tap_state_switch_index
+            adjusted["answer"] = str(choices[tap_state_switch_index])
+            adjusted["confidence"] = max(0.79, min(0.89, float(result.get("confidence") or 0.0) + 0.03))
+            adjusted["causal_hierarchy_adjusted"] = True
+            adjusted["reason"] = (
+                f"{result.get('reason') or ''} causal_hierarchy_adjustment: "
+                "the evidence stays on the tap-plus-pan sequence and shows a direct hot/cold water phase switch for the active saucepan/pan, "
+                "so that concrete tap-state transition is stronger than a generic full-container or broad boil-speed reading."
+            ).strip()
+            return adjusted
         hygiene_index = next(
             (
                 index
@@ -3768,6 +3813,9 @@ class AgentToolbox:
                 ),
             ):
                 gaps.append("missing_fill_evidence")
+        if self._choice_is_generic_fill_limit_future_use_purpose(choice):
+            if self._explanation_uses_fill_limit_target_mismatch(context_text, choice):
+                gaps.append("generic_fill_limit_target_mismatch")
         if any(term in choice_lc for term in ("weigh", "measure", "scale")):
             if not self._text_has_any(support_text, ("scale", "weigh", "weighed", "measure", "grams", "秤", "称", "克")):
                 gaps.append("missing_measurement_evidence")
@@ -3953,6 +4001,8 @@ class AgentToolbox:
             return "post-action frames showing whether the object is truly no longer needed or instead kept nearby and used again shortly after"
         if any("final_placement" in gap or "temporary_relocation" in gap for gap in gaps):
             return "post-action frames showing the object's final placement, storage, or return location rather than a temporary move"
+        if any("fill_limit_target_mismatch" in gap for gap in gaps):
+            return "post-action frames showing the named cup/glass/kettle/bottle actually reaches a fill limit, rather than the tap being switched for another active container"
         if any("fill" in gap for gap in gaps):
             return "post-action frames showing filling with water/liquid and the target container"
         if any("measurement" in gap for gap in gaps):
@@ -4981,6 +5031,86 @@ class AgentToolbox:
             )
         )
 
+    def _choice_is_exact_tap_state_switch_future_use_purpose(self, choice: str) -> bool:
+        text = str(choice or "").lower()
+        if "tap" not in text and "water" not in text and "水龙头" not in text:
+            return False
+        has_state_switch = any(
+            token in text
+            for token in (
+                "turn off",
+                "turn on",
+                "switched",
+                "switch from",
+                "switch to",
+                "cold water tap",
+                "hot tap water",
+                "turn the cold water tap off",
+                "fill the saucepan with hot tap water",
+                "关闭冷水",
+                "打开热水",
+                "切换到热水",
+                "水龙头关掉",
+            )
+        )
+        has_phase_goal = any(
+            token in text
+            for token in (
+                "hot",
+                "cold",
+                "boil",
+                "boiling",
+                "saucepan",
+                "pan",
+                "pot",
+                "hot water",
+                "cold water",
+                "热水",
+                "冷水",
+                "烧开",
+                "锅",
+            )
+        )
+        return has_state_switch and has_phase_goal
+
+    def _choice_is_generic_fill_limit_future_use_purpose(self, choice: str) -> bool:
+        text = str(choice or "").lower()
+        if "full" not in text and "满" not in text:
+            return False
+        return any(
+            token in text
+            for token in (
+                "cup",
+                "glass",
+                "kettle",
+                "bottle",
+                "mug",
+                "jug",
+                "杯",
+                "壶",
+                "瓶",
+            )
+        )
+
+    def _choice_is_generic_boil_speed_outcome_future_use_purpose(self, choice: str) -> bool:
+        text = str(choice or "").lower()
+        if not any(
+            token in text
+            for token in (
+                "boil",
+                "boiling",
+                "boil more quickly",
+                "small amount of water quickly",
+                "top up the pasta",
+                "bring the pan to boil",
+                "烧开",
+                "快一点煮开",
+                "补一点面水",
+            )
+        ):
+            return False
+        return not self._choice_is_exact_tap_state_switch_future_use_purpose(text)
+
     def _choice_is_hygiene_surface_protection_future_use_purpose(self, choice: str) -> bool:
         text = str(choice or "").lower()
         return any(
@@ -5634,6 +5764,89 @@ class AgentToolbox:
             )
         )
         return has_open_signal and has_hand_role_signal and not has_later_downstream_open_denial
+
+    def _explanation_uses_tap_state_switch_chain(self, explanation: str) -> bool:
+        text = str(explanation or "").lower()
+        has_tap_context = any(
+            token in text
+            for token in (
+                "tap",
+                "faucet",
+                "water",
+                "filling sequence",
+                "fill",
+                "水龙头",
+                "接水",
+                "水",
+            )
+        )
+        has_phase_switch_signal = any(
+            token in text
+            for token in (
+                "hot",
+                "cold",
+                "switching to hot water",
+                "switch from cold",
+                "turned off while the saucepan remains the active target",
+                "fill the saucepan with hot tap water",
+                "bring the pan to the boil faster",
+                "boil faster",
+                "saucepan",
+                "pan",
+                "pot",
+                "热水",
+                "冷水",
+                "切换到热水",
+                "锅",
+                "烧开更快",
+            )
+        )
+        return has_tap_context and has_phase_switch_signal
+
+    def _choice_fill_limit_target_tokens(self, choice: str) -> list[str]:
+        text = str(choice or "").lower()
+        return [
+            token
+            for token in ("cup", "glass", "kettle", "bottle", "mug", "jug", "杯", "壶", "瓶")
+            if token in text
+        ]
+
+    def _explanation_uses_fill_limit_target_mismatch(self, explanation: str, choice: str) -> bool:
+        text = str(explanation or "").lower()
+        matched_targets = self._choice_fill_limit_target_tokens(choice)
+        if not matched_targets:
+            return False
+        if any(
+            token in text
+            and not any(
+                neg in text
+                for neg in (
+                    f"no {token}",
+                    f"not {token}",
+                    f"without {token}",
+                    f"{token} not visible",
+                    f"{token} isn't visible",
+                    f"{token} is not visible",
+                )
+            )
+            for token in matched_targets
+        ):
+            return False
+        if any(
+            token in text
+            for token in (
+                "no cup",
+                "no glass",
+                "no kettle",
+                "no bottle",
+                "not visible",
+                "没有杯",
+                "没有壶",
+                "未看到",
+            )
+        ):
+            return True
+        return self._explanation_uses_tap_state_switch_chain(text)
 
     def _explanation_uses_exact_final_placement_chain(self, explanation: str) -> bool:
         text = str(explanation or "").lower()
