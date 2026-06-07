@@ -29,8 +29,8 @@
 ### 16.2.2 当前稳定基线
 
 - 专项回归命令：`pytest -q tests/test_graph_agent.py -k 'action_intent'`
-- 2026-06-07 当前结果：`223 passed, 344 deselected`
-- 相比本轮进入专项时的起点 `107 passed, 300 deselected`，当前阶段性增量为 `+116 passed`
+- 2026-06-07 当前结果：`225 passed, 344 deselected`
+- 相比本轮进入专项时的起点 `107 passed, 300 deselected`，当前阶段性增量为 `+118 passed`
 - 当前执行策略：why 逻辑不再追求“接近完美覆盖”，而是维持“足够可用、回归稳定、无明显结构性退化”的维护态；后续优先级切换到完整 agent 功能闭环与小样本真实验证。
 
 这说明 why 题已经不再是“直接把问题丢给模型猜答案”，而是已经存在完整骨架：
@@ -226,7 +226,18 @@
   - `future_use` 题即使没有 `transition/peaks`，只要已经补到 `followup_ext*` 也能触发 timeline review
   - `sample_sparse_frames(followup_ext2)` 后会先进入 timeline review，而不是直接 future-use resolution
   - `limit=3` 的 stage 采样会保留“起点 + 锚点 + 最新结果帧”
-- 本轮专项总回归更新为 `223 passed, 344 deselected`
+- 本轮提交：`planner` 新增了 why 候选的“语义救援”层，但只放在真正需要对立语义比较的 route / pairwise 决策中，不去破坏 generic `future_use` 的保守扩搜逻辑：
+  - `flip / shake / tilt / tap / hit / knock` 这类动作，如果当前 top 候选里只剩 cleanup/open-close 近义项，而全局选项里还存在 `transfer_contents / residue_release` 或 `measure_weigh` 语义，planner 会把缺失的一侧主动拉回比较；
+  - `towel / cloth` 这类 transport-vs-use close-call，如果当前 top 候选只剩 clean/dry 近义项，而全局存在 relocation/store 语义，planner 会在 route 选择层把缺失对立面补回；
+  - 但 generic `future_use` 在没有 timeline review 线索时仍保持全候选保守行为，避免“还没看后续证据就先把搜索空间缩窄”。
+- 本轮提交：`action_intent` 的量测语义桶继续补全，`measurement(s) / adjust` 这类表述现在也能稳定归入 `measure_weigh`，避免状态变化题里把“调秤/调读数”错当成普通 `open_close`
+- 本轮新增并通过 `2` 条定向测试，覆盖：
+  - `flip orange cloth` 会把缺失的 `residue_release` 候选重新拉回 top pair
+  - `tap kitchen scale` 会把缺失的 `measure_weigh` 候选重新拉回 top pair
+- 本轮专项总回归更新为 `225 passed, 344 deselected`
+- 本轮小规模真实 probe：
+  - 旧 `towel-cluster` 摘要中 `flip orange cloth` 仍是残差，正是本轮语义救援要消除的典型失败；
+  - 新 `state-change-cluster` probe 已完成 `1/2`，当前已完成样本准确率 `1.0`；剩余样本仍在跑，说明本轮修改至少已开始覆盖真实状态变化桶，而不只是单测
 
 ### 16.2.4 当前真正的瓶颈
 

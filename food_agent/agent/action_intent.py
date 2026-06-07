@@ -39,12 +39,29 @@ POST_ACTION_SENSITIVE_PATTERNS = (
     r"\badd(?:ed)?\b",
     r"\bscoop(?:ed)?\b",
     r"\bscrape(?:d)?\b",
+    r"\bflip(?:ped)?\b",
+    r"\bshake(?:n|s|d)?\b",
+    r"\btilt(?:ed)?\b",
     r"\bthrow\b",
     r"\bdiscard\b",
+    r"\btap(?:ped)?\b",
+    r"\bpress(?:ed)?\b",
+    r"\bpush(?:ed)?\b",
 )
 
 
 CHOICE_CATEGORY_PATTERNS: dict[str, tuple[str, ...]] = {
+    "generic_relocation": (
+        r"\bto move\b",
+        r"\bmove\.$",
+        r"\bmove it\b",
+        r"\bmove the\b",
+        r"\brelocate\b",
+        r"\bshift it\b",
+        r"\bshift the\b",
+        r"\bset aside\b",
+        r"\btemporarily relocate\b",
+    ),
     "access_retrieve": (
         r"\baccess\b",
         r"\bbehind\b",
@@ -85,6 +102,8 @@ CHOICE_CATEGORY_PATTERNS: dict[str, tuple[str, ...]] = {
     "measure_weigh": (
         r"\bweigh\b",
         r"\bmeasure\b",
+        r"\bmeasurement(?:s)?\b",
+        r"\badjust\b",
         r"\bscale\b",
         r"\bgrams?\b",
         r"\breading\b",
@@ -189,7 +208,9 @@ CHOICE_CATEGORY_PATTERNS: dict[str, tuple[str, ...]] = {
     ),
 }
 
-PAIRWISE_OUTCOME_CATEGORIES = frozenset({"access_retrieve", "space_clear", "final_place_return", "safety_avoid"})
+PAIRWISE_OUTCOME_CATEGORIES = frozenset(
+    {"generic_relocation", "access_retrieve", "space_clear", "final_place_return", "safety_avoid"}
+)
 PRECONDITION_CATEGORIES = frozenset({"clean_dry", "safety_avoid"})
 FUTURE_USE_CATEGORIES = frozenset(
     {
@@ -210,6 +231,47 @@ FUTURE_USE_CATEGORIES = frozenset(
 
 def normalize_action_intent_text(text: str) -> str:
     return re.sub(r"\s+", " ", str(text or "").strip().lower())
+
+
+def _extract_question_action_text(question: str) -> str:
+    lowered = normalize_action_intent_text(question)
+    match = re.search(r"<([^>]+)>", lowered)
+    if match:
+        return normalize_action_intent_text(match.group(1))
+    return lowered
+
+
+def _question_action_has_any(question: str, tokens: Iterable[str]) -> bool:
+    action_text = _extract_question_action_text(question)
+    return any(token in action_text for token in tokens)
+
+
+def _question_mentions_towel_like_object(question: str) -> bool:
+    return _question_action_has_any(
+        question,
+        ("towel", "cloth", "napkin", "paper towel", "tea towel", "dish cloth", "hand towel"),
+    )
+
+
+def _question_requires_transport_vs_use_evidence(question: str) -> bool:
+    return _question_mentions_towel_like_object(question) and _question_action_has_any(
+        question,
+        ("pick up", "grab", "lift", "take", "move", "shift"),
+    )
+
+
+def _question_requires_residue_release_evidence(question: str) -> bool:
+    return _question_mentions_towel_like_object(question) and _question_action_has_any(
+        question,
+        ("flip", "turn", "shake", "tip"),
+    )
+
+
+def _question_requires_state_change_evidence(question: str) -> bool:
+    return _question_action_has_any(question, ("tap", "press", "push")) and _question_action_has_any(
+        question,
+        ("scale", "button", "switch", "knob"),
+    )
 
 
 def question_is_post_action_sensitive(question: str) -> bool:
@@ -357,15 +419,41 @@ def action_intent_followup_decision(
     """Return (needs_followup, reason, window_s, resolver)."""
 
     profile = action_intent_conflict_profile(question=question, choices=choices, indices=indices)
+    full_profile = action_intent_conflict_profile(question=question, choices=choices, indices=None)
     if not bool(profile["post_action_sensitive"]):
         return False, "", 4.0, ""
     active_categories = set(profile["active_categories"])
     future_categories = set(profile["future_categories"])
+    full_active_categories = set(full_profile["active_categories"])
+    full_category_counts = dict(full_profile["category_counts"])
     non_pairwise_future_categories = future_categories - PAIRWISE_OUTCOME_CATEGORIES
     candidate_count = len(profile["categories_by_index"])
     has_pairwise_outcome_conflict = bool(profile["has_pairwise_outcome_conflict"])
     has_future_use_conflict = bool(profile["has_future_use_conflict"])
     has_hidden_access_exact_use_conflict = bool(profile["has_hidden_access_exact_use_conflict"])
+    if _question_requires_state_change_evidence(question) and {
+        "open_close",
+        "measure_weigh",
+    }.issubset(active_categories):
+        return True, "state_change_disambiguation_needed", 6.0, "pairwise"
+    if _question_requires_residue_release_evidence(question) and {
+        "clean_dry",
+        "transfer_contents",
+    }.issubset(active_categories):
+        return True, "residue_release_vs_cleanup_needed", 6.0, "pairwise"
+    if _question_requires_transport_vs_use_evidence(question) and {
+        "clean_dry",
+        "generic_relocation",
+    }.issubset(active_categories):
+        return True, "transport_vs_cleanup_needed", 6.0, "pairwise"
+    if _question_requires_transport_vs_use_evidence(question) and "clean_dry" in full_active_categories:
+        clean_dry_candidate_count = int(full_category_counts.get("clean_dry", 0))
+        has_full_relocation_candidate = "generic_relocation" in full_active_categories or "final_place_return" in full_active_categories
+        missing_relocation_in_current_candidates = "generic_relocation" not in active_categories and "final_place_return" not in active_categories
+        if clean_dry_candidate_count >= 2 and has_full_relocation_candidate and (
+            candidate_count > 2 or missing_relocation_in_current_candidates
+        ):
+            return True, "transport_vs_cleanup_future_use_needed", 8.0, "future_use"
     if has_pairwise_outcome_conflict and candidate_count <= 2:
         return True, "outcome_dependent_pairwise_needed", 4.0, "pairwise"
     if has_hidden_access_exact_use_conflict:

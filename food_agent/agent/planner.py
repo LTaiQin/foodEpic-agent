@@ -389,6 +389,13 @@ class GraphAgentPlanner:
         if best_index not in indices or second_best_index not in indices or best_index == second_best_index:
             return indices
         top_pair = [best_index, second_best_index]
+        rescued_top_pair = self._action_intent_semantic_rescue_candidate_indices(
+            state=state,
+            indices=top_pair,
+            result=result,
+        )
+        if len(rescued_top_pair) >= 2:
+            top_pair = rescued_top_pair
         full_needs, _, _, full_resolver = action_intent_followup_decision(
             question=question,
             choices=choices,
@@ -445,7 +452,83 @@ class GraphAgentPlanner:
                         and "hand_free_enablement" in set(alt_profile["active_categories"])
                     ):
                         return hand_free_pair
+        rescued_indices = self._action_intent_semantic_rescue_candidate_indices(
+            state=state,
+            indices=indices,
+            result=result,
+        )
+        if len(rescued_indices) >= 2:
+            return rescued_indices
         return indices
+
+    def _action_intent_semantic_rescue_candidate_indices(
+        self,
+        *,
+        state: AgentState,
+        indices: list[int],
+        result: dict[str, Any] | None = None,
+    ) -> list[int]:
+        choices = [str(choice) for choice in getattr(state, "choices", [])]
+        normalized = [index for index in indices if 0 <= int(index) < len(choices)]
+        deduped: list[int] = []
+        for index in normalized:
+            if index not in deduped:
+                deduped.append(index)
+        if len(deduped) < 2:
+            return deduped
+        question = str(getattr(state, "question", "") or "").lower()
+        full_categories = selected_choice_categories(choices, range(len(choices)))
+        current_categories = selected_choice_categories(choices, deduped)
+        full_union = set().union(*(full_categories.get(index) or set() for index in full_categories))
+        current_union = set().union(*(current_categories.get(index) or set() for index in current_categories))
+        best_index = self._coerce_choice_index((result or {}).get("best_index"), state.choices)
+        if best_index is None or best_index not in range(len(choices)):
+            best_index = deduped[0]
+
+        def first_index_for_missing_semantic(kind: str) -> int | None:
+            for index, cats in full_categories.items():
+                if index == best_index:
+                    continue
+                categories = set(cats or set())
+                if kind == "transfer_contents" and "transfer_contents" in categories:
+                    return index
+                if kind == "clean_dry" and "clean_dry" in categories:
+                    return index
+                if kind == "relocation" and categories & {"generic_relocation", "final_place_return"}:
+                    return index
+                if kind == "measure_weigh" and "measure_weigh" in categories:
+                    return index
+                if kind == "open_close" and "open_close" in categories:
+                    return index
+            return None
+
+        if any(token in question for token in ("<flip ", "<turn ", "<shake ", "<tilt ", "<tip ", "<tap ", "<hit ", "<knock ")):
+            if "clean_dry" in full_union and "transfer_contents" in full_union:
+                if not ("clean_dry" in current_union and "transfer_contents" in current_union):
+                    missing_kind = "transfer_contents" if "transfer_contents" not in current_union else "clean_dry"
+                    alt_index = first_index_for_missing_semantic(missing_kind)
+                    if alt_index is not None and alt_index != best_index:
+                        return [best_index, alt_index]
+
+        if any(token in question for token in ("towel", "cloth", "napkin", "paper towel", "tea towel", "dish cloth", "hand towel")):
+            if any(token in question for token in ("<pick up ", "<grab ", "<lift ", "<take ", "<move ", "<shift ")):
+                if "clean_dry" in full_union and {"generic_relocation", "final_place_return"} & full_union:
+                    current_has_relocation = bool({"generic_relocation", "final_place_return"} & current_union)
+                    if not ("clean_dry" in current_union and current_has_relocation):
+                        missing_kind = "relocation" if not current_has_relocation else "clean_dry"
+                        alt_index = first_index_for_missing_semantic(missing_kind)
+                        if alt_index is not None and alt_index != best_index:
+                            return [best_index, alt_index]
+
+        if any(token in question for token in ("<tap ", "<press ", "<push ")):
+            if any(token in question for token in ("scale", "button", "switch", "knob")):
+                if "measure_weigh" in full_union and "open_close" in full_union:
+                    if not ("measure_weigh" in current_union and "open_close" in current_union):
+                        missing_kind = "measure_weigh" if "measure_weigh" not in current_union else "open_close"
+                        alt_index = first_index_for_missing_semantic(missing_kind)
+                        if alt_index is not None and alt_index != best_index:
+                            return [best_index, alt_index]
+        return deduped
 
     def _action_intent_requires_followup(self, state: AgentState, result: dict[str, Any] | None = None) -> bool:
         if isinstance(result, dict):
@@ -2723,6 +2806,13 @@ class GraphAgentPlanner:
         indices = self._latest_action_intent_candidate_indices(state, result=result)
         if len(indices) < 2:
             return indices
+        rescued_indices = self._action_intent_semantic_rescue_candidate_indices(
+            state=state,
+            indices=indices,
+            result=result,
+        )
+        if len(rescued_indices) >= 2:
+            indices = rescued_indices
         timeline_text = self._action_intent_timeline_review_text(state)
         if not timeline_text:
             return indices
