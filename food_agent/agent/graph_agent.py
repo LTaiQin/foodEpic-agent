@@ -11,6 +11,7 @@ from pathlib import Path
 from hashlib import md5
 from typing import Any
 
+from food_agent.agent.action_intent import selected_choice_categories
 from food_agent.agent.artifact_policy import artifact_reuse_prefixes_for_task
 from food_agent.agent.executor import GraphAgentExecutor
 from food_agent.agent.planner import GraphAgentPlanner
@@ -891,6 +892,12 @@ class GraphAgent:
             ):
                 state.add_memory("action_intent_resolution_withheld_for_broad_generic_claim=1")
                 continue
+            elif self._action_intent_resolution_should_withhold_mixed_horizon_overclaim(
+                raw_result=raw_result,
+                state=state,
+            ):
+                state.add_memory("action_intent_resolution_withheld_for_mixed_horizon_claim=1")
+                continue
             confidence = self._coerce_confidence(raw_result.get("confidence"), default=0.78)
             if raw_result.get("need_more_evidence"):
                 confidence = min(confidence, 0.62)
@@ -917,7 +924,7 @@ class GraphAgent:
             return False
         text = " ".join(
             str(raw_result.get(key) or "")
-            for key in ("reason", "decisive_observation", "needed_observation", "answer")
+            for key in ("reason", "decisive_observation", "needed_observation")
         ).lower()
         prior_text = self._action_intent_prior_reasoning_text(state).lower()
         combined_text = f"{prior_text} {text}".strip()
@@ -998,7 +1005,7 @@ class GraphAgent:
             return False
         text = " ".join(
             str(raw_result.get(key) or "")
-            for key in ("reason", "decisive_observation", "needed_observation", "answer")
+            for key in ("reason", "decisive_observation", "needed_observation")
         ).lower()
         if self._action_intent_text_has_negative_evidence(text):
             return True
@@ -1018,7 +1025,7 @@ class GraphAgent:
         choice_lc = str(state.choices[index]).lower()
         text = " ".join(
             str(raw_result.get(key) or "")
-            for key in ("reason", "decisive_observation", "needed_observation", "answer")
+            for key in ("reason", "decisive_observation", "needed_observation")
         ).lower()
         if any(token in action_object for token in ("towel", "cloth", "napkin", "paper towel")):
             if "move" in choice_lc and self._action_intent_choice_lacks_direct_relocation_outcome_evidence(
@@ -1068,7 +1075,7 @@ class GraphAgent:
             return False
         text = " ".join(
             str(raw_result.get(key) or "")
-            for key in ("reason", "decisive_observation", "needed_observation", "answer")
+            for key in ("reason", "decisive_observation", "needed_observation")
         ).lower()
         if any(
             token in text
@@ -1097,9 +1104,103 @@ class GraphAgent:
                 "未显示",
                 "不明确",
             )
-        ):
+            ):
             return True
         return not self._action_intent_text_has_direct_positive_evidence(text)
+
+    def _action_intent_resolution_should_withhold_mixed_horizon_overclaim(
+        self,
+        *,
+        raw_result: dict[str, Any],
+        state: AgentState,
+    ) -> bool:
+        pair = self._action_intent_resolution_competing_pair(raw_result=raw_result, state=state)
+        if pair is None:
+            return False
+        best_index, competitor_index = pair
+        choices = [str(choice) for choice in getattr(state, "choices", [])]
+        categories_by_index = selected_choice_categories(choices, [best_index, competitor_index])
+        best_categories = set(categories_by_index.get(best_index) or set())
+        competitor_categories = set(categories_by_index.get(competitor_index) or set())
+        later_outcome_categories = {
+            "final_place_return",
+            "measure_weigh",
+            "transfer_contents",
+            "serve_consume",
+            "clean_dry",
+            "food_prep",
+            "discard",
+        }
+        best_choice = choices[best_index].lower()
+        competitor_choice = choices[competitor_index].lower()
+        best_is_immediate = self._action_intent_choice_is_immediate_micro_outcome_candidate(best_choice, best_categories)
+        competitor_is_immediate = self._action_intent_choice_is_immediate_micro_outcome_candidate(
+            competitor_choice,
+            competitor_categories,
+        )
+        spans_mixed_horizon = bool(
+            (best_is_immediate and competitor_categories & later_outcome_categories)
+            or (competitor_is_immediate and best_categories & later_outcome_categories)
+        )
+        if not spans_mixed_horizon:
+            return False
+        text = " ".join(
+            str(raw_result.get(key) or "")
+            for key in ("reason", "decisive_observation", "needed_observation")
+        ).lower()
+        if self._action_intent_text_has_negative_evidence(text):
+            return True
+        if any(
+            token in text
+            for token in (
+                "whether",
+                "still unclear",
+                "unclear",
+                "not visible",
+                "not shown",
+                "cannot tell",
+                "can't tell",
+                "可能",
+                "是否",
+                "不明确",
+            )
+        ):
+            return True
+        if best_is_immediate:
+            return not self._action_intent_choice_has_explicit_immediate_micro_outcome_evidence(best_choice, text)
+        return not self._action_intent_choice_has_explicit_later_outcome_evidence(best_choice, best_categories, text)
+
+    def _action_intent_resolution_competing_pair(
+        self,
+        *,
+        raw_result: dict[str, Any],
+        state: AgentState,
+    ) -> tuple[int, int] | None:
+        best_index = self._coerce_choice_index(raw_result.get("best_index"), state.choices)
+        if best_index is None:
+            return None
+        competitor_index = self._coerce_choice_index(raw_result.get("second_best_index"), state.choices)
+        if competitor_index is None:
+            competitor_index = self._coerce_choice_index(raw_result.get("losing_index"), state.choices)
+        if competitor_index is None:
+            scored: list[tuple[float, int]] = []
+            for item in raw_result.get("candidate_evidence") or []:
+                if not isinstance(item, dict):
+                    continue
+                index = self._coerce_choice_index(item.get("index"), state.choices)
+                if index is None or index == best_index:
+                    continue
+                try:
+                    score = float(item.get("score") or 0.0)
+                except Exception:  # noqa: BLE001
+                    score = 0.0
+                scored.append((score, index))
+            if scored:
+                scored.sort(key=lambda pair: (-pair[0], pair[1]))
+                competitor_index = scored[0][1]
+        if competitor_index is None or competitor_index == best_index:
+            return None
+        return best_index, competitor_index
 
     def _resolve_unresolved_action_intent_answer(
         self,
@@ -1320,6 +1421,14 @@ class GraphAgent:
                 for term in ("zero", "tare", "reset", "returns to 0", "container on the scale", "归零", "去皮", "回到0", "放到秤上")
             ):
                 gaps.append("missing_zero_out_measurement_evidence")
+        if self._action_intent_unresolved_candidate_spans_mixed_horizon(state=state, candidate_rows=candidate_rows, best_index=best_index):
+            categories = selected_choice_categories([str(choice) for choice in getattr(state, "choices", [])], [best_index])
+            best_categories = set(categories.get(best_index) or set())
+            if self._action_intent_choice_is_immediate_micro_outcome_candidate(choice_lc, best_categories):
+                if not self._action_intent_choice_has_explicit_immediate_micro_outcome_evidence(choice_lc, support_lc):
+                    gaps.append("missing_immediate_micro_outcome_evidence")
+            elif not self._action_intent_choice_has_explicit_later_outcome_evidence(choice_lc, best_categories, support_lc):
+                gaps.append("missing_later_outcome_evidence")
         if any(term in choice_lc for term in ("access", "behind", "reveal", "expose", "拿到后面", "看到后面", "露出", "取到后面")):
             if any(term in support_lc for term in ("reveals the hidden area", "revealed", "hidden area behind", "shows what is behind", "露出后方", "看到后方")):
                 gaps.append("generic_access_direct_effect")
@@ -1377,6 +1486,8 @@ class GraphAgent:
                         "missing_surface_wiping_evidence",
                         "missing_dry_hands_evidence",
                         "missing_simple_relocation_evidence",
+                        "missing_immediate_micro_outcome_evidence",
+                        "missing_later_outcome_evidence",
                     }
                 )
             if weak_gap_count >= 2:
@@ -1405,6 +1516,197 @@ class GraphAgent:
                 if not any(self._action_intent_text_has_direct_positive_evidence(str(row.get("support") or "").lower()) for row in top_rows):
                     return True
         return False
+
+    def _action_intent_unresolved_candidate_spans_mixed_horizon(
+        self,
+        *,
+        state: AgentState,
+        candidate_rows: list[dict[str, Any]],
+        best_index: int,
+    ) -> bool:
+        choices = [str(choice) for choice in getattr(state, "choices", [])]
+        candidate_indices = [
+            int(row.get("index", -1))
+            for row in candidate_rows
+            if isinstance(row, dict) and self._coerce_choice_index(row.get("index"), state.choices) is not None
+        ]
+        categories_by_index = selected_choice_categories(choices, candidate_indices)
+        best_categories = set(categories_by_index.get(best_index) or set())
+        best_choice = choices[best_index].lower() if 0 <= best_index < len(choices) else ""
+        best_is_immediate = self._action_intent_choice_is_immediate_micro_outcome_candidate(best_choice, best_categories)
+        later_outcome_categories = {
+            "final_place_return",
+            "measure_weigh",
+            "transfer_contents",
+            "serve_consume",
+            "clean_dry",
+            "food_prep",
+            "discard",
+        }
+        for row in candidate_rows:
+            if not isinstance(row, dict):
+                continue
+            index = self._coerce_choice_index(row.get("index"), state.choices)
+            if index is None or index == best_index:
+                continue
+            categories = set(categories_by_index.get(index) or set())
+            choice_lc = choices[index].lower()
+            competitor_is_immediate = self._action_intent_choice_is_immediate_micro_outcome_candidate(choice_lc, categories)
+            if (best_is_immediate and categories & later_outcome_categories) or (
+                competitor_is_immediate and best_categories & later_outcome_categories
+            ):
+                return True
+        return False
+
+    def _action_intent_choice_is_immediate_micro_outcome_candidate(
+        self,
+        choice: str,
+        categories: set[str],
+    ) -> bool:
+        text = str(choice or "").lower()
+        if "inspect_check" in categories and any(
+            token in text
+            for token in (
+                "label",
+                "date",
+                "expiry",
+                "expiration",
+                "best before",
+                "use by",
+                "sell by",
+                "printed information",
+                "read",
+                "标签",
+                "日期",
+                "保质期",
+                "读",
+            )
+        ):
+            return True
+        if "open_close" in categories and any(
+            token in text
+            for token in (
+                "open",
+                "close",
+                "turn on",
+                "turn off",
+                "switch on",
+                "switch off",
+                "uncap",
+                "cap",
+                "unscrew",
+                "打开",
+                "关闭",
+                "开启",
+                "拧开",
+                "盖上",
+            )
+        ):
+            return True
+        return False
+
+    def _action_intent_choice_has_explicit_immediate_micro_outcome_evidence(self, choice: str, text: str) -> bool:
+        choice_lc = str(choice or "").lower()
+        text_lc = str(text or "").lower()
+        if any(token in choice_lc for token in ("label", "date", "expiry", "expiration", "best before", "use by", "sell by", "read", "标签", "日期", "保质期", "读")):
+            return any(
+                token in text_lc
+                for token in (
+                    "reads the label",
+                    "reading the label",
+                    "checks the label",
+                    "checked the label",
+                    "looks at the label",
+                    "examines the label",
+                    "reads the date",
+                    "checks the date",
+                    "printed information is examined",
+                    "looking at the printed information",
+                    "查看标签",
+                    "读取标签",
+                    "看标签",
+                    "检查日期",
+                    "读取日期",
+                )
+            )
+        if any(token in choice_lc for token in ("open", "uncap", "unscrew", "打开", "拧开", "盖上")):
+            return any(
+                token in text_lc
+                for token in (
+                    "opened",
+                    "opens",
+                    "opening the jar",
+                    "lid removed",
+                    "cap removed",
+                    "unscrewed",
+                    "uncapped",
+                    "打开了",
+                    "拧开了",
+                    "盖子打开",
+                )
+            )
+        if any(token in choice_lc for token in ("turn on", "switch on", "power on", "开启", "开机")):
+            return any(
+                token in text_lc
+                for token in (
+                    "display turns on",
+                    "screen lights",
+                    "powered on",
+                    "turned on",
+                    "亮起",
+                    "开机",
+                    "显示屏亮",
+                )
+            )
+        return self._action_intent_text_has_direct_positive_evidence(text_lc)
+
+    def _action_intent_choice_has_explicit_later_outcome_evidence(
+        self,
+        choice: str,
+        categories: set[str],
+        text: str,
+    ) -> bool:
+        choice_lc = str(choice or "").lower()
+        text_lc = str(text or "").lower()
+        if "final_place_return" in categories or any(
+            token in choice_lc
+            for token in ("put back", "return", "returned", "back in the fridge", "放回", "归位", "放进冰箱")
+        ):
+            return any(
+                token in text_lc
+                for token in (
+                    "put back",
+                    "returned",
+                    "back in the fridge",
+                    "placed back",
+                    "returned to the fridge",
+                    "returned to the shelf",
+                    "放回",
+                    "归位",
+                    "放进冰箱",
+                )
+            )
+        if "measure_weigh" in categories or any(
+            token in choice_lc
+            for token in ("weigh", "measure", "scale", "称", "测量")
+        ):
+            return any(
+                token in text_lc
+                for token in (
+                    "placed on the scale",
+                    "put on the scale",
+                    "used to weigh",
+                    "weighed",
+                    "used at the scale",
+                    "scale with",
+                    "placed onto the scale",
+                    "放到秤上",
+                    "放上秤",
+                    "称量",
+                    "用于称",
+                )
+            )
+        return self._action_intent_text_has_direct_positive_evidence(text_lc)
 
     def _score_action_intent_candidate_evidence(
         self,

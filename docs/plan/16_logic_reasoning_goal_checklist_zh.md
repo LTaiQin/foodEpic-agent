@@ -29,8 +29,8 @@
 ### 16.2.2 当前稳定基线
 
 - 专项回归命令：`pytest -q tests/test_graph_agent.py -k 'action_intent'`
-- 2026-06-07 当前结果：`239 passed, 344 deselected`
-- 相比本轮进入专项时的起点 `107 passed, 300 deselected`，当前阶段性增量为 `+132 passed`
+- 2026-06-07 当前结果：`242 passed, 344 deselected`
+- 相比本轮进入专项时的起点 `107 passed, 300 deselected`，当前阶段性增量为 `+135 passed`
 - 当前执行策略：why 逻辑不再追求“接近完美覆盖”，而是维持“足够可用、回归稳定、无明显结构性退化”的维护态；后续优先级切换到完整 agent 功能闭环与小样本真实验证。
 
 这说明 why 题已经不再是“直接把问题丢给模型猜答案”，而是已经存在完整骨架：
@@ -128,7 +128,20 @@
   - `take bottle` 在初始路由下直接进入 mixed-horizon `followup_transition`
   - `take jar` 在初始路由下直接进入 mixed-horizon `followup_transition`
 - 本轮提交：同时保留了原有保守边界：像 `open kitchen cabinet -> retrieve/put away` 这类没有“立刻微结果 vs 稍后用途”结构的题，仍然保持原来的 `segment` 起手，不会被误推到 transition probe
-- 本轮提交：why 专项回归已更新到 `239 passed, 344 deselected`
+- 本轮提交：why 题的 finish gate 继续收紧到 mixed-horizon close-call。现在如果当前答案属于：
+  - `check / read / inspect label/date`
+  - `open / uncap / unscrew`
+  - `put back / return`
+  - `weigh / put on the scale`
+  但证据文本里没有真正出现对应的显式链条，而只是“拿在手里、标签朝外、离开原位、靠近冰箱、靠近秤”这类弱迹象，那么 `graph_agent` 不再允许直接 finish
+- 本轮提交：这一步同时作用于两层：
+  - `finalizer`：`resolve_action_intent_*` 已经给出 `best_index` 时，如果 mixed-horizon 证据链不完整，会直接写入 `action_intent_resolution_withheld_for_mixed_horizon_claim=1`，阻止 deterministic finalize
+  - `unresolved rerank`：如果 `candidate_evidence` 里的 top 候选只是弱 `check/open/put back/weigh` 迹象，而缺少真正排他性的显式证据链，也会继续写入 `action_intent_unresolved_rerank_withheld`，要求更多证据
+- 本轮提交：新增并通过 3 条定向测试，分别保护：
+  - `check label` 但只有“标签朝外/可见”时不能 finish
+  - `put back in the fridge` 但只有“拿走/离开原位”时不能 finish
+  - `check label vs put back` 的 unresolved rerank 在双方都只有弱支持时必须继续等待证据
+- 本轮提交：why 专项回归已更新到 `242 passed, 344 deselected`
 - 本轮提交：why 题在 `followup_transition / followup_peaks` 之后新增“短时序证据复核”分支，先让 agent 总结动作后立刻结果、下一步手部动作和 `hand-free / access / next-use` 证据，再回到 `infer_action_intent`
 - 本轮提交：`inspect_visual_evidence` 的写回字段扩到 `timeline_summary / immediate_result / next_action_hint / direct_purpose_hint / ambiguity_note`，并在 `needs_more_evidence=true` 时显式保留 `need_disambiguating_evidence`
 - 本轮提交：why 题 `inspect_visual_evidence -> infer_action_intent` 的回跳逻辑已改为识别 timeline review；若复核仍判定证据不足，则继续 `followup_ext2` 或转入 `future_use / pairwise` 专用裁决，而不是重新退回只看 `segment` 的早收口路径
