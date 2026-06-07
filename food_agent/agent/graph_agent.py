@@ -810,7 +810,7 @@ class GraphAgent:
         evidence_items = raw_result.get("candidate_evidence")
         if not isinstance(evidence_items, list):
             return None
-        ranked: list[tuple[float, int, str]] = []
+        candidate_rows: list[dict[str, Any]] = []
         for item in evidence_items:
             if not isinstance(item, dict):
                 continue
@@ -823,15 +823,47 @@ class GraphAgent:
             choice = str(state.choices[index])
             adjusted_score = self._score_action_intent_candidate_evidence(
                 base_score=score,
+                question=str(getattr(state, "question", "") or ""),
                 choice=choice,
                 support=support,
                 contradiction=contradiction,
+                state=state,
             )
-            ranked.append((adjusted_score, index, choice))
+            candidate_rows.append(
+                {
+                    "adjusted_score": adjusted_score,
+                    "index": index,
+                    "choice": choice,
+                    "support": support,
+                    "contradiction": contradiction,
+                }
+            )
+        ranked = [(float(row["adjusted_score"]), int(row["index"]), str(row["choice"])) for row in candidate_rows]
         if not ranked:
             return None
         ranked.sort(key=lambda row: (-row[0], row[1]))
         best_score, best_index, best_choice = ranked[0]
+        prior_override = self._resolve_prior_direct_action_object_intent(
+            state=state,
+            unresolved_best_index=best_index,
+            unresolved_best_score=best_score,
+        )
+        if prior_override is not None:
+            state.add_memory(
+                f"action_intent_prior_direct_override_best_index={prior_override[0]} score={best_score:.2f}"
+            )
+            return prior_override
+        causal_override = self._override_downstream_followup_with_direct_enablement_candidate(
+            state=state,
+            candidate_rows=candidate_rows,
+            unresolved_best_index=best_index,
+            unresolved_best_score=best_score,
+        )
+        if causal_override is not None:
+            state.add_memory(
+                f"action_intent_causal_override_best_index={causal_override[0]} score={best_score:.2f}"
+            )
+            return causal_override
         state.add_memory(f"action_intent_unresolved_rerank_best_index={best_index} score={best_score:.2f}")
         return best_index, best_choice, min(max(0.36 + max(best_score, 0.0) * 0.45, 0.36), 0.68)
 
@@ -839,13 +871,21 @@ class GraphAgent:
         self,
         *,
         base_score: float,
+        question: str,
         choice: str,
         support: str,
         contradiction: str,
+        state: AgentState,
     ) -> float:
+        question_lc = question.lower()
         support_lc = support.lower()
         contradiction_lc = contradiction.lower()
         choice_lc = choice.lower()
+        global_context = " ".join(
+            str(item)
+            for item in list(getattr(state, "evidence_bundle", []))[-24:] + list(getattr(state, "working_memory", []))[-24:]
+            if isinstance(item, str)
+        ).lower()
         adjusted = max(0.0, min(float(base_score), 1.0))
         if self._action_intent_text_has_negative_evidence(contradiction_lc):
             adjusted -= 0.18
@@ -861,11 +901,413 @@ class GraphAgent:
             adjusted -= 0.14
         if "dry" in choice_lc and "hand" in choice_lc and any(term in contradiction_lc for term in ("no visible hand", "no clear wet-hand", "没有看到双手", "没有先洗手")):
             adjusted -= 0.14
+        if self._action_intent_support_is_likely_downstream_to_move_action(
+            question=question_lc,
+            choice=choice_lc,
+            support=support_lc,
+        ):
+            adjusted -= 0.36
+        if self._action_intent_choice_is_direct_enablement(
+            choice=choice_lc,
+            support=support_lc,
+            global_context=global_context,
+        ):
+            adjusted += 0.34
+        if self._action_intent_choice_is_direct_tap_enablement(
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            global_context=global_context,
+        ):
+            adjusted += 0.18
+        if self._action_intent_choice_is_dual_object_rinse(
+            choice=choice_lc,
+            support=support_lc,
+            global_context=global_context,
+        ):
+            adjusted += 0.44
+        if any(
+            token in contradiction_lc
+            for token in (
+                "already in hand",
+                "downstream",
+                "later downstream",
+                "后续",
+                "下游",
+                "结果性后续",
+            )
+        ):
+            adjusted -= 0.18
+        if self._action_intent_choice_is_weak_drainage_rearrangement(
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+        ):
+            adjusted -= 0.22
         if self._action_intent_text_has_direct_positive_evidence(support_lc):
             adjusted += 0.1
         if self._action_intent_text_has_direct_positive_evidence(contradiction_lc):
             adjusted -= 0.08
         return min(adjusted, 1.0)
+
+    def _action_intent_support_is_likely_downstream_to_move_action(
+        self,
+        *,
+        question: str,
+        choice: str,
+        support: str,
+    ) -> bool:
+        if not any(token in question for token in ("move ", "transfer ", "shift ", "remove ", "clear ")):
+            return False
+        if any(token in choice for token in ("tap", "faucet", "drain", "drainage", "while holding", " in hand")):
+            return False
+        if not any(token in choice for token in ("pick up", "lift", "take", "scrub", "wash", "sink", "board", "sponge")):
+            return False
+        if not any(token in support for token in ("after", "then", "later", "subsequently", "随后", "之后", "接着", "转移", "移开后")):
+            return False
+        return any(
+            token in support
+            for token in (
+                "pick up",
+                "picked up",
+                "reach",
+                "reaches",
+                "伸向",
+                "拿起",
+                "举着",
+                "成为接下来的核心操作对象",
+                "main object",
+            )
+        )
+
+    def _action_intent_choice_is_direct_enablement(
+        self,
+        *,
+        choice: str,
+        support: str,
+        global_context: str,
+    ) -> bool:
+        if not any(token in choice for token in ("tap", "faucet", "drain", "drainage", "water")):
+            return False
+        signal_text = f"{support} {global_context}"
+        return any(token in signal_text for token in ("tap", "faucet", "water", "sink", "水龙头", "排水", "水槽"))
+
+    def _action_intent_choice_is_dual_object_rinse(
+        self,
+        *,
+        choice: str,
+        support: str,
+        global_context: str,
+    ) -> bool:
+        if not any(token in choice for token in ("rinse", "wash", "sponge")):
+            return False
+        if not any(token in choice for token in ("while holding", "in hand", "手中")):
+            return False
+        signal_text = f"{support} {global_context}"
+        has_dual_object = any(token in signal_text for token in ("one hand", "另一手", "左手", "右手", "holding", "拿着"))
+        has_sink_or_water = any(token in signal_text for token in ("sink", "water", "水槽", "水流", "冲洗", "rins"))
+        return has_dual_object and has_sink_or_water
+
+    def _action_intent_choice_is_weak_drainage_rearrangement(
+        self,
+        *,
+        choice: str,
+        support: str,
+        contradiction: str,
+    ) -> bool:
+        if not any(token in choice for token in ("drain", "drainage", "排水")):
+            return False
+        if not any(token in support for token in ("near the drain", "drain area", "排水口附近", "relocated near")):
+            return False
+        return any(
+            token in contradiction
+            for token in ("no direct drainage", "not shown", "没有直接排水", "缺少排水", "未显示排水")
+        )
+
+    def _action_intent_choice_is_direct_tap_enablement(
+        self,
+        *,
+        choice: str,
+        support: str,
+        contradiction: str,
+        global_context: str,
+    ) -> bool:
+        if not any(token in choice for token in ("tap", "faucet", "turn on the tap", "水龙头")):
+            return False
+        signal_text = f"{support} {global_context}"
+        has_tap_context = any(token in signal_text for token in ("tap", "faucet", "water", "sink", "水龙头", "水槽"))
+        contradiction_is_soft = any(
+            token in contradiction
+            for token in (
+                "not clearly shown",
+                "not explicit",
+                "not seen",
+                "no water flow",
+                "未清楚显示",
+                "不够清楚",
+                "没有水流",
+                "没有明确",
+            )
+        )
+        return has_tap_context and contradiction_is_soft
+
+    def _resolve_prior_direct_action_object_intent(
+        self,
+        *,
+        state: AgentState,
+        unresolved_best_index: int,
+        unresolved_best_score: float,
+    ) -> tuple[int, str, float] | None:
+        if unresolved_best_score >= 0.5:
+            return None
+        action_object = self._action_intent_question_object(str(getattr(state, "question", "") or ""))
+        if not action_object:
+            return None
+        unresolved_choice = str(state.choices[unresolved_best_index]).lower()
+        if self._choice_is_same_object_active_use(unresolved_choice, action_object):
+            return None
+        best_prior: tuple[int, str, float] | None = None
+        for entry in reversed(list(getattr(state, "tool_trace", []) or [])):
+            if not isinstance(entry, dict) or entry.get("tool") != "infer_action_intent":
+                continue
+            raw_result = entry.get("raw_result")
+            if not isinstance(raw_result, dict):
+                continue
+            index = self._coerce_choice_index(raw_result.get("best_index"), state.choices)
+            if index is None or index == unresolved_best_index:
+                continue
+            choice = str(state.choices[index]).lower()
+            if not self._choice_is_same_object_active_use(choice, action_object):
+                continue
+            confidence = self._coerce_confidence(raw_result.get("confidence"), default=0.0)
+            if confidence < 0.72:
+                continue
+            best_prior = (index, str(state.choices[index]), confidence)
+            break
+        return best_prior
+
+    def _override_downstream_followup_with_direct_enablement_candidate(
+        self,
+        *,
+        state: AgentState,
+        candidate_rows: list[dict[str, Any]],
+        unresolved_best_index: int,
+        unresolved_best_score: float,
+    ) -> tuple[int, str, float] | None:
+        question = str(getattr(state, "question", "") or "")
+        question_lc = question.lower()
+        if not any(token in question_lc for token in ("move ", "transfer ", "shift ", "remove ", "clear ")):
+            return None
+        best_row = next(
+            (
+                row
+                for row in candidate_rows
+                if int(row.get("index", -1)) == unresolved_best_index
+            ),
+            None,
+        )
+        if best_row is None:
+            return None
+        action_object = self._action_intent_question_object(question)
+        best_choice = str(best_row.get("choice") or "").lower()
+        best_support = str(best_row.get("support") or "").lower()
+        if not self._action_intent_choice_is_downstream_followup_use(
+            question=question_lc,
+            choice=best_choice,
+            support=best_support,
+            action_object=action_object,
+        ):
+            return None
+        direct_candidates: list[tuple[float, int, str]] = []
+        for row in candidate_rows:
+            index = int(row.get("index", -1))
+            if index == unresolved_best_index:
+                continue
+            choice = str(row.get("choice") or "").lower()
+            support = str(row.get("support") or "").lower()
+            contradiction = str(row.get("contradiction") or "").lower()
+            adjusted_score = float(row.get("adjusted_score") or 0.0)
+            if not self._action_intent_choice_is_direct_fixture_or_workspace_enablement(
+                choice=choice,
+                support=support,
+                contradiction=contradiction,
+            ):
+                continue
+            if adjusted_score < 0.14:
+                continue
+            direct_candidates.append((adjusted_score, index, str(state.choices[index])))
+        if not direct_candidates:
+            return None
+        direct_candidates.sort(key=lambda item: (-item[0], item[1]))
+        alt_score, alt_index, alt_choice = direct_candidates[0]
+        if unresolved_best_score > alt_score + 0.34 and unresolved_best_score >= 0.82:
+            return None
+        confidence = min(max(0.48 + max(alt_score, 0.0) * 0.38, 0.48), 0.72)
+        return alt_index, alt_choice, confidence
+
+    def _action_intent_question_object(self, question: str) -> str:
+        match = re.search(r"<([^>]+)>", str(question or "").lower())
+        if not match:
+            return ""
+        text = match.group(1)
+        text = re.sub(
+            r"\b(move|transfer|pick up|pickup|take|lift|shift|remove|open|close|turn|place|put|shake|tip)\b",
+            " ",
+            text,
+        )
+        text = re.sub(r"\s+", " ", text).strip()
+        return text
+
+    def _choice_is_same_object_active_use(self, choice: str, action_object: str) -> bool:
+        if not action_object:
+            return False
+        object_tokens = [token for token in re.split(r"[^a-z0-9]+", action_object) if token]
+        if object_tokens and not all(token in choice for token in object_tokens):
+            return False
+        return any(
+            token in choice
+            for token in (
+                "rinse",
+                "wash",
+                "clean",
+                "wipe",
+                "dry",
+                "fill",
+                "hold",
+                "in hand",
+                "while holding",
+                "冲洗",
+                "清洗",
+                "擦",
+                "拿着",
+            )
+        )
+
+    def _action_intent_choice_is_downstream_followup_use(
+        self,
+        *,
+        question: str,
+        choice: str,
+        support: str,
+        action_object: str,
+    ) -> bool:
+        if not any(token in question for token in ("move ", "transfer ", "shift ", "remove ", "clear ")):
+            return False
+        if self._choice_is_same_object_active_use(choice, action_object):
+            return False
+        if not any(
+            token in support
+            for token in (
+                "after",
+                "then",
+                "later",
+                "subsequently",
+                "followed by",
+                "后续",
+                "随后",
+                "之后",
+                "接着",
+                "移开后",
+            )
+        ):
+            return False
+        if not any(
+            token in support
+            for token in (
+                "pick up",
+                "picked up",
+                "reach",
+                "reaches",
+                "grab",
+                "grabbed",
+                "scrub",
+                "wash",
+                "clean",
+                "rinse",
+                "伸向",
+                "拿起",
+                "去拿",
+                "去洗",
+                "去清洗",
+                "刷洗",
+                "冲洗",
+            )
+        ):
+            return False
+        return not any(
+            token in choice
+            for token in ("tap", "faucet", "drain", "drainage", "water", "sink", "space", "room")
+        )
+
+    def _action_intent_choice_is_direct_fixture_or_workspace_enablement(
+        self,
+        *,
+        choice: str,
+        support: str,
+        contradiction: str,
+    ) -> bool:
+        direct_choice = any(
+            token in choice
+            for token in (
+                "tap",
+                "faucet",
+                "turn on",
+                "drain",
+                "drainage",
+                "sink",
+                "water",
+                "access",
+                "reach",
+                "make space",
+                "create space",
+                "clear space",
+                "room",
+                "水龙头",
+                "排水",
+                "水槽",
+                "腾空间",
+                "腾出空间",
+            )
+        )
+        if not direct_choice:
+            return False
+        support_signal = any(
+            token in f"{support} {contradiction}"
+            for token in (
+                "tap",
+                "faucet",
+                "sink",
+                "water",
+                "drain",
+                "access",
+                "closer",
+                "clear",
+                "space",
+                "blocked",
+                "龙头",
+                "水槽",
+                "水流",
+                "排水",
+                "接近",
+                "腾出",
+                "挡住",
+            )
+        )
+        soft_missing = any(
+            token in contradiction
+            for token in (
+                "not clearly shown",
+                "not explicit",
+                "not seen",
+                "no water flow",
+                "未清楚显示",
+                "不够清楚",
+                "没有水流",
+                "没有明确",
+                "后续没有看到明确",
+            )
+        )
+        return support_signal and (soft_missing or "direct" in support or "直接" in support)
 
     def _action_intent_text_has_negative_evidence(self, text: str) -> bool:
         return any(

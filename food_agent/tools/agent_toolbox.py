@@ -3035,6 +3035,8 @@ class AgentToolbox:
             "\n5. 不要因为动作瞬间像某个候选就直接选；最后答案必须由动作后的实际结果支持。"
             "\n6. 如果多个候选都可能，选择后续证据更直接、更能排除其它候选的一个，并说明被排除候选缺少什么证据。"
             "\n7. 如果图片还没覆盖到真正的后续使用/放回/关闭前结果，不要强行高置信作答；标记 need_more_evidence=true，并说明还需要看什么。"
+            "\n8. 如果题目动作本身是 move/transfer/remove/shift 某物，必须区分“当前动作直接腾出的访问/操作条件”和“之后才发生的下游取物/使用”。"
+            "\n9. 如果只是先把某物移开，随后才拿起另一个物体，不能自动把那个更晚的取物动作当成当前动作的直接目的；只有当证据明确显示被移动物体本身就是在给那个目标让路，且不存在更直接的 tap/sink/drain/workspace access 解释时，才选择下游取物用途。"
             f"\n上下文线索: {scoped_notes}"
             '\n输出 JSON，字段固定为 {"candidate_evidence":[{"index":0,"support":"","contradiction":"","score":0.0}],"best_index":0,"answer":"","confidence":0.0,"decisive_observation":"","reason":"","need_more_evidence":false,"needed_observation":""}。'
             f"\n问题: {question}"
