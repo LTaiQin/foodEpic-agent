@@ -6841,6 +6841,7 @@ class GraphAgentPlanner:
             "action_intent_resolution_withheld_for_nonexclusive_concrete_late_anchor=1",
             "action_intent_resolution_withheld_for_timeline_review_bias_gap=1",
             "action_intent_resolution_withheld_for_workspace_or_final_placement_claim=1",
+            "action_intent_resolution_withheld_for_generic_hand_free_enablement=1",
         )
         for item in reversed(recent):
             if not isinstance(item, str):
@@ -6849,6 +6850,19 @@ class GraphAgentPlanner:
                 if item.startswith(prefix):
                     return prefix
         return ""
+
+    def _action_intent_recent_generic_hand_free_finalize_withheld_hint(self, state: AgentState) -> tuple[str, str] | None:
+        recent = list(getattr(state, "working_memory", []))[-16:]
+        prefix = "action_intent_resolution_withheld_for_generic_hand_free_enablement=1"
+        for item in reversed(recent):
+            if not isinstance(item, str) or not item.startswith(prefix):
+                continue
+            marker_match = re.search(r"\btarget=(.+?)\s+kind=(object|fixture)\b", item)
+            target = str(marker_match.group(1) or "").strip() if marker_match else ""
+            kind = str(marker_match.group(2) or "").strip() if marker_match else ""
+            if target and kind:
+                return target, kind
+        return None
 
     def _action_intent_recent_unresolved_rerank_withheld_reason(self, state: AgentState) -> str:
         recent = list(getattr(state, "working_memory", []))[-16:]
@@ -7110,6 +7124,59 @@ class GraphAgentPlanner:
                 "time_s": anchor_time,
                 "object_name": self._action_intent_question_object_hint(state),
                 "limit": 16,
+            },
+        )
+
+    def _build_action_intent_finalize_withheld_generic_hand_free_revisit_decision(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        thought: str,
+    ) -> PlannerDecision | None:
+        hint = self._action_intent_recent_generic_hand_free_finalize_withheld_hint(state)
+        if hint is None:
+            return None
+        downstream_target, target_kind = hint
+        nodes = self._latest_action_intent_long_horizon_nodes(state, object_hint=downstream_target)
+        if not nodes:
+            return PlannerDecision(
+                thought=f"{thought} 先定位 finalizer 指出的真实下游目标 `{downstream_target}` 在更晚时刻的轨迹。",
+                tool="query_object",
+                args={"query": downstream_target, "limit": 24},
+            )
+        anchor_time = self._latest_action_intent_target_spatial_anchor_time(state)
+        latest_followup_end = self._latest_action_intent_followup_end_time(state)
+        after_time: float | None = None
+        if anchor_time is not None and latest_followup_end is not None:
+            after_time = max(anchor_time, latest_followup_end)
+        elif latest_followup_end is not None:
+            after_time = latest_followup_end
+        else:
+            after_time = anchor_time
+        min_start_time = None if after_time is None else float(after_time) + 0.15
+        selected = self._action_intent_select_long_horizon_node(
+            state=state,
+            hints=hints,
+            nodes=nodes,
+            min_start_time=min_start_time,
+            object_hint=downstream_target,
+        )
+        if selected is None:
+            return PlannerDecision(
+                thought=f"{thought} 继续重新检索 finalizer 指出的真实下游目标 `{downstream_target}` 的更晚轨迹。",
+                tool="query_object",
+                args={"query": downstream_target, "limit": 24},
+            )
+        _node, start_time, end_time = selected
+        query_time = start_time if abs(end_time - start_time) < 0.25 else (start_time + min(end_time, start_time + 1.2)) / 2
+        return PlannerDecision(
+            thought=thought,
+            tool="query_spatial_context",
+            args={
+                "time_s": query_time,
+                "object_name": downstream_target,
+                "limit": 16 if target_kind == "fixture" else 18,
             },
         )
 
@@ -8852,6 +8919,13 @@ class GraphAgentPlanner:
                 )
                 if precondition is not None:
                     return precondition
+            finalize_hand_free_revisit = self._build_action_intent_finalize_withheld_generic_hand_free_revisit_decision(
+                state=state,
+                hints=hints,
+                thought="why 题专用裁决刚被 finalizer 拦下，因为当前只停留在 generic hand-free 中间态；直接改追 finalizer 指出的真实下游对象，而不是立即 finish。",
+            )
+            if finalize_hand_free_revisit is not None:
+                return finalize_hand_free_revisit
             unresolved_rerank_downstream_fixture_revisit = self._build_action_intent_unresolved_rerank_downstream_fixture_revisit_decision(
                 state=state,
                 hints=hints,
@@ -8971,6 +9045,13 @@ class GraphAgentPlanner:
                 )
                 if precondition is not None:
                     return precondition
+            finalize_hand_free_revisit = self._build_action_intent_finalize_withheld_generic_hand_free_revisit_decision(
+                state=state,
+                hints=hints,
+                thought="why 题专用裁决刚被 finalizer 拦下，因为当前仍把 generic hand-free 当结论；优先转去追真正的后续对象/用途，而不是直接 finish。",
+            )
+            if finalize_hand_free_revisit is not None:
+                return finalize_hand_free_revisit
             unresolved_rerank_downstream_fixture_revisit = self._build_action_intent_unresolved_rerank_downstream_fixture_revisit_decision(
                 state=state,
                 hints=hints,

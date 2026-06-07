@@ -890,7 +890,15 @@ class GraphAgent:
             elif self._action_intent_resolution_should_withhold_weak_relocation_or_residue_claim(raw_result=raw_result, state=state):
                 state.add_memory("action_intent_resolution_withheld_for_missing_direct_outcome_evidence=1")
                 continue
-            elif self._action_intent_resolution_should_withhold_broad_generic_claim_without_direct_evidence(
+            else:
+                generic_hand_free_marker = self._action_intent_resolution_generic_hand_free_overclaim_marker(
+                    raw_result=raw_result,
+                    state=state,
+                )
+                if generic_hand_free_marker:
+                    state.add_memory(generic_hand_free_marker)
+                    continue
+            if self._action_intent_resolution_should_withhold_broad_generic_claim_without_direct_evidence(
                 raw_result=raw_result,
                 state=state,
             ):
@@ -928,6 +936,185 @@ class GraphAgent:
                 answer = str(state.choices[index])
             return index, answer, confidence
         return None
+
+    def _action_intent_resolution_generic_hand_free_overclaim_marker(
+        self,
+        *,
+        raw_result: dict[str, Any],
+        state: AgentState,
+    ) -> str:
+        index = self._coerce_choice_index(raw_result.get("best_index"), state.choices)
+        if index is None:
+            return ""
+        best_choice = str(state.choices[index]).strip().lower()
+        generic_hand_free_patterns = (
+            "so left hand is free",
+            "so right hand is free",
+            "free up the right hand",
+            "free up the left hand",
+            "free the right hand",
+            "free the left hand",
+            "to free up the right hand",
+            "to free up the left hand",
+            "to free one hand",
+            "free one hand",
+            "腾出右手",
+            "腾出左手",
+            "腾出一只手",
+        )
+        if not any(pattern in best_choice for pattern in generic_hand_free_patterns):
+            return ""
+        evidence_items = raw_result.get("candidate_evidence")
+        if not isinstance(evidence_items, list):
+            return ""
+        action_object = self._action_intent_question_object(str(getattr(state, "question", "") or ""))
+        if not action_object:
+            return ""
+        best_support = ""
+        best_contradiction = ""
+        candidate_rows: list[tuple[float, int, str, str, str]] = []
+        for item in evidence_items:
+            if not isinstance(item, dict):
+                continue
+            candidate_index = self._coerce_choice_index(item.get("index"), state.choices)
+            if candidate_index is None:
+                continue
+            try:
+                score = float(item.get("score") or 0.0)
+            except Exception:  # noqa: BLE001
+                score = 0.0
+            support = str(item.get("support") or "")
+            contradiction = str(item.get("contradiction") or "")
+            choice = str(state.choices[candidate_index])
+            candidate_rows.append((score, candidate_index, choice, support, contradiction))
+            if candidate_index == index:
+                best_support = support.lower()
+                best_contradiction = contradiction.lower()
+        direct_specific_patterns = (
+            "more direct visible",
+            "direct visible goal",
+            "direct purpose visible",
+            "intermediate step",
+            "setup",
+            "not the more direct visible",
+            "clearer evidence is",
+            "下一步",
+            "中间步骤",
+            "更直接",
+            "真正目的",
+        )
+        if best_contradiction and not any(pattern in best_contradiction for pattern in direct_specific_patterns):
+            if not best_support or "free" not in best_support:
+                return ""
+        best_target = ""
+        best_kind = ""
+        for score, candidate_index, choice, support, contradiction in sorted(candidate_rows, key=lambda row: (-row[0], row[1])):
+            if candidate_index == index:
+                continue
+            choice_lc = choice.lower()
+            support_lc = support.lower()
+            contradiction_lc = contradiction.lower()
+            if score < 0.18:
+                continue
+            if self._choice_is_same_object_active_use(choice_lc, action_object):
+                best_target = action_object
+                best_kind = "object"
+                break
+            if self._action_intent_choice_is_direct_same_object_cleaning(
+                choice=choice_lc,
+                support=support_lc,
+                contradiction=contradiction_lc,
+                action_object=action_object,
+                global_context="",
+            ):
+                best_target = action_object
+                best_kind = "object"
+                break
+            if self._action_intent_choice_is_direct_same_object_role_use(
+                choice=choice_lc,
+                support=support_lc,
+                contradiction=contradiction_lc,
+                action_object=action_object,
+                global_context="",
+            ):
+                best_target = action_object
+                best_kind = "object"
+                break
+            if self._action_intent_choice_is_direct_enablement(
+                choice=choice_lc,
+                support=support_lc,
+                global_context="",
+            ) or self._action_intent_choice_is_direct_tap_enablement(
+                choice=choice_lc,
+                support=support_lc,
+                contradiction=contradiction_lc,
+                global_context="",
+            ):
+                for token in ("tap", "faucet", "scale", "sink", "fridge", "drawer", "cupboard", "door"):
+                    if token in choice_lc:
+                        best_target = token
+                        best_kind = "fixture"
+                        break
+                if best_target:
+                    break
+            if self._action_intent_choice_is_cleaning_tool_specific_target_use(
+                choice=choice_lc,
+                support=support_lc,
+                contradiction=contradiction_lc,
+                action_object=action_object,
+                global_context="",
+            ):
+                for token in (
+                    "sponge",
+                    "brush",
+                    "knife",
+                    "spoon",
+                    "fork",
+                    "cup",
+                    "bowl",
+                    "pot",
+                    "pan",
+                    "board",
+                    "tray",
+                    "counter",
+                    "surface",
+                    "peeler",
+                    "blender cup",
+                ):
+                    if token in choice_lc:
+                        best_target = token
+                        best_kind = "object"
+                        break
+                if best_target:
+                    break
+            for token in (
+                "sponge",
+                "brush",
+                "knife",
+                "fork",
+                "spoon",
+                "bottle",
+                "cup",
+                "bowl",
+                "pot",
+                "pan",
+                "board",
+                "tray",
+                "jar",
+                "blender cup",
+            ):
+                if token in choice_lc and token not in action_object:
+                    best_target = token
+                    best_kind = "object"
+                    break
+            if best_target:
+                break
+        if not best_target or not best_kind:
+            return ""
+        return (
+            "action_intent_resolution_withheld_for_generic_hand_free_enablement=1 "
+            f"target={best_target} kind={best_kind}"
+        )
 
     def _action_intent_resolution_should_withhold_state_change_overclaim(
         self,
