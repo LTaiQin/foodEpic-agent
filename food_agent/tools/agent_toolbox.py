@@ -6,7 +6,7 @@ import json
 import math
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import pandas as pd
 
@@ -3152,6 +3152,17 @@ class AgentToolbox:
             for key in ("decisive_observation", "reason")
         ).lower()
         action_object = self._extract_action_object_from_question(question)
+        score_by_index = {
+            index: score
+            for index, score in self._valid_future_use_scores(result.get("candidate_evidence"), valid_indices)
+        }
+
+        def top_matching_index(predicate: Callable[[str], bool]) -> int | None:
+            matches = [index for index in valid_indices if predicate(str(choices[index]))]
+            if not matches:
+                return None
+            return max(matches, key=lambda index: (score_by_index.get(index, 0.0), -index))
+
         cleaning_target_index = next(
             (
                 index
@@ -3258,6 +3269,86 @@ class AgentToolbox:
                 f"{result.get('reason') or ''} causal_hierarchy_adjustment: "
                 "the evidence shows a brief near-hob inspection/check without tilt, pouring, plating, or transfer away from the cooking area, "
                 "so the direct purpose is checking the contents/doneness rather than emptying, pouring out, or serving."
+            ).strip()
+            return adjusted
+        exact_measurement_index = top_matching_index(self._choice_is_exact_measurement_future_use_purpose)
+        generic_measurement_meta_index = top_matching_index(self._choice_is_generic_measurement_meta_future_use_purpose)
+        exact_same_object_open_index = next(
+            (
+                index
+                for index in valid_indices
+                if self._choice_is_exact_same_object_open_future_use_purpose(
+                    str(choices[index]),
+                    action_object=action_object,
+                )
+            ),
+            None,
+        )
+        if (
+            exact_measurement_index is not None
+            and best_index != exact_measurement_index
+            and best_index in (
+                {
+                    index
+                    for index in (
+                        generic_measurement_meta_index,
+                        *disposal_or_serving_indices,
+                    )
+                    if index is not None
+                }
+                | {
+                    index
+                    for index in valid_indices
+                    if choice_categories(str(choices[index]).lower())
+                    & {"measure_weigh", "serve_consume", "final_place_return", "clean_dry"}
+                    and index != exact_measurement_index
+                }
+            )
+            and self._explanation_uses_direct_measurement_chain(explanation, action_object=action_object)
+        ):
+            adjusted = dict(result)
+            adjusted["best_index"] = exact_measurement_index
+            adjusted["answer"] = str(choices[exact_measurement_index])
+            adjusted["confidence"] = max(0.8, min(0.9, float(result.get("confidence") or 0.0) + 0.04))
+            adjusted["causal_hierarchy_adjusted"] = True
+            adjusted["reason"] = (
+                f"{result.get('reason') or ''} causal_hierarchy_adjustment: "
+                "the evidence shows the moved object is used in the immediate next step for weighing/measurement, "
+                "so an exact measurement role or measurement-base interpretation is stronger than a broad storage, serving, or generic measurement-meta reading."
+            ).strip()
+            return adjusted
+        if (
+            exact_same_object_open_index is not None
+            and best_index != exact_same_object_open_index
+            and best_index in (
+                {
+                    index
+                    for index in valid_indices
+                    if "measure_weigh" in choice_categories(str(choices[index]).lower())
+                }
+                | {
+                    index
+                    for index in valid_indices
+                    if "hand_free_enablement" in choice_categories(str(choices[index]).lower())
+                }
+                | {
+                    index
+                    for index in valid_indices
+                    if "open_close" in choice_categories(str(choices[index]).lower())
+                    and index != exact_same_object_open_index
+                }
+            )
+            and self._explanation_uses_same_object_open_chain(explanation, action_object=action_object)
+        ):
+            adjusted = dict(result)
+            adjusted["best_index"] = exact_same_object_open_index
+            adjusted["answer"] = str(choices[exact_same_object_open_index])
+            adjusted["confidence"] = max(0.8, min(0.9, float(result.get("confidence") or 0.0) + 0.04))
+            adjusted["causal_hierarchy_adjusted"] = True
+            adjusted["reason"] = (
+                f"{result.get('reason') or ''} causal_hierarchy_adjustment: "
+                "the evidence shows the same object stays in hand while the other hand is freed to open/uncap that object immediately, "
+                "so this direct same-object manipulation is stronger than a later downstream scale/tap use or a generic hand-free reading."
             ).strip()
             return adjusted
         hygiene_index = next(
@@ -4787,6 +4878,109 @@ class AgentToolbox:
             )
         )
 
+    def _choice_is_exact_measurement_future_use_purpose(self, choice: str) -> bool:
+        text = str(choice or "").lower()
+        categories = choice_categories(text)
+        if "measure_weigh" not in categories:
+            return False
+        if any(
+            token in text
+            for token in (
+                "adjust the measurements",
+                "adjust measurements",
+                "adjust the scale",
+                "record measurements",
+                "record the measurements",
+                "read the measurements",
+                "check the reading",
+                "measurement reading",
+                "调整刻度",
+                "记录读数",
+                "看读数",
+            )
+        ):
+            return False
+        return any(
+            token in text
+            for token in (
+                "measure the",
+                "weigh the",
+                "weigh more ingredients",
+                "measure more ingredients",
+                "base to weigh",
+                "base for weighing",
+                "used as a base",
+                "as a base to weigh",
+                "as a base for weighing",
+                "on the scale",
+                "tared",
+                "tare",
+                "measure ingredients",
+                "weigh ingredients",
+                "称量",
+                "称重",
+                "作为称量基底",
+            )
+        )
+
+    def _choice_is_generic_measurement_meta_future_use_purpose(self, choice: str) -> bool:
+        text = str(choice or "").lower()
+        return any(
+            token in text
+            for token in (
+                "adjust the measurements",
+                "adjust measurements",
+                "adjust the scale",
+                "record measurements",
+                "record the measurements",
+                "read the measurements",
+                "check the reading",
+                "measurement reading",
+                "调整刻度",
+                "记录读数",
+                "看读数",
+            )
+        )
+
+    def _choice_is_exact_same_object_open_future_use_purpose(self, choice: str, *, action_object: str) -> bool:
+        text = str(choice or "").lower()
+        categories = choice_categories(text)
+        if "open_close" not in categories:
+            return False
+        if not any(
+            token in text
+            for token in (
+                "open",
+                "uncap",
+                "cap",
+                "lid",
+                "unscrew",
+                "打开",
+                "拧开",
+                "盖上",
+            )
+        ):
+            return False
+        if action_object:
+            object_tokens = [token for token in re.split(r"[^a-z0-9]+", action_object) if token and len(token) >= 3]
+            if object_tokens and any(token in text for token in object_tokens):
+                return True
+        return any(
+            token in text
+            for token in (
+                "open the jar",
+                "open the bottle",
+                "open the container",
+                "open the cup",
+                "uncap the",
+                "take the lid off",
+                "remove the lid",
+                "拧开瓶盖",
+                "打开罐子",
+                "打开杯子",
+            )
+        )
+
     def _choice_is_hygiene_surface_protection_future_use_purpose(self, choice: str) -> bool:
         text = str(choice or "").lower()
         return any(
@@ -5308,6 +5502,138 @@ class AgentToolbox:
             )
         )
         return (has_cooking_context or has_container_check_context) and has_brief_check_signal and has_nontransfer_signal
+
+    def _explanation_uses_direct_measurement_chain(self, explanation: str, *, action_object: str) -> bool:
+        text = str(explanation or "").lower()
+        if action_object and not any(
+            token in text
+            for token in (
+                action_object,
+                "same object",
+                "main object",
+                "remains the moved object",
+                "remains held",
+                "kept in one hand",
+                "the bowl",
+                "the scale",
+                "the cup",
+                "the pot",
+                "the plate",
+                "当前这个物体",
+                "同一个物体",
+            )
+        ):
+            return False
+        has_measurement_signal = any(
+            token in text
+            for token in (
+                "scale",
+                "weigh",
+                "weighing",
+                "measure",
+                "measurement",
+                "ingredients",
+                "grams",
+                "tared",
+                "tare",
+                "秤",
+                "称量",
+                "称重",
+            )
+        )
+        has_direct_role_signal = any(
+            token in text
+            for token in (
+                "immediate next step",
+                "immediate weighing use",
+                "used next for weighing",
+                "used for measuring",
+                "picked up to be used for measuring",
+                "placed onto the scale",
+                "used as a base",
+                "base for weighing",
+                "main object",
+                "remains the moved object",
+                "direct next functional use",
+                "measurement setup",
+                "positioned for immediate weighing use",
+                "用来称量",
+                "放到秤上",
+                "作为称量基底",
+                "立即用于称量",
+            )
+        )
+        has_downstream_only_warning = any(
+            token in text
+            for token in (
+                "later downstream",
+                "later the scale is used",
+                "later weighing step",
+                "后续才称量",
+                "稍后才称量",
+            )
+        )
+        return has_measurement_signal and has_direct_role_signal and not has_downstream_only_warning
+
+    def _explanation_uses_same_object_open_chain(self, explanation: str, *, action_object: str) -> bool:
+        text = str(explanation or "").lower()
+        if action_object and not any(
+            token in text
+            for token in (
+                action_object,
+                "same object",
+                "main object",
+                "remains held",
+                "kept in one hand",
+                "the cup",
+                "the jar",
+                "the bottle",
+                "the container",
+                "当前这个物体",
+                "同一个物体",
+            )
+        ):
+            return False
+        has_open_signal = any(
+            token in text
+            for token in (
+                "open",
+                "opened",
+                "uncap",
+                "lid",
+                "cap",
+                "unscrew",
+                "打开",
+                "拧开",
+                "盖子",
+            )
+        )
+        has_hand_role_signal = any(
+            token in text
+            for token in (
+                "other hand is free",
+                "free to uncap",
+                "shifted into one hand",
+                "holding in one hand",
+                "one hand",
+                "other hand",
+                "keeps holding",
+                "remains held",
+                "while holding",
+                "一只手",
+                "另一只手",
+                "拿着",
+            )
+        )
+        has_later_downstream_open_denial = any(
+            token in text
+            for token in (
+                "later downstream open",
+                "much later opened",
+                "后续很久才打开",
+            )
+        )
+        return has_open_signal and has_hand_role_signal and not has_later_downstream_open_denial
 
     def _explanation_uses_exact_final_placement_chain(self, explanation: str) -> bool:
         text = str(explanation or "").lower()
