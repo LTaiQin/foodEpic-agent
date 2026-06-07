@@ -920,6 +920,14 @@ class GraphAgent:
             global_context=global_context,
         ):
             adjusted -= 0.2
+        if self._action_intent_choice_is_premature_drying_before_cleanup(
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            action_object=action_object,
+            global_context=global_context,
+        ):
+            adjusted -= 0.24
         if self._action_intent_choice_is_generic_space_side_effect(
             choice=choice_lc,
             support=support_lc,
@@ -963,6 +971,24 @@ class GraphAgent:
             global_context=global_context,
         ):
             adjusted += 0.34
+        if self._action_intent_choice_is_measurement_base_placement(
+            question=question_lc,
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            action_object=action_object,
+            global_context=global_context,
+        ):
+            adjusted += 0.34
+        if self._action_intent_choice_is_cleaning_placement_goal(
+            question=question_lc,
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            action_object=action_object,
+            global_context=global_context,
+        ):
+            adjusted += 0.3
         if self._action_intent_choice_is_direct_same_object_inspection_or_alignment(
             choice=choice_lc,
             support=support_lc,
@@ -1685,6 +1711,172 @@ class GraphAgent:
                 "用来搅拌",
                 "一只手拿着",
                 "另一只手",
+            )
+        )
+
+    def _action_intent_choice_is_measurement_base_placement(
+        self,
+        *,
+        question: str,
+        choice: str,
+        support: str,
+        contradiction: str,
+        action_object: str,
+        global_context: str,
+    ) -> bool:
+        if not any(token in question for token in ("place ", "put ", "set ")):
+            return False
+        if not any(
+            token in choice
+            for token in (
+                "base to weigh",
+                "base for weighing",
+                "weigh more ingredients",
+                "measure",
+                "tared",
+                "tare",
+                "base to place the ingredients",
+                "base for weighing",
+                "称量基底",
+                "称量更多食材",
+                "称重",
+            )
+        ):
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        if not self._signal_mentions_action_object(signal_text, action_object):
+            return False
+        if not any(
+            token in signal_text
+            for token in (
+                "scale",
+                "weigh",
+                "weighing",
+                "tared",
+                "tare",
+                "base",
+                "placed onto the scale",
+                "used as a base",
+                "used next for weighing",
+                "immediate weighing use",
+                "kitchen scale",
+                "称",
+                "秤",
+                "作为称量基底",
+                "称重",
+            )
+        ):
+            return False
+        return not any(
+            token in contradiction
+            for token in (
+                "not being left to dry",
+                "not storage",
+                "not stored",
+                "not for storage",
+                "不是收纳",
+                "不是晾干",
+            )
+        ) or any(
+            token in signal_text
+            for token in (
+                "not being left to dry",
+                "positioned for immediate weighing use",
+                "used next with the kitchen scale",
+                "as a base for weighing more ingredients",
+                "immediate weighing use",
+                "不是晾干",
+                "立即用于称量",
+            )
+        )
+
+    def _action_intent_choice_is_cleaning_placement_goal(
+        self,
+        *,
+        question: str,
+        choice: str,
+        support: str,
+        contradiction: str,
+        action_object: str,
+        global_context: str,
+    ) -> bool:
+        if not any(token in question for token in ("place ", "put ", "set ", "transfer ")):
+            return False
+        if not any(
+            token in choice
+            for token in (
+                "to clean",
+                "clean off soap",
+                "clean with water",
+                "wash",
+                "rinse",
+                "soak",
+                "be washed",
+                "clean next",
+                "清洗",
+                "冲洗",
+                "浸泡",
+            )
+        ):
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        if not self._signal_mentions_action_object(signal_text, action_object):
+            return False
+        if not any(
+            token in signal_text
+            for token in (
+                "sink",
+                "wash area",
+                "tap",
+                "soap",
+                "soap residue",
+                "cleaned next",
+                "washed next",
+                "placed into the sink",
+                "placed in the sink",
+                "soak",
+                "washing the plate",
+                "washing the bowl",
+                "washing the knife",
+                "sink placement",
+                "水槽",
+                "水龙头",
+                "肥皂",
+                "放进水槽",
+                "接下来清洗",
+            )
+        ):
+            return False
+        if any(
+            token in signal_text
+            for token in (
+                "to dry",
+                "dry after washing",
+                "water droplets fall away",
+                "drain and dry",
+                "stored",
+                "store",
+                "晾干",
+                "收纳",
+            )
+        ):
+            return False
+        return any(
+            token in signal_text
+            for token in (
+                "to be cleaned next",
+                "for washing the",
+                "immediate sink placement is for washing",
+                "clean off the soap",
+                "soap residue",
+                "washed next",
+                "sink placement",
+                "placed into the sink",
+                "to soak",
+                "cleaning placement",
+                "接下来要洗",
+                "为了清洗",
+                "洗掉肥皂",
             )
         )
 
@@ -2833,6 +3025,68 @@ class GraphAgent:
             )
         )
         return (not has_positive_wet_context) or contradiction_denies_wet_context
+
+    def _action_intent_choice_is_premature_drying_before_cleanup(
+        self,
+        *,
+        choice: str,
+        support: str,
+        contradiction: str,
+        action_object: str,
+        global_context: str,
+    ) -> bool:
+        del action_object
+        if not any(
+            token in choice
+            for token in (
+                "to dry",
+                "allow",
+                "air dry",
+                "dry after washing",
+                "晾干",
+                "风干",
+            )
+        ):
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        has_cleanup_first_context = any(
+            token in signal_text
+            for token in (
+                "soap residue",
+                "remaining soap",
+                "soap suds",
+                "still has soap",
+                "wash it clean first",
+                "washing it clean first",
+                "remove soap",
+                "removing soap",
+                "clean off the soap",
+                "rinse it clean first",
+                "还有肥皂",
+                "肥皂残留",
+                "先冲洗干净",
+                "先洗净",
+            )
+        )
+        if not has_cleanup_first_context:
+            return False
+        return any(
+            token in signal_text
+            for token in (
+                "not for drying",
+                "not for dry",
+                "drying would be a later consequence",
+                "dry later",
+                "later consequence",
+                "current direct purpose is removing soap",
+                "current direct purpose is washing",
+                "first, not for drying",
+                "不是为了晾干",
+                "晾干是后续结果",
+                "当前直接目的是去除肥皂",
+                "当前直接目的是清洗",
+            )
+        )
 
     def _action_intent_choice_is_glove_removal_enablement(
         self,
