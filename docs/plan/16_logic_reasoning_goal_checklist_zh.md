@@ -29,8 +29,8 @@
 ### 16.2.2 当前稳定基线
 
 - 专项回归命令：`pytest -q tests/test_graph_agent.py -k 'action_intent'`
-- 2026-06-07 当前结果：`218 passed, 344 deselected`
-- 相比本轮进入专项时的起点 `107 passed, 300 deselected`，当前阶段性增量为 `+111 passed`
+- 2026-06-07 当前结果：`220 passed, 344 deselected`
+- 相比本轮进入专项时的起点 `107 passed, 300 deselected`，当前阶段性增量为 `+113 passed`
 - 当前执行策略：why 逻辑不再追求“接近完美覆盖”，而是维持“足够可用、回归稳定、无明显结构性退化”的维护态；后续优先级切换到完整 agent 功能闭环与小样本真实验证。
 
 这说明 why 题已经不再是“直接把问题丢给模型猜答案”，而是已经存在完整骨架：
@@ -212,7 +212,14 @@
 - 本轮新增并通过 `2` 条定向测试，覆盖：
   - `future-use` 缺口下最终送图会优先保留 late followup/ext 证据；
   - `reveal/access` 缺口下最终送图会优先保留 transition/peak 证据
-- 本轮专项总回归更新为 `218 passed, 344 deselected`
+- 本轮提交：why 题的 `open_question / blocked finish / state-driven / low-confidence` 恢复路径继续统一到 specialized recovery 与新关键帧选择器：
+  - `open_question` 恢复不再只偏向 `state_change` 题，`future_use / pairwise / pending_resolution` 型 why close-call 也会优先回到专用裁决，而不是退回泛化 `query_time`
+  - `state-driven infer_action_intent` 与 `low-confidence` 恢复现在会继承已经补到的 followup/transition/ext 关键帧，不再固定退回“只看 4 张当前动作片段”的浅层判断
+  - 当 why 题已经补到更晚的 `followup_ext*`，后续 `post_action_evidence` blocker 会从最近一次 followup 末尾继续向后补，而不是回退到动作起点重新采样
+- 本轮新增并通过 `2` 条定向测试，覆盖：
+  - `future_use open_question recovery -> specialized future_use resolution`
+  - `state-driven infer_action_intent` 在 pending-resolution 阶段会保留 followup 关键帧
+- 本轮专项总回归更新为 `220 passed, 344 deselected`
 
 ### 16.2.4 当前真正的瓶颈
 

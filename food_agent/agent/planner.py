@@ -2115,7 +2115,50 @@ class GraphAgentPlanner:
         )
 
     def _action_intent_prefers_specialized_open_question_recovery(self, state: AgentState) -> bool:
+        if not self._is_action_intent_task(state):
+            return False
+        if self._action_intent_pending_resolution_tool(state):
+            return True
+        latest_result = self._latest_successful_action_intent_result(state)
+        if latest_result:
+            if self._action_intent_needs_future_use_evidence(state=state, result=latest_result):
+                return True
+            if self._action_intent_pair_needs_outcome_resolution(state=state, result=latest_result):
+                return True
+            if bool(latest_result.get("need_future_evidence")) or bool(latest_result.get("ambiguity")):
+                return True
+        if any(
+            isinstance(item, str) and item.startswith("action_intent_need_future_evidence=1")
+            for item in list(getattr(state, "working_memory", [])) + list(getattr(state, "evidence_bundle", []))
+        ):
+            return True
         return self._action_intent_prefers_followup_state_change_only(state)
+
+    def _action_intent_candidate_inference_frames(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        require_current_scope: bool = True,
+    ) -> list[str]:
+        if not self._is_action_intent_task(state):
+            return []
+        latest_result = self._latest_successful_action_intent_result(state)
+        include_followup = (
+            bool(self._action_intent_pending_resolution_tool(state))
+            or self._action_intent_followup_attempt_count(state) > 0
+            or self._action_intent_has_transition_followup_frames(state)
+            or self._action_intent_has_peak_guided_followup_frames(state)
+            or bool(self._latest_action_intent_timeline_review(state))
+            or self._action_intent_requires_followup(state, result=latest_result if latest_result else None)
+        )
+        return self._select_action_intent_frames(
+            state,
+            hints,
+            limit=8 if include_followup else 4,
+            include_followup=include_followup,
+            require_current_scope=require_current_scope,
+        )
 
     def _action_intent_initial_followup_budget(self, state: AgentState) -> int:
         return 2 if self._action_intent_prefers_result_driven_followup(state) else 1
@@ -6679,11 +6722,9 @@ class GraphAgentPlanner:
                 },
             )
         if self._is_action_intent_task(state) and state.retrieved_frames and "infer_action_intent" not in used_tools:
-            action_frames = self._select_action_intent_frames(
-                state,
-                hints,
-                limit=4,
-                include_followup=False,
+            action_frames = self._action_intent_candidate_inference_frames(
+                state=state,
+                hints=hints,
                 require_current_scope=True,
             )
             if not action_frames:
@@ -7334,7 +7375,11 @@ class GraphAgentPlanner:
                 },
             )
         if self._is_action_intent_task(state) and self._action_intent_prefers_specialized_open_question_recovery(state):
-            if self._action_intent_pending_resolution_tool(state) == "resolve_action_intent_future_use":
+            latest_intent = self._latest_successful_action_intent_result(state)
+            if (
+                self._action_intent_pending_resolution_tool(state) == "resolve_action_intent_future_use"
+                or self._action_intent_needs_future_use_evidence(state=state, result=latest_intent if latest_intent else None)
+            ):
                 future_use = self._build_action_intent_future_use_resolution_decision(
                     state=state,
                     hints=hints,
@@ -7342,13 +7387,17 @@ class GraphAgentPlanner:
                 )
                 if future_use is not None:
                     return future_use
-            pairwise = self._build_action_intent_pairwise_resolution_decision(
-                state=state,
-                hints=hints,
-                thought="why 状态变化题在恢复阶段仍证据不足，优先回到状态变化专用二选一裁决，不退回通用 query_time。",
-            )
-            if pairwise is not None:
-                return pairwise
+            if (
+                self._action_intent_pending_resolution_tool(state) == "resolve_action_intent_pairwise"
+                or self._action_intent_pair_needs_outcome_resolution(state=state, result=latest_intent if latest_intent else None)
+            ):
+                pairwise = self._build_action_intent_pairwise_resolution_decision(
+                    state=state,
+                    hints=hints,
+                    thought="why 状态变化题在恢复阶段仍证据不足，优先回到状态变化专用二选一裁决，不退回通用 query_time。",
+                )
+                if pairwise is not None:
+                    return pairwise
         if (
             state.retrieved_frames
             and self._is_weight_task(state)
@@ -8067,11 +8116,9 @@ class GraphAgentPlanner:
             )
         action_intent_candidate_frames: list[str] = []
         if self._is_action_intent_task(state) and state.retrieved_frames:
-            action_intent_candidate_frames = self._select_action_intent_frames(
-                state,
-                hints,
-                limit=4,
-                include_followup=False,
+            action_intent_candidate_frames = self._action_intent_candidate_inference_frames(
+                state=state,
+                hints=hints,
                 require_current_scope=True,
             )
         if self._is_action_intent_task(state) and action_intent_candidate_frames:
