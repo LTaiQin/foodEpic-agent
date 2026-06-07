@@ -407,6 +407,8 @@ class GraphAgentVerifier:
             competitor_index=competitor_index,
         ):
             return False
+        if self._action_intent_needed_observation_remains_open(payload):
+            return True
         try:
             confidence = float(payload.get("confidence") or 0.0)
         except Exception:  # noqa: BLE001
@@ -510,6 +512,30 @@ class GraphAgentVerifier:
                 continue
             return True
         return False
+
+    def _action_intent_needed_observation_remains_open(self, payload: dict[str, Any] | None) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        text = str(payload.get("needed_observation") or "").strip().lower()
+        if not text:
+            return False
+        unresolved_markers = (
+            "whether",
+            "more post-action frames",
+            "actual use",
+            "direct physical effect",
+            "put back",
+            "placed on the scale",
+            "put on the scale",
+            "read/checked first",
+            "picked up before",
+            "applied to the hands",
+            "full or unstable",
+            "counter does not get messy",
+            "final placement",
+            "state change",
+        )
+        return any(marker in text for marker in unresolved_markers)
 
     def _latest_action_intent_resolution_payload(self, state: AgentState) -> tuple[str, dict[str, Any]] | None:
         for call in reversed(list(getattr(state, "tool_trace", []) or [])):
@@ -756,6 +782,8 @@ class GraphAgentVerifier:
             if raw_result.get("best_index") is None:
                 continue
             if bool(raw_result.get("need_more_evidence")):
+                continue
+            if self._action_intent_needed_observation_remains_open(raw_result):
                 continue
             return True
         return False

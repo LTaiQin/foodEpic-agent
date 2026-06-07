@@ -29,8 +29,8 @@
 ### 16.2.2 当前稳定基线
 
 - 专项回归命令：`pytest -q tests/test_graph_agent.py -k 'action_intent'`
-- 2026-06-07 当前结果：`207 passed, 339 deselected`
-- 相比本轮进入专项时的起点 `107 passed, 300 deselected`，当前阶段性增量为 `+100 passed`
+- 2026-06-07 当前结果：`216 passed, 344 deselected`
+- 相比本轮进入专项时的起点 `107 passed, 300 deselected`，当前阶段性增量为 `+109 passed`
 - 当前执行策略：why 逻辑不再追求“接近完美覆盖”，而是维持“足够可用、回归稳定、无明显结构性退化”的维护态；后续优先级切换到完整 agent 功能闭环与小样本真实验证。
 
 这说明 why 题已经不再是“直接把问题丢给模型猜答案”，而是已经存在完整骨架：
@@ -194,6 +194,17 @@
   - planner 仍会接受 `shortly after ... returned to the fridge ...` 这类真实后续结果链
   - verifier 在 `uncertain return` 语义下仍会阻止 finish
 - 本轮提交：inspection、mixed-horizon、direct-evidence 定向测试均通过，why 专项总回归更新为 `212 passed, 344 deselected`
+- 本轮提交：`planner` 新增了 `needed_observation` 驱动的补证据画像，不再只是把“还需要看什么”写进 `thought`：
+  - `more post-action frames showing the direct physical effect` 这类缺口，现在会驱动更短、更密的 `followup_ext*` 补帧；
+  - `whether the pot is put on the scale or used to pour water` 这类“真实后续用途”缺口，现在会驱动更长的 followup 窗口，而不是继续用统一模板；
+  - `whether the bottle is read/checked first or put back in the fridge` 这类 immediate-vs-later close-call，即使选项文本本身较泛，也能直接驱动 mixed-horizon transition probe；
+  - `verifier` 现在会把“结果里仍带有开放式 needed_observation”的 specialized resolution 视为未闭环，阻止它在 `need_more_evidence=false` 但实际上仍承认 `whether X/Y` 时过早 finish
+- 本轮新增并通过 `4` 条定向测试，覆盖：
+  - `needed_observation -> mixed-horizon transition probe`
+  - `needed_observation -> short dense extra followup`
+  - `needed_observation -> long future-use followup`
+  - `verifier` 阻止“开放式 needed_observation 仍未闭环”的 finish
+- 本轮专项总回归更新为 `216 passed, 344 deselected`
 
 ### 16.2.4 当前真正的瓶颈
 

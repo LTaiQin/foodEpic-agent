@@ -991,8 +991,20 @@ class GraphAgentPlanner:
         if start_time is None:
             start_time = action_end
         window_s = max(4.0, min(10.0, float(window_s)))
+        needed_profile = self._action_intent_needed_observation_profile(state=state)
         dense_near_followup = self._action_intent_prefers_dense_near_followup(state)
         result_driven_followup = self._action_intent_prefers_result_driven_followup(state)
+        if needed_profile["prefer_mixed_horizon"]:
+            start_time = max(0.0, max(action_end - 0.15, start_time - 0.75))
+            window_s = max(window_s, 7.0)
+        elif needed_profile["prefer_reveal_access"]:
+            start_time = max(0.0, max(action_end - 0.18, start_time - 0.8))
+            window_s = max(window_s, 4.6)
+        if needed_profile["prefer_state_change_only"]:
+            start_time = max(0.0, max(action_end - 0.2, start_time - 1.0))
+            window_s = min(max(window_s, 4.0), 4.8)
+        elif needed_profile["prefer_final_placement"] or needed_profile["prefer_future_use_outcome"]:
+            window_s = max(window_s, 8.8 if attempt_count <= 1 else 8.5)
         if dense_near_followup:
             start_time = max(action_end - 0.15, start_time - 1.2)
             window_s = min(window_s, 5.5)
@@ -1001,6 +1013,14 @@ class GraphAgentPlanner:
         sample_count = 6 if dense_near_followup and attempt_count <= 1 else 4
         if result_driven_followup:
             sample_count = max(sample_count, 5 if attempt_count <= 1 else 4)
+        if (
+            needed_profile["prefer_state_change_only"]
+            or needed_profile["prefer_mixed_horizon"]
+            or needed_profile["prefer_reveal_access"]
+        ):
+            sample_count = max(sample_count, 6)
+        elif needed_profile["prefer_final_placement"] or needed_profile["prefer_future_use_outcome"]:
+            sample_count = max(sample_count, 5)
         return PlannerDecision(
             thought=(
                 "why 题专用裁决仍报告证据不足，继续向后补帧，检查动作后的最终放置、使用或取回结果。"
@@ -1121,11 +1141,12 @@ class GraphAgentPlanner:
         result: dict[str, Any] | None,
         profile: dict[str, Any],
     ) -> str:
+        needed_profile = self._action_intent_needed_observation_profile(state=state, result=result)
         if self._action_intent_prefers_followup_state_change_only(state):
             return "state_change"
-        if self._action_intent_pair_spans_immediate_and_later_outcomes(state=state, result=result):
+        if needed_profile["prefer_mixed_horizon"] or self._action_intent_pair_spans_immediate_and_later_outcomes(state=state, result=result):
             return "mixed_temporal_horizon"
-        if self._action_intent_has_hand_free_future_use_conflict(state=state, result=result):
+        if needed_profile["prefer_hand_free_next_action"] or self._action_intent_has_hand_free_future_use_conflict(state=state, result=result):
             return "hand_free_next_action"
         timeline_text = self._action_intent_timeline_review_text(state)
         support_text = self._action_intent_result_support_text(result)
@@ -1364,6 +1385,7 @@ class GraphAgentPlanner:
             return False
         if self._action_intent_transition_probe_window(state=state, hints=hints, result=result) is None:
             return False
+        needed_profile = self._action_intent_needed_observation_profile(state=state, result=result)
         candidate_indices = self._latest_action_intent_candidate_indices(state, result=result)
         profile = action_intent_conflict_profile(
             question=str(getattr(state, "question", "") or ""),
@@ -1395,6 +1417,19 @@ class GraphAgentPlanner:
                 bool(result.get("need_future_evidence"))
                 or bool(result.get("ambiguity"))
                 or bool(result.get("need_more_evidence"))
+            )
+        ):
+            return True
+        if (
+            isinstance(result, dict)
+            and (
+                bool(result.get("need_future_evidence"))
+                or bool(result.get("ambiguity"))
+                or bool(result.get("need_more_evidence"))
+            )
+            and (
+                needed_profile["prefer_mixed_horizon"]
+                or needed_profile["prefer_hand_free_next_action"]
             )
         ):
             return True
@@ -1695,6 +1730,153 @@ class GraphAgentPlanner:
             )
         ).strip().lower()
 
+    def _action_intent_needed_observation_text(
+        self,
+        *,
+        state: AgentState,
+        result: dict[str, Any] | None = None,
+    ) -> str:
+        if isinstance(result, dict):
+            text = str(result.get("needed_observation") or "").strip().lower()
+            if text:
+                return text
+        latest = self._latest_action_intent_resolution_payload(state)
+        if latest is None:
+            return ""
+        _tool, payload = latest
+        return str(payload.get("needed_observation") or "").strip().lower()
+
+    def _action_intent_needed_observation_profile(
+        self,
+        *,
+        state: AgentState,
+        result: dict[str, Any] | None = None,
+    ) -> dict[str, bool]:
+        text = self._action_intent_needed_observation_text(state=state, result=result)
+        if not text:
+            return {
+                "prefer_dense_near": False,
+                "prefer_result_driven": False,
+                "prefer_state_change_only": False,
+                "prefer_mixed_horizon": False,
+                "prefer_reveal_access": False,
+                "prefer_future_use_outcome": False,
+                "prefer_final_placement": False,
+                "prefer_hand_free_next_action": False,
+                "prefer_safety_or_spill": False,
+            }
+        immediate_terms = (
+            "read/checked first",
+            "checked first",
+            "read first",
+            "check first",
+            "label",
+            "date",
+            "expiry",
+            "opened",
+            "turn on",
+            "turn off",
+            "switch",
+            "direct physical effect",
+            "state change",
+            "display",
+            "starts running",
+            "stops running",
+            "applied to the hands",
+            "wipe",
+            "dry hands",
+        )
+        future_use_terms = (
+            "put back",
+            "returned",
+            "back in the fridge",
+            "final placement",
+            "placed on the scale",
+            "put on the scale",
+            "used to pour",
+            "actual use",
+            "used again",
+            "weigh",
+            "scale",
+            "measure",
+            "serve",
+            "plate",
+            "drain",
+            "retrieved from behind",
+            "taken from behind",
+        )
+        reveal_terms = (
+            "behind the glass",
+            "behind the area",
+            "hidden item",
+            "after the reveal",
+            "picked up before the area is closed",
+            "picked up before the door is closed",
+            "object behind",
+        )
+        hand_free_terms = (
+            "hand",
+            "tap",
+            "switch",
+            "turn on",
+            "turn off",
+        )
+        safety_terms = (
+            "messy",
+            "spill",
+            "unstable",
+            "full",
+            "burn",
+            "hot",
+            "boiling",
+            "counter",
+        )
+        state_change_terms = (
+            "direct physical effect",
+            "state change",
+            "display",
+            "turned on",
+            "turned off",
+            "opened",
+            "starts running",
+            "stops running",
+            "becomes full",
+            "becomes empty",
+        )
+        final_placement_terms = (
+            "put back",
+            "returned",
+            "back in the fridge",
+            "final placement",
+            "returned to the fridge",
+            "returned to the shelf",
+            "placed back",
+            "placed into",
+        )
+        immediate = any(term in text for term in immediate_terms)
+        future_use = any(term in text for term in future_use_terms)
+        reveal_access = any(term in text for term in reveal_terms)
+        hand_free = any(term in text for term in hand_free_terms)
+        safety_or_spill = any(term in text for term in safety_terms)
+        state_change_only = any(term in text for term in state_change_terms)
+        final_placement = any(term in text for term in final_placement_terms)
+        contrastive = ("whether" in text or "是否" in text) and any(
+            token in text for token in (" or ", " first ", " before ", " after ", " versus ", " vs ")
+        )
+        mixed_horizon = (immediate and future_use) or (contrastive and immediate and (future_use or final_placement))
+        dense_near = immediate or reveal_access or hand_free or safety_or_spill or state_change_only
+        return {
+            "prefer_dense_near": dense_near,
+            "prefer_result_driven": future_use or final_placement or mixed_horizon,
+            "prefer_state_change_only": state_change_only and not (future_use or final_placement or reveal_access),
+            "prefer_mixed_horizon": mixed_horizon,
+            "prefer_reveal_access": reveal_access,
+            "prefer_future_use_outcome": future_use and not final_placement,
+            "prefer_final_placement": final_placement,
+            "prefer_hand_free_next_action": hand_free and (immediate or future_use),
+            "prefer_safety_or_spill": safety_or_spill,
+        }
+
     def _action_intent_peak_probe_window(
         self,
         *,
@@ -1718,10 +1900,16 @@ class GraphAgentPlanner:
         peak_end = latest_followup_end if latest_followup_end is not None else action_end + max(4.0, float(window_s))
         if peak_end <= peak_start + 0.2:
             peak_end = peak_start + max(2.5, float(window_s))
+        needed_profile = self._action_intent_needed_observation_profile(state=state)
         if self._action_intent_prefers_followup_state_change_only(state):
             peak_start = max(0.0, action_end - 0.15)
             peak_end = max(peak_end, action_end + 5.5)
-        elif self._action_intent_prefers_result_driven_followup(state):
+        elif needed_profile["prefer_mixed_horizon"]:
+            peak_start = max(0.0, action_end - 0.15)
+            peak_end = max(peak_end, action_end + 6.2)
+        elif self._action_intent_prefers_result_driven_followup(state) and not (
+            needed_profile["prefer_future_use_outcome"] or needed_profile["prefer_final_placement"]
+        ):
             peak_start = max(0.0, action_start - 0.2)
             peak_end = max(peak_end, action_end + 6.0)
         return peak_start, peak_end
@@ -1799,6 +1987,14 @@ class GraphAgentPlanner:
     def _action_intent_prefers_dense_near_followup(self, state: AgentState) -> bool:
         if not self._is_action_intent_task(state):
             return False
+        needed_profile = self._action_intent_needed_observation_profile(state=state)
+        if (
+            needed_profile["prefer_dense_near"]
+            or needed_profile["prefer_mixed_horizon"]
+            or needed_profile["prefer_reveal_access"]
+            or needed_profile["prefer_safety_or_spill"]
+        ):
+            return True
         question_text = str(getattr(state, "question", "") or "").lower()
         timeline_text = self._action_intent_timeline_review_text(state)
         if any(
@@ -1843,6 +2039,9 @@ class GraphAgentPlanner:
     def _action_intent_prefers_result_driven_followup(self, state: AgentState) -> bool:
         if not self._is_action_intent_task(state):
             return False
+        needed_profile = self._action_intent_needed_observation_profile(state=state)
+        if needed_profile["prefer_future_use_outcome"] or needed_profile["prefer_final_placement"]:
+            return True
         question_text = str(getattr(state, "question", "") or "").lower()
         timeline_text = self._action_intent_timeline_review_text(state)
         if any(
