@@ -469,9 +469,80 @@ class GraphAgentPlanner:
             return True
         return confidence < 0.68
 
+    def _action_intent_resolution_should_backfill_precondition(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        result: dict[str, Any],
+    ) -> bool:
+        if not self._is_action_intent_task(state):
+            return False
+        if self._action_intent_has_precondition_frames(state=state, hints=hints):
+            return False
+        if not self._action_intent_needs_precondition_context(state=state, result=result):
+            return False
+        text = " ".join(
+            str(result.get(key) or "")
+            for key in ("reason", "decisive_observation", "needed_observation", "answer")
+        ).lower()
+        precondition_terms = (
+            "dry hands",
+            "drying hands",
+            "hand-drying",
+            "hand drying",
+            "hands after pickup",
+            "applied to the hands",
+            "applied to hands",
+            "wet-hand",
+            "wet hands",
+            "wipe",
+            "wiping",
+            "wiped",
+            "surface",
+            "counter",
+            "worktop",
+            "cleaning",
+            "clean",
+            "washed",
+            "wash",
+            "rinsed",
+            "sink",
+            "擦手",
+            "干手",
+            "湿手",
+            "擦台面",
+            "台面",
+            "清洁",
+            "清洗",
+            "水槽",
+        )
+        gap_terms = (
+            "missing",
+            "lack",
+            "no visible",
+            "no actual",
+            "not shown",
+            "not visible",
+            "absence",
+            "need",
+            "缺少",
+            "没有",
+            "未看到",
+            "需要",
+        )
+        return any(term in text for term in precondition_terms) and any(term in text for term in gap_terms)
+
     def _latest_action_intent_candidate_indices(self, state: AgentState, result: dict[str, Any] | None = None) -> list[int]:
         indices: list[int] = []
         if isinstance(result, dict):
+            for value in result.get("candidate_indices") or []:
+                try:
+                    index = int(value)
+                except Exception:  # noqa: BLE001
+                    continue
+                if 0 <= index < len(state.choices) and index not in indices:
+                    indices.append(index)
             for key in ("best_index", "second_best_index"):
                 try:
                     index = int(result.get(key))
@@ -515,9 +586,9 @@ class GraphAgentPlanner:
                     index = int(match.group(1))
                     if 0 <= index < len(state.choices) and index not in indices:
                         indices.append(index)
-            if len(indices) >= 2:
+            if len(indices) >= len(state.choices):
                 break
-        return indices[:2]
+        return indices
 
     def _action_intent_pending_candidate_indices(self, state: AgentState) -> list[int]:
         indices: list[int] = []
@@ -874,6 +945,32 @@ class GraphAgentPlanner:
                 "end_time": max(combined_times),
                 "sample_count": 4,
                 "tag": f"{state.task_family}_segment",
+            },
+        )
+
+    def _action_intent_text_fallback_ready(self, state: AgentState) -> bool:
+        return (
+            self._is_action_intent_task(state)
+            and self._action_intent_failed_tool_count(state, "infer_action_intent") >= 3
+            and not self._latest_successful_action_intent_result(state)
+        )
+
+    def _build_action_intent_text_fallback_rank_decision(self, state: AgentState, *, thought: str) -> PlannerDecision:
+        evidence = self._action_intent_context_notes(state, limit=12) + list(getattr(state, "evidence_bundle", []) or [])[-12:]
+        deduped_evidence = list(dict.fromkeys(str(item) for item in evidence if isinstance(item, str) and str(item).strip()))
+        working_memory = [
+            str(item)
+            for item in list(getattr(state, "working_memory", []) or [])[-20:]
+            if isinstance(item, str) and str(item).strip()
+        ]
+        return PlannerDecision(
+            thought=thought,
+            tool="rank_choices_from_state",
+            args={
+                "question": state.question,
+                "choices": [str(choice) for choice in state.choices],
+                "evidence": deduped_evidence[:30],
+                "working_memory": working_memory[:30],
             },
         )
 
@@ -2226,6 +2323,11 @@ class GraphAgentPlanner:
                 )
                 if recovered is not None:
                     return recovered
+            if retry_count >= 3:
+                return self._build_action_intent_text_fallback_rank_decision(
+                    state,
+                    thought="why 题专用视觉判断连续失败，改用结构化文本因果裁决，避免继续空转 query_time。",
+                )
         if isinstance(last_result, dict) and last_tool.get("tool") == "count_visual_candidates" and last_result.get("best_index") is not None:
             best_index = int(last_result["best_index"])
             return PlannerDecision(
@@ -2549,6 +2651,18 @@ class GraphAgentPlanner:
                 confidence=float(last_result.get("confidence") or 0.0),
             )
         if isinstance(last_result, dict) and last_tool.get("tool") == "resolve_action_intent_future_use" and last_result.get("best_index") is not None:
+            if self._action_intent_resolution_should_backfill_precondition(
+                state=state,
+                hints=hints,
+                result=last_result,
+            ):
+                precondition = self._build_action_intent_precondition_sampling_decision(
+                    state=state,
+                    hints=hints,
+                    focus=str(last_result.get("needed_observation") or "precondition_before_additional_followup"),
+                )
+                if precondition is not None:
+                    return precondition
             if (
                 self._action_intent_resolution_needs_more_evidence(
                     tool_name="resolve_action_intent_future_use",
@@ -2615,6 +2729,21 @@ class GraphAgentPlanner:
                 confidence=float(last_result.get("confidence") or 0.0),
             )
         if isinstance(last_result, dict) and last_tool.get("tool") == "rank_choices_from_state" and last_result.get("best_index") is not None:
+            if self._action_intent_text_fallback_ready(state):
+                best_index = int(last_result["best_index"])
+                return PlannerDecision(
+                    thought="why 题专用视觉判断连续失败后，结构化文本因果裁决已完成，直接结束。",
+                    tool="finish",
+                    args={
+                        "prediction": best_index,
+                        "answer": str(last_result.get("answer") or state.choices[best_index]),
+                        "confidence": float(last_result.get("confidence") or 0.0),
+                    },
+                    done=True,
+                    answer=str(last_result.get("answer") or state.choices[best_index]),
+                    prediction=best_index,
+                    confidence=float(last_result.get("confidence") or 0.0),
+                )
             if self._has_unresolved_evidence_gap(open_questions) and float(last_result.get("confidence") or 0.0) < 0.8:
                 return self._recover_from_open_questions(state=state, hints=hints, used_tools=used_tools)
             best_index = int(last_result["best_index"])
@@ -3045,6 +3174,8 @@ class GraphAgentPlanner:
                 return recovered
             return decision
         if decision.tool == "rank_choices_from_state":
+            if self._action_intent_text_fallback_ready(state):
+                return decision
             if isinstance(last_result, dict) and last_tool.get("tool") == "rank_choices_from_state":
                 if float(last_result.get("confidence") or 0.0) < 0.8:
                     recovered = self._recover_from_open_questions(state=state, hints=hints, used_tools=used_tools)

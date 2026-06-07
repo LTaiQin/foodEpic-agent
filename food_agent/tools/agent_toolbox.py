@@ -12,7 +12,7 @@ import pandas as pd
 
 from PIL import Image
 
-from food_agent.agent.action_intent import action_intent_followup_decision, choice_categories
+from food_agent.agent.action_intent import action_intent_followup_decision, choice_categories, question_is_post_action_sensitive
 from food_agent.memory import GraphEdgeRecord, GraphMemoryStore, GraphNodeRecord
 from food_agent.model_client import OpenAICompatibleModelClient
 from food_agent.paths import ProjectPaths
@@ -1321,7 +1321,16 @@ class AgentToolbox:
         start_time: float | None = None,
         end_time: float | None = None,
         limit: int = 12,
+        time_s: float | None = None,
+        max_results: int | None = None,
     ) -> dict[str, Any]:
+        if time_s is not None:
+            if start_time is None:
+                start_time = float(time_s)
+            if end_time is None:
+                end_time = float(time_s)
+        if max_results is not None:
+            limit = int(max_results)
         normalized_hint = str(tag_hint or "").strip().lower()
         candidates: list[dict[str, Any]] = []
         seen_paths: set[str] = set()
@@ -1543,12 +1552,7 @@ class AgentToolbox:
         evidence: list[str],
         working_memory: list[str],
     ) -> dict[str, Any]:
-        prompt = (
-            "你是视频问答 agent 的选项评分器。"
-            "你不能使用题外知识，只能根据给定证据和工作记忆给 0-4 每个选项打分。"
-            "输出 JSON，格式固定为 "
-            '{"scores":[{"index":0,"score":0.0,"reason":""}],"best_index":0,"answer":"","confidence":0.0}。'
-        )
+        prompt = self._rank_choices_prompt(question=question, choices=choices)
         payload = {
             "question": question,
             "choices": choices,
@@ -1570,6 +1574,40 @@ class AgentToolbox:
             }
         except Exception:  # noqa: BLE001
             return self._fallback_rank_choices(question=question, choices=choices, evidence=evidence, working_memory=working_memory)
+
+    def _rank_choices_prompt(self, *, question: str, choices: list[str]) -> str:
+        if self._looks_like_action_intent_question(question=question, choices=choices):
+            return (
+                "你是厨房视频 why 题的结构化因果裁决器。"
+                "你不能使用题外知识，只能根据给定证据和工作记忆给每个选项打分。"
+                "\n重点不是猜最后发生了什么，而是判断题目动作本身的最直接目的。"
+                "\n必须遵守："
+                "\n1. 区分当前动作的直接目的，与动作之后更晚发生的下游取物/使用/结果。"
+                "\n2. 如果题目动作是 move/transfer/remove/shift 某物，而后面只是又拿起了另一个物体，不能自动把那个更晚的取物动作当成当前动作的直接目的。"
+                "\n3. 如果候选描述的是当前被操作物体本身的直接使用，比如 rinse/wash/clean sponge、wipe towel、hold object in hand，要优先检查是否有同一物体+水槽/水流/擦拭/双手配合等直接证据。"
+                "\n4. 如果候选描述的是 tap/sink/drain/workspace access，要检查是否有接近龙头、水槽、排水口、腾出操作空间、解除遮挡等直接 enablement 证据。"
+                "\n5. drainage 类答案只有在明确出现排水口被遮挡/被腾开，且和当前动作直接相关时才能高分；如果只是后来物体出现在排水口附近，不足以单独证明。"
+                "\n6. 不要因为某个候选更具体或更晚发生就天然高分；后续动作如果只是 downstream consequence，应降权。"
+                "\n7. 如果证据不足，允许低置信，但仍然要给出基于当前证据最合理的排序。"
+                '\n输出 JSON，格式固定为 {"scores":[{"index":0,"score":0.0,"reason":""}],"best_index":0,"answer":"","confidence":0.0}。'
+            )
+        return (
+            "你是视频问答 agent 的选项评分器。"
+            "你不能使用题外知识，只能根据给定证据和工作记忆给 0-4 每个选项打分。"
+            "输出 JSON，格式固定为 "
+            '{"scores":[{"index":0,"score":0.0,"reason":""}],"best_index":0,"answer":"","confidence":0.0}。'
+        )
+
+    def _looks_like_action_intent_question(self, *, question: str, choices: list[str]) -> bool:
+        question_lc = str(question or "").lower()
+        if "why the person performed the action" in question_lc:
+            return True
+        if question_is_post_action_sensitive(question):
+            active_categories = set()
+            for choice in choices:
+                active_categories.update(choice_categories(str(choice)))
+            return bool(active_categories)
+        return False
 
     def sample_choice_frames(self, choice_index: int, choices: list[str], frames_per_choice: int = 3, tag: str = "choice") -> dict[str, Any]:
         if choice_index < 0 or choice_index >= len(choices):
