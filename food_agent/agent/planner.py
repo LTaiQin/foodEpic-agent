@@ -1565,6 +1565,13 @@ class GraphAgentPlanner:
         state: AgentState,
         hints: dict[str, Any],
     ) -> list[str]:
+        action_times: list[float] = []
+        for key in ("times", "input_times"):
+            for value in hints.get(key) or []:
+                try:
+                    action_times.append(float(value))
+                except Exception:  # noqa: BLE001
+                    continue
         frames = self._select_action_intent_frames(
             state,
             hints,
@@ -1575,7 +1582,52 @@ class GraphAgentPlanner:
             return []
         names = [Path(path).name.lower() for path in frames]
         if not any("_followup_transition_" in name or "_followup_peaks_" in name for name in names):
-            return []
+            latest_intent = self._latest_successful_action_intent_result(state)
+            needed_profile = self._action_intent_needed_observation_profile(state=state, result=latest_intent if latest_intent else None)
+            allow_late_followup_review = (
+                needed_profile["prefer_mixed_horizon"]
+                or needed_profile["prefer_future_use_outcome"]
+                or needed_profile["prefer_final_placement"]
+            )
+            if not allow_late_followup_review and latest_intent:
+                allow_late_followup_review = (
+                    self._action_intent_needs_future_use_evidence(state=state, result=latest_intent)
+                    or self._action_intent_pair_spans_immediate_and_later_outcomes(state=state, result=latest_intent)
+                )
+            if not allow_late_followup_review:
+                return []
+            has_segment = any("_segment_" in name for name in names)
+            has_late_followup = any(
+                marker in name
+                for name in names
+                for marker in ("_followup_ext2_", "_followup_ext3_", "_followup_ext4_")
+            )
+            has_regular_followup = any("_followup_" in name for name in names)
+            if not has_segment or not has_late_followup:
+                all_task_frames = self._action_intent_current_task_artifact_frames(
+                    self._filter_visual_image_paths(list(getattr(state, "retrieved_frames", []) or []))
+                )
+                all_names = [Path(path).name.lower() for path in all_task_frames]
+                has_segment = any("_segment_" in name for name in all_names)
+                has_late_followup = any(
+                    marker in name
+                    for name in all_names
+                    for marker in ("_followup_ext2_", "_followup_ext3_", "_followup_ext4_")
+                )
+                has_regular_followup = any("_followup_" in name for name in all_names)
+                if has_segment and (has_late_followup or has_regular_followup):
+                    if action_times:
+                        staged = self._stage_action_intent_frames(
+                            state=state,
+                            frames=all_task_frames,
+                            action_times=action_times,
+                            limit=8,
+                            include_followup=True,
+                        )
+                        if staged:
+                            return staged
+                    return all_task_frames[-8:]
+                return []
         return frames
 
     def _action_intent_should_run_timeline_review(
@@ -1589,15 +1641,20 @@ class GraphAgentPlanner:
         if not self._is_action_intent_task(state):
             return False
         tool_name = str(last_tool.get("tool") or "")
-        if tool_name not in {"extract_frames_for_range", "sample_frames_around_peaks", "retrieve_cached_artifacts"}:
+        if tool_name not in {"extract_frames_for_range", "sample_frames_around_peaks", "retrieve_cached_artifacts", "sample_sparse_frames"}:
             return False
         tag = self._action_intent_timeline_review_tag(last_tool)
         if tool_name == "extract_frames_for_range" and not tag.endswith("_followup_transition"):
             return False
         if tool_name == "sample_frames_around_peaks" and not tag.endswith("_followup_peaks"):
             return False
+        if tool_name == "sample_sparse_frames":
+            if "_followup_ext" not in tag and not (
+                tag.endswith("_followup") and self._action_intent_pending_resolution_tool(state)
+            ):
+                return False
         if tool_name == "retrieve_cached_artifacts" and not any(
-            marker in tag for marker in ("followup_transition", "followup_peaks")
+            marker in tag for marker in ("followup_transition", "followup_peaks", "followup_ext", "followup")
         ):
             return False
         if not self._action_intent_timeline_review_candidate_paths(state=state, hints=hints):
@@ -4254,7 +4311,7 @@ class GraphAgentPlanner:
                 deduped.append(ordered[-1])
             return deduped[:2]
         if limit == 3:
-            selected = [ordered[0], ordered[min(1, len(ordered) - 1)], ordered[-1]]
+            selected = [ordered[0], self._nearest_frame_to_time(ordered, anchor_time), ordered[-1]]
             deduped = []
             for path in selected:
                 if path not in deduped:
@@ -5439,7 +5496,7 @@ class GraphAgentPlanner:
         if (
             self._is_action_intent_task(state)
             and isinstance(last_result, dict)
-            and last_tool.get("tool") in {"extract_frames_for_range", "sample_frames_around_peaks", "retrieve_cached_artifacts"}
+            and last_tool.get("tool") in {"sample_sparse_frames", "extract_frames_for_range", "sample_frames_around_peaks", "retrieve_cached_artifacts"}
             and state.retrieved_frames
         ):
             timeline_review = self._build_action_intent_timeline_review_decision(

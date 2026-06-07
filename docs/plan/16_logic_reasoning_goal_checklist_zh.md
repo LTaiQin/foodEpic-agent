@@ -29,8 +29,8 @@
 ### 16.2.2 当前稳定基线
 
 - 专项回归命令：`pytest -q tests/test_graph_agent.py -k 'action_intent'`
-- 2026-06-07 当前结果：`220 passed, 344 deselected`
-- 相比本轮进入专项时的起点 `107 passed, 300 deselected`，当前阶段性增量为 `+113 passed`
+- 2026-06-07 当前结果：`223 passed, 344 deselected`
+- 相比本轮进入专项时的起点 `107 passed, 300 deselected`，当前阶段性增量为 `+116 passed`
 - 当前执行策略：why 逻辑不再追求“接近完美覆盖”，而是维持“足够可用、回归稳定、无明显结构性退化”的维护态；后续优先级切换到完整 agent 功能闭环与小样本真实验证。
 
 这说明 why 题已经不再是“直接把问题丢给模型猜答案”，而是已经存在完整骨架：
@@ -219,7 +219,14 @@
 - 本轮新增并通过 `2` 条定向测试，覆盖：
   - `future_use open_question recovery -> specialized future_use resolution`
   - `state-driven infer_action_intent` 在 pending-resolution 阶段会保留 followup 关键帧
-- 本轮专项总回归更新为 `220 passed, 344 deselected`
+- 本轮提交：why 题的“短时序证据复核”不再只依赖 `transition / peaks` 两类关键帧。对于 `future_use / final_placement / mixed_horizon` 这类必须看更晚结果的 close-call，如果当前题已经补到了 `followup_ext2/ext3/ext4`，planner 现在会把这些晚期 artifact 也纳入 timeline review，而不是因为当前时窗裁剪过窄把真正关键的后续证据漏掉
+- 本轮提交：why 题在 `pending_resolution` 阶段，若最近一次新增的是 `sample_sparse_frames(tag=followup_ext*)`，不再立刻回到 `resolve_action_intent_future_use` 直接裁决；现在会先做一次 timeline review，让 agent 先复盘“动作后立刻发生了什么、下一步去做什么、是否仍有多个 plausible 解释”，再决定是否继续裁决或继续补证据
+- 本轮提交：关键帧小预算采样继续向 anchor-aware 收紧。`_sample_action_intent_stage_frames(limit=3)` 已从“固定拿最早两张加最后一张”改成“最早一张 + 最接近当前冲突锚点的一张 + 最后一张”，避免在 why 题最关键的 late followup / near-decisive 瞬间已经存在时，却仍被早期普通帧挤掉
+- 本轮新增并通过 `3` 条定向测试，覆盖：
+  - `future_use` 题即使没有 `transition/peaks`，只要已经补到 `followup_ext*` 也能触发 timeline review
+  - `sample_sparse_frames(followup_ext2)` 后会先进入 timeline review，而不是直接 future-use resolution
+  - `limit=3` 的 stage 采样会保留“起点 + 锚点 + 最新结果帧”
+- 本轮专项总回归更新为 `223 passed, 344 deselected`
 
 ### 16.2.4 当前真正的瓶颈
 
