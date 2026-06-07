@@ -29,8 +29,8 @@
 ### 16.2.2 当前稳定基线
 
 - 专项回归命令：`pytest -q tests/test_graph_agent.py -k 'action_intent'`
-- 2026-06-07 当前结果：`233 passed, 344 deselected`
-- 相比本轮进入专项时的起点 `107 passed, 300 deselected`，当前阶段性增量为 `+126 passed`
+- 2026-06-07 当前结果：`235 passed, 344 deselected`
+- 相比本轮进入专项时的起点 `107 passed, 300 deselected`，当前阶段性增量为 `+128 passed`
 - 当前执行策略：why 逻辑不再追求“接近完美覆盖”，而是维持“足够可用、回归稳定、无明显结构性退化”的维护态；后续优先级切换到完整 agent 功能闭环与小样本真实验证。
 
 这说明 why 题已经不再是“直接把问题丢给模型猜答案”，而是已经存在完整骨架：
@@ -104,7 +104,15 @@
 - 本轮提交：新增并通过 2 条定向测试，分别保护：
   - `receptacle_outcome` 型 why close-call 会在第一次歧义时直接进入 `followup_transition`
   - 普通 `future_use` 型 why 题仍保持原来的初始 `followup`，不会被误改成近窗密采样
-- 本轮提交：why 专项回归已更新到 `233 passed, 344 deselected`
+- 本轮提交：why 题的首次主动关键帧前移继续扩展到两类高频歧义：
+  - `tap kitchen scale / press button / push switch` 这类 `state_change / open-close vs measure-use` 题，不再一上来稀疏补 8 秒长窗；现在会先围绕动作尾部后的 2 到 4 秒做 `followup_transition` 密采样，优先确认显示是否开机、归零、变化或出现其它决定性状态改变
+  - `pick up tea towel / paper towel / cloth` 这类 `transport-vs-use` 题，当模型已经明确承认“要看动作后是拿去擦手/擦台面，还是只是放下/挪开”时，会先补动作后近窗关键帧，再决定是否需要回补 `precontext`；也就是说，agent 会先验证真实使用链，而不是默认先回头找前置状态
+- 本轮提交：新增并通过 3 条定向测试，分别保护：
+  - `tap kitchen scale` 无 tool trace 时，首次补证据优先进入 `followup_transition`
+  - `tap kitchen scale` 在首次 `infer_action_intent` 仍不确定时，也会直接进入近窗 `followup_transition`
+  - `pick up tea towel` 的 `transport-vs-use` close-call 会在第一次歧义时优先补动作后近窗关键帧，而不会先被 `precontext` 截走
+- 本轮提交：同时收紧了 `transport-vs-use` 的前移触发门槛。只有模型已经显式承认 `need_more_evidence / ambiguity / whether X or Y` 时，才会抢先看近窗后果；普通高置信但只是泛化“暂时看不清”的 towel/cloth 题仍保持原有 `precontext` 路线，不会被误伤
+- 本轮提交：why 专项回归已更新到 `235 passed, 344 deselected`
 - 本轮提交：why 题在 `followup_transition / followup_peaks` 之后新增“短时序证据复核”分支，先让 agent 总结动作后立刻结果、下一步手部动作和 `hand-free / access / next-use` 证据，再回到 `infer_action_intent`
 - 本轮提交：`inspect_visual_evidence` 的写回字段扩到 `timeline_summary / immediate_result / next_action_hint / direct_purpose_hint / ambiguity_note`，并在 `needs_more_evidence=true` 时显式保留 `need_disambiguating_evidence`
 - 本轮提交：why 题 `inspect_visual_evidence -> infer_action_intent` 的回跳逻辑已改为识别 timeline review；若复核仍判定证据不足，则继续 `followup_ext2` 或转入 `future_use / pairwise` 专用裁决，而不是重新退回只看 `segment` 的早收口路径

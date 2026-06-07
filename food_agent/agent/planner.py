@@ -2400,6 +2400,79 @@ class GraphAgentPlanner:
             return False
         needed_profile = self._action_intent_needed_observation_profile(state=state, result=result)
         if not needed_profile["prefer_receptacle_outcome"]:
+            question_text = str(getattr(state, "question", "") or "").lower()
+            support_text = self._action_intent_result_support_text(result)
+            needed_observation = str(result.get("needed_observation") or "").lower()
+            combined_text = f"{support_text} {needed_observation}"
+            state_change_markers = (
+                "display",
+                "turns on",
+                "turned on",
+                "turn on",
+                "reset",
+                "resets",
+                "zero",
+                "0",
+                "tare",
+                "readout",
+                "显示",
+                "归零",
+                "开机",
+            )
+            towel_like = any(
+                token in question_text
+                for token in ("paper towel", "tea towel", "dish cloth", "cloth", "towel", "napkin", "hand towel")
+            )
+            towel_transport_action = towel_like and any(
+                token in question_text
+                for token in ("<pick up ", "<grab ", "<lift ", "<take ", "<move ", "<shift ")
+            )
+            candidate_indices = self._latest_action_intent_candidate_indices(state, result=result)
+            profile = action_intent_conflict_profile(
+                question=str(getattr(state, "question", "") or ""),
+                choices=[str(choice) for choice in getattr(state, "choices", [])],
+                indices=candidate_indices if len(candidate_indices) >= 2 else None,
+            )
+            active_categories = set(profile["active_categories"])
+            transport_vs_use = towel_transport_action and "clean_dry" in active_categories and bool(
+                active_categories & {"generic_relocation", "final_place_return"}
+            )
+            explicit_need_more = (
+                bool(result.get("need_more_evidence"))
+                or bool(result.get("ambiguity"))
+                or bool(result.get("need_future_evidence"))
+                or "whether" in needed_observation
+                or "是否" in needed_observation
+            )
+            transport_markers = (
+                "applied to the hands",
+                "applied to the hand",
+                "hand area",
+                "hands after pickup",
+                "wipe",
+                "wiping",
+                "dry hand",
+                "dry hands",
+                "set down",
+                "put away",
+                "placed on the counter",
+                "placed on the worktop",
+                "later use",
+                "counter",
+                "worktop",
+                "left on the side",
+                "手上",
+                "擦手",
+                "擦台面",
+                "放到台面",
+                "放回",
+            )
+            if explicit_need_more and needed_profile["prefer_state_change_only"] and any(
+                marker in combined_text for marker in state_change_markers
+            ):
+                return True
+            if explicit_need_more and transport_vs_use and any(marker in combined_text for marker in transport_markers):
+                return True
             return False
         if self._action_intent_result_has_direct_post_action_evidence(result):
             return False
@@ -5933,6 +6006,20 @@ class GraphAgentPlanner:
             )
             question_text = str(getattr(state, "question", "") or "").lower()
             if combined_times and any(token in question_text for token in ("<tap kitchen scale>", "tap kitchen scale")):
+                probe_window = self._action_intent_transition_probe_window(state=state, hints=hints, result=None)
+                if probe_window is not None:
+                    start_time, end_time, stride_s, max_frames = probe_window
+                    return PlannerDecision(
+                        thought="why 题涉及电子秤按键，先围绕点击后的短窗口做更密的关键帧搜索，确认显示是否开机、归零或出现其它决定性状态变化。",
+                        tool="extract_frames_for_range",
+                        args={
+                            "start_time": start_time,
+                            "end_time": end_time,
+                            "stride_s": stride_s,
+                            "max_frames": max_frames,
+                            "tag": f"{state.task_family}_followup_transition",
+                        },
+                    )
                 return PlannerDecision(
                     thought="why 题涉及电子秤按键，单帧不足以区分开机/归零；先补动作后的状态变化帧。",
                     tool="sample_sparse_frames",
