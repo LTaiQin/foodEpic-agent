@@ -29,8 +29,8 @@
 ### 16.2.2 当前稳定基线
 
 - 专项回归命令：`pytest -q tests/test_graph_agent.py -k 'action_intent'`
-- 2026-06-07 当前结果：`216 passed, 344 deselected`
-- 相比本轮进入专项时的起点 `107 passed, 300 deselected`，当前阶段性增量为 `+109 passed`
+- 2026-06-07 当前结果：`218 passed, 344 deselected`
+- 相比本轮进入专项时的起点 `107 passed, 300 deselected`，当前阶段性增量为 `+111 passed`
 - 当前执行策略：why 逻辑不再追求“接近完美覆盖”，而是维持“足够可用、回归稳定、无明显结构性退化”的维护态；后续优先级切换到完整 agent 功能闭环与小样本真实验证。
 
 这说明 why 题已经不再是“直接把问题丢给模型猜答案”，而是已经存在完整骨架：
@@ -204,7 +204,15 @@
   - `needed_observation -> short dense extra followup`
   - `needed_observation -> long future-use followup`
   - `verifier` 阻止“开放式 needed_observation 仍未闭环”的 finish
-- 本轮专项总回归更新为 `216 passed, 344 deselected`
+- 本轮提交：why 题“最终送给视觉模型的帧选择”也已开始受 `needed_observation` 控制，而不是只在补帧阶段生效：
+  - `future-use / final placement` 型缺口会把预算优先给更晚的 `followup / followup_ext*`，避免关键后续结果被早期普通帧挤掉；
+  - `reveal/access` 型缺口会把预算优先给 `followup_transition / followup_peaks`，减少无关的超晚帧干扰；
+  - `mixed-horizon` 型缺口会同时保留近窗 transition 和更晚 followup/ext，避免“只看眼前一瞬”或“只看很后面”；
+  - 关键帧 staging 现已加入按冲突类型的阶段优先级与预算裁剪，不再出现“明明抽到了关键后续帧，但最终送图时又被前面的普通帧挤掉”的结构性问题
+- 本轮新增并通过 `2` 条定向测试，覆盖：
+  - `future-use` 缺口下最终送图会优先保留 late followup/ext 证据；
+  - `reveal/access` 缺口下最终送图会优先保留 transition/peak 证据
+- 本轮专项总回归更新为 `218 passed, 344 deselected`
 
 ### 16.2.4 当前真正的瓶颈
 

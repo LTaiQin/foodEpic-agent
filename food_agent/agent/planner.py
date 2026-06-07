@@ -3796,6 +3796,7 @@ class GraphAgentPlanner:
             if current_task_frames:
                 frames = current_task_frames
         frames = self._sort_frames_by_artifact_time(frames)
+        needed_profile = self._action_intent_needed_observation_profile(state=state) if self._is_action_intent_task(state) else {}
         if (
             self._is_action_intent_task(state)
             and combined_times
@@ -3804,6 +3805,7 @@ class GraphAgentPlanner:
                 or any("_precontext_" in Path(path).name.lower() for path in frames)
                 or self._action_intent_prefers_followup_state_change_only(state)
                 or self._action_intent_prefers_dense_near_followup(state)
+                or any(bool(needed_profile.get(key)) for key in ("prefer_mixed_horizon", "prefer_reveal_access", "prefer_future_use_outcome", "prefer_final_placement"))
             )
         ):
             staged = self._stage_action_intent_frames(
@@ -4001,8 +4003,9 @@ class GraphAgentPlanner:
             elif include_followup:
                 followup_frames.append(path)
 
-        stage_target_counts: list[tuple[list[str], int]]
+        stage_target_counts: list[tuple[str, list[str], int, float]]
         followup_only_state_change = False
+        needed_profile = self._action_intent_needed_observation_profile(state=state)
         if include_followup:
             needs_precontext = self._action_intent_needs_precondition_context(state=state, result=None)
             dense_near_followup = self._action_intent_prefers_dense_near_followup(state)
@@ -4057,13 +4060,34 @@ class GraphAgentPlanner:
                     peak_keep = min(1, len(followup_peak_frames)) if followup_peak_frames else 0
                     ext_keep = 0
                     followup_keep = max(1, limit - pre_keep - segment_keep - transition_keep - peak_keep)
+            if needed_profile["prefer_reveal_access"]:
+                pre_keep = 1 if needs_precontext and limit >= 6 else 0
+                segment_keep = min(segment_keep, 2)
+                transition_keep = min(len(followup_transition_frames), max(transition_keep, 2 if limit >= 6 else 1))
+                peak_keep = min(len(followup_peak_frames), max(peak_keep, 2 if limit >= 7 else 1))
+                ext_keep = 0
+                followup_keep = max(1, limit - pre_keep - segment_keep - transition_keep - peak_keep - ext_keep)
+            elif needed_profile["prefer_mixed_horizon"]:
+                pre_keep = 1 if needs_precontext and limit >= 7 else 0
+                segment_keep = min(segment_keep, 2)
+                transition_keep = min(len(followup_transition_frames), max(transition_keep, 2 if limit >= 6 else 1))
+                peak_keep = min(len(followup_peak_frames), max(peak_keep, 1))
+                ext_keep = min(len(followup_ext_frames), max(ext_keep, 1 if limit >= 6 else 0))
+                followup_keep = max(1, limit - pre_keep - segment_keep - transition_keep - peak_keep - ext_keep)
+            elif needed_profile["prefer_future_use_outcome"] or needed_profile["prefer_final_placement"]:
+                pre_keep = 1 if needs_precontext and limit >= 7 else 0
+                segment_keep = min(segment_keep, 2)
+                transition_keep = min(len(followup_transition_frames), max(transition_keep, 1 if followup_transition_frames and limit >= 7 else 0))
+                peak_keep = min(len(followup_peak_frames), max(peak_keep, 1 if followup_peak_frames and limit >= 7 else 0))
+                ext_keep = min(len(followup_ext_frames), max(ext_keep, 2 if limit >= 6 else 1))
+                followup_keep = max(2 if limit >= 6 else 1, limit - pre_keep - segment_keep - transition_keep - peak_keep - ext_keep)
             stage_target_counts = [
-                (precontext_frames, pre_keep),
-                (segment_frames, segment_keep),
-                (followup_transition_frames, transition_keep),
-                (followup_peak_frames, peak_keep),
-                (followup_ext_frames, ext_keep),
-                (followup_frames, followup_keep),
+                ("precontext", precontext_frames, pre_keep, action_start - 0.15),
+                ("segment", segment_frames, segment_keep, action_end if dense_near_followup or needed_profile["prefer_reveal_access"] else action_mid),
+                ("transition", followup_transition_frames, transition_keep, action_end + 0.25),
+                ("peaks", followup_peak_frames, peak_keep, action_end + (0.6 if dense_near_followup else 0.9)),
+                ("ext", followup_ext_frames, ext_keep, action_end + (5.2 if (needed_profile["prefer_future_use_outcome"] or needed_profile["prefer_final_placement"] or needed_profile["prefer_mixed_horizon"]) else 3.0)),
+                ("followup", followup_frames, followup_keep, action_end + 3.4 if (needed_profile["prefer_future_use_outcome"] or needed_profile["prefer_final_placement"]) else action_mid),
             ]
         else:
             question_text = str(getattr(state, "question", "") or "").lower()
@@ -4074,17 +4098,47 @@ class GraphAgentPlanner:
             pre_keep = 1 if should_keep_precontext and limit >= 4 else 0
             segment_keep = max(2, limit - pre_keep)
             stage_target_counts = [
-                (precontext_frames, pre_keep),
-                (segment_frames, segment_keep),
+                ("precontext", precontext_frames, pre_keep, action_start - 0.15),
+                ("segment", segment_frames, segment_keep, action_end),
             ]
+
+        if include_followup:
+            if followup_only_state_change:
+                priority = ["transition", "peaks", "followup", "ext", "segment", "precontext"]
+            elif needed_profile["prefer_reveal_access"]:
+                priority = ["transition", "peaks", "segment", "followup", "precontext", "ext"]
+            elif needed_profile["prefer_mixed_horizon"]:
+                priority = ["transition", "ext", "followup", "peaks", "segment", "precontext"]
+            elif needed_profile["prefer_future_use_outcome"] or needed_profile["prefer_final_placement"]:
+                priority = ["ext", "followup", "transition", "peaks", "segment", "precontext"]
+            else:
+                priority = ["precontext", "segment", "transition", "peaks", "ext", "followup"]
+        else:
+            priority = ["precontext", "segment"]
+        priority_rank = {name: index for index, name in enumerate(priority)}
+        stage_target_counts = sorted(
+            stage_target_counts,
+            key=lambda item: priority_rank.get(item[0], len(priority_rank)),
+        )
+        remaining_budget = limit
+        normalized_stage_targets: list[tuple[str, list[str], int, float]] = []
+        for stage_name, stage_frames, keep_count, stage_anchor in stage_target_counts:
+            if remaining_budget <= 0:
+                break
+            keep = min(max(0, keep_count), remaining_budget)
+            if keep <= 0:
+                continue
+            normalized_stage_targets.append((stage_name, stage_frames, keep, stage_anchor))
+            remaining_budget -= keep
+        stage_target_counts = normalized_stage_targets
 
         selected: list[str] = []
         seen: set[str] = set()
-        for stage_frames, keep_count in stage_target_counts:
+        for _stage_name, stage_frames, keep_count, stage_anchor in stage_target_counts:
             for path in self._sample_action_intent_stage_frames(
                 stage_frames,
                 keep_count,
-                anchor_time=action_mid,
+                anchor_time=stage_anchor,
             ):
                 if path in seen:
                     continue
@@ -4100,7 +4154,31 @@ class GraphAgentPlanner:
                 remaining = [path for path in unknown_frames if path not in seen] + [
                     path for path in remaining if path not in unknown_frames
                 ]
-            for path in self._sample_evenly_ordered(remaining, min(limit - len(selected), len(remaining))):
+            remaining_keep = min(limit - len(selected), len(remaining))
+            if include_followup and (
+                needed_profile["prefer_future_use_outcome"]
+                or needed_profile["prefer_final_placement"]
+                or needed_profile["prefer_mixed_horizon"]
+                or needed_profile["prefer_reveal_access"]
+                or needed_profile["prefer_safety_or_spill"]
+            ):
+                remaining_anchor = action_end + 1.0
+                if (
+                    needed_profile["prefer_future_use_outcome"]
+                    or needed_profile["prefer_final_placement"]
+                    or needed_profile["prefer_mixed_horizon"]
+                ):
+                    remaining_anchor = action_end + 4.0
+                elif needed_profile["prefer_reveal_access"] or needed_profile["prefer_safety_or_spill"]:
+                    remaining_anchor = action_end + 0.35
+                remaining_paths = self._sample_action_intent_stage_frames(
+                    remaining,
+                    remaining_keep,
+                    anchor_time=remaining_anchor,
+                )
+            else:
+                remaining_paths = self._sample_evenly_ordered(remaining, remaining_keep)
+            for path in remaining_paths:
                 if path in seen:
                     continue
                 selected.append(path)
