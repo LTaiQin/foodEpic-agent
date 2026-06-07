@@ -6232,6 +6232,8 @@ class GraphAgentPlanner:
                 end_time = start_time
             if end_time < start_time:
                 end_time = start_time
+            if min_start_time is not None and start_time < float(min_start_time):
+                continue
             if end_time <= lower_bound:
                 continue
             match_tier = self._action_intent_long_horizon_node_match_tier(state=state, node=node)
@@ -6415,6 +6417,108 @@ class GraphAgentPlanner:
         if needed_profile["prefer_final_placement"] or needed_profile["prefer_future_use_outcome"]:
             return fixture_bucket in {"unknown", "workspace", "other"} or not target_fixture
         return False
+
+    def _action_intent_long_horizon_anchor_node_at_time(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        anchor_time: float,
+    ) -> tuple[dict[str, Any], float, float] | None:
+        nodes = self._latest_action_intent_long_horizon_nodes(state)
+        if not nodes:
+            return None
+        selected: tuple[tuple[int, float], dict[str, Any], float, float] | None = None
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            start_raw = node.get("start_time")
+            end_raw = node.get("end_time")
+            if start_raw is None:
+                continue
+            try:
+                start_time = float(start_raw)
+            except Exception:  # noqa: BLE001
+                continue
+            try:
+                end_time = float(end_raw) if end_raw is not None else start_time
+            except Exception:  # noqa: BLE001
+                end_time = start_time
+            if end_time < start_time:
+                end_time = start_time
+            if end_time + 0.25 < anchor_time or start_time - 0.25 > anchor_time:
+                continue
+            match_tier = self._action_intent_long_horizon_node_match_tier(state=state, node=node)
+            if match_tier is None:
+                continue
+            distance = 0.0 if start_time <= anchor_time <= end_time else min(abs(anchor_time - start_time), abs(anchor_time - end_time))
+            candidate = ((match_tier, distance), node, start_time, end_time)
+            if selected is None or candidate[0] < selected[0]:
+                selected = candidate
+        if selected is None:
+            return None
+        _score, node, start_time, end_time = selected
+        return node, start_time, end_time
+
+    def _action_intent_has_later_long_horizon_node_after(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        after_time: float,
+    ) -> bool:
+        nodes = self._latest_action_intent_long_horizon_nodes(state)
+        if not nodes:
+            return False
+        later = self._action_intent_select_long_horizon_node(
+            state=state,
+            hints=hints,
+            nodes=nodes,
+            min_start_time=after_time + 0.15,
+        )
+        return later is not None
+
+    def _action_intent_long_horizon_spatial_context_looks_transit_near_decisive_fixture(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        spatial: dict[str, Any],
+        anchor_time: float,
+    ) -> bool:
+        if not self._action_intent_prefers_long_horizon_object_retrieval(state=state):
+            return False
+        target_fixture = self._action_intent_spatial_target_mask_fixture(state, spatial)
+        fixture_bucket = self._action_intent_fixture_bucket(target_fixture)
+        if fixture_bucket not in {"sink", "appliance"}:
+            return False
+        anchor_node = self._action_intent_long_horizon_anchor_node_at_time(
+            state=state,
+            hints=hints,
+            anchor_time=anchor_time,
+        )
+        if anchor_node is None:
+            return False
+        _node, start_time, end_time = anchor_node
+        duration = max(0.0, end_time - start_time)
+        if duration > 1.2:
+            return False
+        if not self._action_intent_has_later_long_horizon_node_after(
+            state=state,
+            hints=hints,
+            after_time=end_time,
+        ):
+            return False
+        audio_labels = " ".join(
+            str(item.get("label") or item.get("event_type") or "").strip().lower()
+            for item in spatial.get("audio_events") or []
+            if isinstance(item, dict)
+        )
+        if fixture_bucket == "sink" and any(token in audio_labels for token in ("water", "tap", "sink", "pour", "drain", "liquid")):
+            return False
+        if fixture_bucket == "appliance" and any(token in audio_labels for token in ("door", "open", "close", "click", "microwave", "beep")):
+            return False
+        return True
 
     def _recipe_following_activity_step_decision(
         self,
@@ -7279,6 +7383,20 @@ class GraphAgentPlanner:
                     except Exception:  # noqa: BLE001
                         anchor_value = None
                     if anchor_value is not None:
+                        if self._action_intent_long_horizon_spatial_context_looks_transit_near_decisive_fixture(
+                            state=state,
+                            hints=hints,
+                            spatial=last_result,
+                            anchor_time=anchor_value,
+                        ):
+                            long_horizon_revisit = self._build_action_intent_cached_long_horizon_revisit_decision(
+                                state=state,
+                                hints=hints,
+                                thought="why 题当前虽然靠近了有判别力的 fixture，但这一下更像短暂经过态而非真正完成使用/放置；继续沿更晚节点向后追。",
+                                after_time=anchor_value,
+                            )
+                            if long_horizon_revisit is not None:
+                                return long_horizon_revisit
                         if self._action_intent_long_horizon_spatial_context_looks_intermediate(state=state, spatial=last_result):
                             long_horizon_revisit = self._build_action_intent_cached_long_horizon_revisit_decision(
                                 state=state,
