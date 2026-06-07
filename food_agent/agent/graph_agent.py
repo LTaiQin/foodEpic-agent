@@ -1011,6 +1011,32 @@ class GraphAgent:
                 for token in ("no further", "no more", "no further spoon-use", "no further use", "no washing-followup")
             ):
                 adjusted += 0.18
+        if self._action_intent_choice_is_glove_removal_enablement(
+            question=question_lc,
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            action_object=action_object,
+            global_context=global_context,
+        ):
+            adjusted += 0.3
+        if self._action_intent_choice_is_surface_mess_avoidance_goal(
+            question=question_lc,
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            action_object=action_object,
+            global_context=global_context,
+        ):
+            adjusted += 0.28
+        if self._action_intent_choice_is_pure_hand_free_enablement(
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            action_object=action_object,
+            global_context=global_context,
+        ):
+            adjusted += 0.22
         if self._action_intent_choice_is_direct_residue_release(
             question=question_lc,
             choice=choice_lc,
@@ -2045,6 +2071,163 @@ class GraphAgent:
             )
         )
         return (not has_positive_wet_context) or contradiction_denies_wet_context
+
+    def _action_intent_choice_is_glove_removal_enablement(
+        self,
+        *,
+        question: str,
+        choice: str,
+        support: str,
+        contradiction: str,
+        action_object: str,
+        global_context: str,
+    ) -> bool:
+        if not any(token in question for token in ("put ", "place ", "set ", "transfer ")):
+            return False
+        if not any(token in choice for token in ("oven glove", "glove", "mitt", "手套")):
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        if any(token in contradiction for token in ("no oven glove", "no glove", "没有手套")):
+            return False
+        return any(
+            token in signal_text
+            for token in (
+                "oven glove",
+                "glove",
+                "mitt",
+                "left hand",
+                "right hand",
+                "free",
+                "freed",
+                "remove",
+                "take off",
+                "手套",
+                "左手",
+                "右手",
+                "摘下",
+                "脱下",
+            )
+        )
+
+    def _action_intent_choice_is_surface_mess_avoidance_goal(
+        self,
+        *,
+        question: str,
+        choice: str,
+        support: str,
+        contradiction: str,
+        action_object: str,
+        global_context: str,
+    ) -> bool:
+        if not any(token in question for token in ("put ", "place ", "set ")):
+            return False
+        if not any(
+            token in choice
+            for token in (
+                "messy",
+                "dirty",
+                "dirty end",
+                "counter dirty",
+                "counter messy",
+                "no spots",
+                "弄脏",
+                "脏",
+            )
+        ):
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        if any(
+            token in signal_text
+            for token in (
+                "washed",
+                "rinsed",
+                "wet",
+                "water droplets",
+                "soap suds",
+                "洗过",
+                "冲洗",
+                "水滴",
+                "肥皂",
+            )
+        ):
+            return False
+        return any(
+            token in signal_text
+            for token in (
+                "dirty end",
+                "counter",
+                "countertop",
+                "messy",
+                "dirty",
+                "tray",
+                "muffin tray",
+                "chopping board",
+                "surface",
+                "over the tray",
+                "台面",
+                "弄脏",
+                "脏",
+                "托盘",
+                "砧板",
+            )
+        )
+
+    def _action_intent_choice_is_pure_hand_free_enablement(
+        self,
+        *,
+        choice: str,
+        support: str,
+        contradiction: str,
+        action_object: str,
+        global_context: str,
+    ) -> bool:
+        if not any(
+            token in choice
+            for token in (
+                "free up the right hand",
+                "free up the left hand",
+                "free the right hand",
+                "free the left hand",
+                "to free up the right hand",
+                "to free up the left hand",
+                "腾出右手",
+                "腾出左手",
+            )
+        ):
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        if any(
+            token in signal_text
+            for token in (
+                "immediately reaches for",
+                "picks up the bottle",
+                "washing-up-liquid bottle",
+                "hand wash liquid bottle",
+                "next visible cleaning target",
+                "immediate next target is the bottle",
+                "立即伸手拿瓶子",
+                "拿起洗洁精瓶",
+                "清洗目标",
+            )
+        ):
+            return False
+        return any(
+            token in signal_text
+            for token in (
+                "without yet showing a single specific retrieved object",
+                "exact next target is still ambiguous",
+                "another manipulation may happen",
+                "next step",
+                "free",
+                "frees the right hand",
+                "freed",
+                "yet showing a single specific",
+                "目标仍不明确",
+                "下一步",
+                "腾出",
+                "还没有明确目标",
+            )
+        )
 
     def _action_intent_choice_is_hand_free_enablement(
         self,
