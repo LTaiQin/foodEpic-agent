@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from food_agent.agent.action_intent import (
+    action_intent_conflict_profile,
     action_intent_followup_decision,
     action_intent_needs_future_use_resolution,
     action_intent_needs_pairwise_resolution,
@@ -290,11 +291,24 @@ class GraphAgentPlanner:
         if action_intent_needs_precondition_context(
             question=str(getattr(state, "question", "") or ""),
             choices=[str(choice) for choice in getattr(state, "choices", [])],
-            indices=candidate_indices if len(candidate_indices) >= 2 else None,
+            indices=candidate_indices if candidate_indices else None,
         ):
             return True
+        # Full-set fallback is intentionally limited to clean/dry style options.
+        # Safety/hazard choices that are not in the current top candidates should
+        # not globally force precontext sampling, or they will swamp access/space
+        # and other pairwise routes whenever a distractor "avoid heat/spill" option
+        # exists somewhere in the full candidate list.
+        full_profile = action_intent_conflict_profile(
+            question=str(getattr(state, "question", "") or ""),
+            choices=[str(choice) for choice in getattr(state, "choices", [])],
+            indices=None,
+        )
+        if "clean_dry" not in set(full_profile["active_categories"]):
+            return False
         # Precondition-dependent options such as "dry hands" can be missed by the
-        # first-pass top-2 guess, so also scan the full candidate set.
+        # first-pass top-2 guess, so also scan the full candidate set for that
+        # narrower class.
         return action_intent_needs_precondition_context(
             question=str(getattr(state, "question", "") or ""),
             choices=[str(choice) for choice in getattr(state, "choices", [])],
@@ -502,12 +516,37 @@ class GraphAgentPlanner:
             "surface",
             "counter",
             "worktop",
+            "board",
+            "tray",
             "cleaning",
             "clean",
             "washed",
             "wash",
             "rinsed",
             "sink",
+            "dirty",
+            "dirty end",
+            "dirty-end",
+            "mess",
+            "messy",
+            "mess-avoidance",
+            "kept over",
+            "over the board",
+            "over the tray",
+            "spill",
+            "spilling",
+            "spill-risk",
+            "prevent spilling",
+            "unstable",
+            "full",
+            "liquid",
+            "soup",
+            "hot",
+            "burn",
+            "burnt",
+            "avoid mess",
+            "avoid spill",
+            "avoid burn",
             "擦手",
             "干手",
             "湿手",
@@ -516,6 +555,11 @@ class GraphAgentPlanner:
             "清洁",
             "清洗",
             "水槽",
+            "弄脏",
+            "溢出",
+            "太烫",
+            "烧焦",
+            "防止",
         )
         gap_terms = (
             "missing",
@@ -2637,6 +2681,18 @@ class GraphAgentPlanner:
                 },
             )
         if isinstance(last_result, dict) and last_tool.get("tool") == "resolve_action_intent_pairwise" and last_result.get("best_index") is not None:
+            if self._action_intent_resolution_should_backfill_precondition(
+                state=state,
+                hints=hints,
+                result=last_result,
+            ):
+                precondition = self._build_action_intent_precondition_sampling_decision(
+                    state=state,
+                    hints=hints,
+                    focus=str(last_result.get("needed_observation") or "precondition_before_pairwise_followup"),
+                )
+                if precondition is not None:
+                    return precondition
             if (
                 self._action_intent_resolution_needs_more_evidence(
                     tool_name="resolve_action_intent_pairwise",

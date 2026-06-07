@@ -49,7 +49,10 @@ CHOICE_CATEGORY_PATTERNS: dict[str, tuple[str, ...]] = {
         r"\baccess\b",
         r"\bbehind\b",
         r"\bretrieve\b",
-        r"\bget\b",
+        r"\bget\s+to\b",
+        r"\bget\s+at\b",
+        r"\bget\s+out\b",
+        r"\bget\s+back\b",
         r"\btake\s+out\b",
         r"\bpick\s+up\b",
         r"\bmissing\b",
@@ -180,6 +183,9 @@ CHOICE_CATEGORY_PATTERNS: dict[str, tuple[str, ...]] = {
         r"\bsafe\b",
         r"\bsafety\b",
         r"\bspill\b",
+        r"\bmess\b",
+        r"\bmessy\b",
+        r"\bdirty\b",
     ),
 }
 
@@ -339,6 +345,6 @@ def action_intent_needs_precondition_context(
     active_categories = set(profile["active_categories"])
     if "clean_dry" in active_categories:
         return True
-    if "safety_avoid" in active_categories and not bool(profile["has_pairwise_outcome_conflict"]):
+    if "safety_avoid" in active_categories:
         return True
     return False
