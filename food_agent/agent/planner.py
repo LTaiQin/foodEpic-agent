@@ -4667,6 +4667,14 @@ class GraphAgentPlanner:
                         "image_paths": image_paths,
                     },
                 )
+        if self._action_intent_prefers_long_horizon_object_retrieval(state=state):
+            long_horizon_query = self._build_action_intent_long_horizon_object_query_decision(
+                state=state,
+                used_tools=used_tools,
+                thought="why 题近窗关键帧仍不足以区分 later use / final location；先按目标对象做全视频后续检索，再围绕它更晚的再次出现位置补帧。",
+            )
+            if long_horizon_query is not None:
+                return long_horizon_query
         specialized_resolution = self._build_action_intent_specialized_resolution_before_text_fallback(
             state=state,
             hints=hints,
@@ -6075,6 +6083,121 @@ class GraphAgentPlanner:
                 )
         return None
 
+    def _action_intent_prefers_long_horizon_object_retrieval(
+        self,
+        *,
+        state: AgentState,
+        result: dict[str, Any] | None = None,
+    ) -> bool:
+        if not self._is_action_intent_task(state):
+            return False
+        if self._action_intent_followup_attempt_count(state) < 1 and not self._latest_action_intent_timeline_review(state):
+            return False
+        bias_profile = self._action_intent_timeline_review_bias_profile(state)
+        needed_profile = self._action_intent_needed_observation_profile(state=state, result=result)
+        if bias_profile["next_use_unclear"] or bias_profile["final_location_unclear"]:
+            return True
+        if needed_profile["prefer_future_use_outcome"] or needed_profile["prefer_final_placement"]:
+            return True
+        return self._action_intent_pair_spans_immediate_and_later_outcomes(state=state, result=result)
+
+    def _build_action_intent_long_horizon_object_query_decision(
+        self,
+        *,
+        state: AgentState,
+        used_tools: list[str],
+        thought: str,
+        object_hint: Any = None,
+    ) -> PlannerDecision | None:
+        if not self._is_action_intent_task(state) or "query_object" in used_tools:
+            return None
+        query = self._action_intent_question_object_hint(state, object_hint)
+        if not query:
+            return None
+        return PlannerDecision(
+            thought=thought,
+            tool="query_object",
+            args={"query": query, "limit": 24},
+        )
+
+    def _action_intent_long_horizon_window_from_nodes(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        nodes: list[dict[str, Any]],
+    ) -> tuple[float, float] | None:
+        if not self._is_action_intent_task(state):
+            return None
+        anchor_times = sorted([float(value) for value in hints.get("times") or []] + [float(value) for value in hints.get("input_times") or []])
+        if not anchor_times:
+            anchor_times = self._action_intent_anchor_times(state)
+        action_end = max(anchor_times) if anchor_times else None
+        if action_end is None:
+            return None
+        latest_followup_end = self._latest_action_intent_followup_end_time(state)
+        lower_bound = max(action_end + 0.35, (latest_followup_end or action_end) + 0.35)
+        candidates: list[tuple[tuple[int, float], float, float]] = []
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            start_raw = node.get("start_time")
+            end_raw = node.get("end_time")
+            if start_raw is None:
+                continue
+            try:
+                start_time = float(start_raw)
+            except Exception:  # noqa: BLE001
+                continue
+            try:
+                end_time = float(end_raw) if end_raw is not None else start_time
+            except Exception:  # noqa: BLE001
+                end_time = start_time
+            if end_time < start_time:
+                end_time = start_time
+            if end_time <= lower_bound:
+                continue
+            node_type = str(node.get("node_type") or "").lower()
+            if node_type in {"object_track", "frame", "observation", "timeline_event"}:
+                priority = 0
+            elif node_type in {"segment", "activity"}:
+                priority = 1
+            else:
+                priority = 2
+            candidates.append(((priority, start_time), start_time, end_time))
+        if not candidates:
+            return None
+        _, start_time, end_time = min(candidates, key=lambda item: item[0])
+        duration = max(0.0, end_time - start_time)
+        if duration <= 0.25:
+            return (max(0.0, start_time - 0.5), start_time + 2.0)
+        if duration <= 4.0:
+            return (max(0.0, start_time - 0.4), end_time + 1.0)
+        return (max(0.0, start_time - 0.4), min(end_time, start_time + 4.8))
+
+    def _build_action_intent_long_horizon_sampling_decision(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        nodes: list[dict[str, Any]],
+    ) -> PlannerDecision | None:
+        window = self._action_intent_long_horizon_window_from_nodes(state=state, hints=hints, nodes=nodes)
+        if window is None:
+            return None
+        start_time, end_time = window
+        attempt_count = self._action_intent_followup_attempt_count(state)
+        return PlannerDecision(
+            thought="why 题近窗证据仍不能排除多个 later-use / final-location 解释；按目标对象在更后时刻的再次出现位置补一段长时域关键帧。",
+            tool="sample_sparse_frames",
+            args={
+                "start_time": start_time,
+                "end_time": end_time,
+                "sample_count": 4,
+                "tag": f"{state.task_family}_followup_ext{attempt_count + 1}",
+            },
+        )
+
     def _recipe_following_activity_step_decision(
         self,
         *,
@@ -7223,6 +7346,20 @@ class GraphAgentPlanner:
                 prediction=best_index,
                 confidence=float(last_result.get("confidence") or 0.0),
             )
+        if (
+            isinstance(last_result, dict)
+            and last_tool.get("tool") == "query_object"
+            and self._is_action_intent_task(state)
+        ):
+            nodes = last_result.get("nodes", [])
+            if isinstance(nodes, list):
+                long_horizon_sampling = self._build_action_intent_long_horizon_sampling_decision(
+                    state=state,
+                    hints=hints,
+                    nodes=nodes,
+                )
+                if long_horizon_sampling is not None:
+                    return long_horizon_sampling
         if (
             isinstance(last_result, dict)
             and last_tool.get("tool") == "inspect_visual_evidence"
@@ -8464,7 +8601,13 @@ class GraphAgentPlanner:
         if self._is_action_mechanism_task(state):
             return decision.tool in {"infer_action_mechanism", "finish"}
         if self._is_action_intent_task(state):
-            return decision.tool in {"infer_action_intent", "resolve_action_intent_pairwise", "resolve_action_intent_future_use", "finish"}
+            return decision.tool in {
+                "infer_action_intent",
+                "resolve_action_intent_pairwise",
+                "resolve_action_intent_future_use",
+                "query_object",
+                "finish",
+            }
         if self._is_recipe_catalog_task(state):
             return decision.tool in {"infer_recipe_catalog_choice", "finish"}
         if self._is_recipe_nutrition_task(state):
@@ -8576,6 +8719,14 @@ class GraphAgentPlanner:
             and combined_times
             and "need_alternative_evidence_path" in open_questions
         ):
+            if self._action_intent_prefers_long_horizon_object_retrieval(state=state):
+                long_horizon_query = self._build_action_intent_long_horizon_object_query_decision(
+                    state=state,
+                    used_tools=used_tools,
+                    thought="why 题近窗证据仍不足以区分 later use / final location；先按目标对象做全视频后续检索，而不是回到通用 query_time。",
+                )
+                if long_horizon_query is not None:
+                    return long_horizon_query
             if self._action_intent_prefers_specialized_open_question_recovery(state):
                 if self._action_intent_pending_resolution_tool(state) == "resolve_action_intent_future_use":
                     future_use = self._build_action_intent_future_use_resolution_decision(
