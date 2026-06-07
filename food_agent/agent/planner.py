@@ -196,32 +196,55 @@ class GraphAgentPlanner:
     def _is_action_intent_task(self, state: AgentState) -> bool:
         return str(getattr(state, "task_family", "")) == "fine_grained_why_recognition"
 
-    def _action_intent_requires_followup(self, state: AgentState, result: dict[str, Any] | None = None) -> bool:
-        if isinstance(result, dict):
-            if bool(result.get("need_future_evidence")) or bool(result.get("ambiguity")):
-                return True
-            try:
-                confidence = float(result.get("confidence") or 0.0)
-            except Exception:  # noqa: BLE001
-                confidence = 0.0
-            candidate_indices = self._latest_action_intent_candidate_indices(state, result=result)
-            needs_followup, _, _, _ = action_intent_followup_decision(
+    def _action_intent_followup_route(
+        self,
+        *,
+        state: AgentState,
+        result: dict[str, Any] | None = None,
+        candidate_indices: list[int] | None = None,
+    ) -> tuple[bool, str, float, str]:
+        if not self._is_action_intent_task(state):
+            return False, "", 4.0, ""
+        try:
+            confidence = float((result or {}).get("confidence") or 0.0)
+        except Exception:  # noqa: BLE001
+            confidence = 0.0
+        reason_text = str((result or {}).get("reason") or "")
+        indices = candidate_indices or self._latest_action_intent_candidate_indices(state, result=result)
+        semantic_indices = indices if len(indices) >= 2 else None
+        if semantic_indices is not None:
+            needs, reason, window_s, resolver = action_intent_followup_decision(
                 question=str(getattr(state, "question", "") or ""),
                 choices=[str(choice) for choice in getattr(state, "choices", [])],
-                indices=candidate_indices if len(candidate_indices) >= 2 else None,
+                indices=semantic_indices,
                 confidence=confidence,
-                reason_text=str(result.get("reason") or ""),
+                reason_text=reason_text,
             )
-            if needs_followup:
-                return True
-            all_needs_followup, _, _, _ = action_intent_followup_decision(
+            if needs:
+                return needs, reason, window_s, resolver
+        if semantic_indices is None:
+            needs, reason, window_s, resolver = action_intent_followup_decision(
                 question=str(getattr(state, "question", "") or ""),
                 choices=[str(choice) for choice in getattr(state, "choices", [])],
                 indices=None,
                 confidence=confidence,
-                reason_text=str(result.get("reason") or ""),
+                reason_text=reason_text,
             )
-            if all_needs_followup:
+            if needs:
+                return needs, reason, window_s, resolver
+        pending_tool = self._action_intent_pending_resolution_tool(state)
+        if pending_tool == "resolve_action_intent_future_use":
+            return True, "pending_future_use_resolution", 8.0, "future_use"
+        if pending_tool == "resolve_action_intent_pairwise":
+            return True, "pending_pairwise_resolution", 4.0, "pairwise"
+        return False, "", 4.0, ""
+
+    def _action_intent_requires_followup(self, state: AgentState, result: dict[str, Any] | None = None) -> bool:
+        if isinstance(result, dict):
+            if bool(result.get("need_future_evidence")) or bool(result.get("ambiguity")):
+                return True
+            needs_followup, _, _, _ = self._action_intent_followup_route(state=state, result=result)
+            if needs_followup:
                 return True
         return any(
             isinstance(item, str) and item.startswith("action_intent_need_future_evidence=1")
@@ -237,17 +260,12 @@ class GraphAgentPlanner:
         combined_times = sorted([float(value) for value in hints.get("times") or []] + [float(value) for value in hints.get("input_times") or []])
         if not combined_times:
             return None
-        focus = ""
-        semantic_need, semantic_reason, semantic_window_s, _ = action_intent_followup_decision(
-            question=str(getattr(state, "question", "") or ""),
-            choices=[str(choice) for choice in getattr(state, "choices", [])],
-        )
-        if semantic_need:
-            focus = semantic_reason
-        window_s = max(
-            semantic_window_s,
-            8.0 if self._action_intent_needs_future_use_evidence(state=state, result=None) else 4.0,
-        )
+        _, focus, semantic_window_s, semantic_resolver = self._action_intent_followup_route(state=state, result=None)
+        window_s = semantic_window_s
+        if semantic_resolver == "future_use":
+            window_s = max(window_s, 8.0)
+        elif semantic_resolver == "pairwise":
+            window_s = max(window_s, 4.0)
         for item in reversed(list(getattr(state, "working_memory", []))):
             if not isinstance(item, str) or not item.startswith("action_intent_need_future_evidence=1"):
                 continue
@@ -596,6 +614,21 @@ class GraphAgentPlanner:
                     indices.append(index)
         latest_trace = state.tool_trace[-1] if state.tool_trace else {}
         latest_raw = latest_trace.get("raw_result") if isinstance(latest_trace, dict) else {}
+        if not indices and isinstance(latest_raw, dict):
+            for value in latest_raw.get("candidate_indices") or []:
+                try:
+                    index = int(value)
+                except Exception:  # noqa: BLE001
+                    continue
+                if 0 <= index < len(state.choices) and index not in indices:
+                    indices.append(index)
+            for key in ("best_index", "second_best_index"):
+                try:
+                    index = int(latest_raw.get(key))
+                except Exception:  # noqa: BLE001
+                    continue
+                if 0 <= index < len(state.choices) and index not in indices:
+                    indices.append(index)
         if (
             not indices
             and isinstance(latest_trace, dict)
@@ -660,6 +693,15 @@ class GraphAgentPlanner:
         if not self._is_action_intent_task(state):
             return False
         indices = candidate_indices or self._latest_action_intent_candidate_indices(state, result=result)
+        needs_followup, _, _, resolver = self._action_intent_followup_route(
+            state=state,
+            result=result,
+            candidate_indices=indices,
+        )
+        if needs_followup and resolver == "pairwise":
+            return True
+        if needs_followup and resolver == "future_use":
+            return False
         if len(indices) < 2:
             return False
         if action_intent_needs_pairwise_resolution(
@@ -721,6 +763,15 @@ class GraphAgentPlanner:
         if not self._is_action_intent_task(state):
             return False
         candidate_indices = self._latest_action_intent_candidate_indices(state, result=result)
+        needs_followup, _, _, resolver = self._action_intent_followup_route(
+            state=state,
+            result=result,
+            candidate_indices=candidate_indices,
+        )
+        if needs_followup and resolver == "future_use":
+            return True
+        if needs_followup and resolver == "pairwise":
+            return False
         if action_intent_needs_future_use_resolution(
             question=str(getattr(state, "question", "") or ""),
             choices=[str(choice) for choice in getattr(state, "choices", [])],
