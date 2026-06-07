@@ -7,6 +7,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+def _env_text(name: str, default: str) -> str:
+    """Read a text env var and normalize surrounding whitespace."""
+    return os.environ.get(name, default).strip()
+
+
 @dataclass(frozen=True)
 class ProjectConfig:
     """Runtime configuration for local HD-EPIC based experiments."""
@@ -74,12 +79,13 @@ class ModelConfig:
 
     @classmethod
     def from_env(cls) -> "ModelConfig":
+        base_url = _env_text("OPENAI_BASE_URL", "https://right.codes/codex/v1").rstrip("/")
         return cls(
-            model=os.environ.get("FOOD_AGENT_MODEL", "gpt-5.4"),
-            api_key=os.environ.get("OPENAI_API_KEY", ""),
-            base_url=os.environ.get("OPENAI_BASE_URL", "https://right.codes/codex/v1"),
-            provider_mode=os.environ.get("FOOD_AGENT_PROVIDER_MODE", "responses"),
-            vision_provider_mode=os.environ.get("FOOD_AGENT_VISION_PROVIDER_MODE", "auto"),
+            model=_env_text("FOOD_AGENT_MODEL", "gpt-5.4"),
+            api_key=_env_text("OPENAI_API_KEY", ""),
+            base_url=base_url,
+            provider_mode=_env_text("FOOD_AGENT_PROVIDER_MODE", "responses"),
+            vision_provider_mode=_env_text("FOOD_AGENT_VISION_PROVIDER_MODE", "auto"),
             max_retries=int(os.environ.get("FOOD_AGENT_MODEL_MAX_RETRIES", "3")),
             vision_max_retries=int(os.environ.get("FOOD_AGENT_VISION_MAX_RETRIES", "0")),
             retry_backoff_seconds=float(os.environ.get("FOOD_AGENT_MODEL_RETRY_BACKOFF_SECONDS", "2.0")),
