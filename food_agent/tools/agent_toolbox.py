@@ -2993,9 +2993,10 @@ class AgentToolbox:
             "\n2. 还是只是把前景物体挪开后腾出了空间/完成整理"
             "\n3. 是否把被挪开的物体放回，或是否把另一个目标物件安装/放回到位"
             "\n4. 必须区分“当前动作的直接物理效果”和“之后发生的下游动作”。"
-            "\n5. 如果当前动作是 move/shift/remove 某物，而后续只是把另一个物体放入腾出的空间，当前动作的直接目的通常是 make space，不要把下游放置动作当成当前动作本身的目的。"
-            "\n6. 只有当被移动的物体本身被放回/摆正，或证据显示题目动作直接就是放置该物体，才选择 put/place/right place 类候选。"
-            "\n7. 如果证据仍不够，不要强行高置信收口；必须标记 need_more_evidence=true，并说明还需要看哪个后续动作。"
+            "\n5. 如果当前动作是 move/shift/remove 某物，而后续只是把另一个物体放入腾出的空间，当前动作的直接目的通常是 make space，不要把泛化的下游放置动作当成当前动作本身的目的。"
+            "\n6. 但如果证据明确显示：当前动作是在为某个具体目标物体腾出某个具体槽位/位置/落点，且后续立刻发生该精确放置，则可以选择更具体的 put/place/fit/slot 类候选。"
+            "\n7. 只有当被移动的物体本身被放回/摆正，或证据显示题目动作直接就是为另一个具体物体创造精确落位条件，才选择 put/place/right place 类候选。"
+            "\n8. 如果证据仍不够，不要强行高置信收口；必须标记 need_more_evidence=true，并说明还需要看哪个后续动作。"
             f"\n上下文线索: {scoped_notes}"
             '\n输出 JSON，字段固定为 {"best_index":0,"answer":"","confidence":0.0,"reason":"","losing_index":0,"direct_effect":"","downstream_action":"","need_more_evidence":false,"needed_observation":""}。'
             f"\n问题: {question}"
@@ -3499,6 +3500,11 @@ class AgentToolbox:
         ).lower()
         if not self._explanation_uses_downstream_space_chain(explanation):
             return result
+        downstream_choice = str(choices[downstream_place_index])
+        if self._choice_is_exact_downstream_placement_purpose(downstream_choice) and self._explanation_uses_exact_targeted_placement_chain(
+            explanation
+        ):
+            return result
         adjusted = dict(result)
         adjusted["best_index"] = direct_space_index
         adjusted["answer"] = str(choices[direct_space_index])
@@ -3536,6 +3542,71 @@ class AgentToolbox:
             any(token in text for token in ("put ", "place ", "right place", "proper place", "fit ", "insert ", "slot "))
             and any(token in text for token in ("other", "another", "piece", "part", "item", "dish", "lid", "white"))
         )
+
+    def _choice_is_exact_downstream_placement_purpose(self, choice: str) -> bool:
+        text = str(choice or "").lower()
+        if self._choice_is_direct_space_purpose(text):
+            return False
+        if not any(token in text for token in ("put ", "place ", "fit ", "insert ", "slot ", "into ", "onto ", "down on ")):
+            return False
+        if any(token in text for token in ("right place", "proper place")) and not any(
+            token in text
+            for token in (
+                "sink",
+                "slot",
+                "rack",
+                "dishwasher",
+                "scale",
+                "hob",
+                "tray",
+                "counter",
+                "board",
+                "plate",
+                "bowl",
+                "colander",
+                "saucepan",
+                "pan",
+                "water",
+            )
+        ):
+            return False
+        has_target = any(
+            token in text
+            for token in (
+                "saucepan",
+                "pan",
+                "pot",
+                "bowl",
+                "plate",
+                "tray",
+                "colander",
+                "board",
+                "lid",
+                "tupperware",
+                "large bowls",
+                "item",
+                "object",
+            )
+        )
+        has_destination = any(
+            token in text
+            for token in (
+                "sink",
+                "slot",
+                "rack",
+                "dishwasher",
+                "scale",
+                "hob",
+                "counter",
+                "drying rack",
+                "draining rack",
+                "into the",
+                "onto the",
+                "on the counter",
+                "in the sink",
+            )
+        )
+        return has_target and has_destination
 
     def _explanation_uses_downstream_space_chain(self, explanation: str) -> bool:
         text = str(explanation or "").lower()
@@ -3577,6 +3648,61 @@ class AgentToolbox:
             )
         )
         return has_downstream and has_space_or_blocking
+
+    def _explanation_uses_exact_targeted_placement_chain(self, explanation: str) -> bool:
+        text = str(explanation or "").lower()
+        has_target = any(
+            token in text
+            for token in (
+                "saucepan",
+                "pan",
+                "pot",
+                "bowl",
+                "plate",
+                "tray",
+                "colander",
+                "lid",
+                "tupperware",
+                "large bowls",
+                "another item",
+                "next item",
+            )
+        )
+        has_destination = any(
+            token in text
+            for token in (
+                "sink slot",
+                "sink",
+                "slot",
+                "rack",
+                "dishwasher",
+                "scale",
+                "hob",
+                "counter",
+                "drying rack",
+                "draining rack",
+                "available spot",
+                "freed spot",
+                "freed slot",
+                "exact slot",
+                "exact place",
+            )
+        )
+        has_immediacy = any(
+            token in text
+            for token in (
+                "immediately",
+                "right after",
+                "directly after",
+                "as soon as",
+                "then",
+                "after",
+                "随后",
+                "紧接着",
+                "立刻",
+            )
+        )
+        return has_target and has_destination and has_immediacy
 
     def _scope_action_intent_context_notes(self, *, question: str, image_paths: list[str], context_notes: list[str]) -> list[str]:
         context_notes = self._sanitize_action_intent_context_notes(context_notes)

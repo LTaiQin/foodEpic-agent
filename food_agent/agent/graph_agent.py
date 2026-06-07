@@ -1042,6 +1042,15 @@ class GraphAgent:
             global_context=global_context,
         ):
             adjusted += 0.4
+        if self._action_intent_choice_is_exact_downstream_targeted_placement(
+            question=question_lc,
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            action_object=action_object,
+            global_context=global_context,
+        ):
+            adjusted += 0.36
         if self._action_intent_choice_is_cleaning_tool_specific_target_use(
             choice=choice_lc,
             support=support_lc,
@@ -2131,6 +2140,156 @@ class GraphAgent:
                 "为接下来拿起",
                 "让开以便",
                 "腾出槽位",
+            )
+        )
+
+    def _action_intent_choice_is_exact_downstream_targeted_placement(
+        self,
+        *,
+        question: str,
+        choice: str,
+        support: str,
+        contradiction: str,
+        action_object: str,
+        global_context: str,
+    ) -> bool:
+        if not any(token in question for token in ("move ", "transfer ", "shift ", "remove ", "clear ", "pick up ")):
+            return False
+        if self._action_intent_choice_is_exact_workspace_creation(
+            choice=choice,
+            support=support,
+            contradiction=contradiction,
+            action_object=action_object,
+            global_context=global_context,
+        ):
+            return False
+        if not any(
+            token in choice
+            for token in (
+                "put ",
+                "place ",
+                "fit ",
+                "insert ",
+                "slot ",
+                "into the sink",
+                "into the rack",
+                "onto the",
+                "down on the",
+                "放进",
+                "放到",
+                "插入",
+                "槽位",
+            )
+        ):
+            return False
+        if any(
+            token in choice
+            for token in (
+                "right place",
+                "proper place",
+            )
+        ) and not any(
+            token in choice
+            for token in (
+                "sink",
+                "slot",
+                "rack",
+                "dishwasher",
+                "scale",
+                "hob",
+                "tray",
+                "counter",
+                "plate",
+                "bowl",
+                "colander",
+                "saucepan",
+                "pan",
+            )
+        ):
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        if action_object and not any(
+            token in signal_text
+            for token in [token for token in re.split(r"[^a-z0-9]+", action_object) if token and len(token) >= 3]
+        ):
+            if not any(
+                token in signal_text
+                for token in (
+                    "moved object",
+                    "current object",
+                    "out of the way",
+                    "让开",
+                    "挪开",
+                )
+            ):
+                return False
+        has_target = any(
+            token in signal_text
+            for token in (
+                "saucepan",
+                "pan",
+                "pot",
+                "bowl",
+                "plate",
+                "tray",
+                "colander",
+                "lid",
+                "tupperware",
+                "large bowls",
+                "next item",
+                "another item",
+                "plastic colander",
+                "下一个物体",
+                "另一个物体",
+            )
+        )
+        has_destination = any(
+            token in signal_text
+            for token in (
+                "sink slot",
+                "slot in the rack",
+                "available spot",
+                "free slot",
+                "freed slot",
+                "in the sink",
+                "into the sink",
+                "into the rack",
+                "onto the counter",
+                "onto the scale",
+                "exact next item and destination",
+                "具体下一目标和位置",
+                "腾出槽位",
+                "放进水槽",
+                "放到晾架",
+            )
+        )
+        has_immediacy = any(
+            token in signal_text
+            for token in (
+                "immediately afterwards",
+                "immediately after",
+                "directly afterwards",
+                "directly after",
+                "right afterwards",
+                "about to put down",
+                "prepare to put down",
+                "then the",
+                "紧接着",
+                "随后",
+                "立刻",
+                "接着就",
+            )
+        )
+        if not (has_target and has_destination and has_immediacy):
+            return False
+        return not any(
+            token in contradiction
+            for token in (
+                "only generic space",
+                "generic workspace effect",
+                "not tied to a specific next item",
+                "只是泛化空间效果",
+                "没有具体下一目标",
             )
         )
 
