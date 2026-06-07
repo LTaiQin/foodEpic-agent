@@ -6961,6 +6961,8 @@ class GraphAgentPlanner:
                 "glass",
                 "jar",
                 "colander",
+                "container",
+                "bin",
                 "scale",
                 "tap",
                 "faucet",
@@ -6992,6 +6994,7 @@ class GraphAgentPlanner:
             "faucet",
             "scale",
             "sink",
+            "bin",
             "hob",
             "microwave",
             "oven",
@@ -7007,6 +7010,51 @@ class GraphAgentPlanner:
             for token in self._action_intent_choice_target_object_candidates(choice=choice, action_object=action_object)
             if token in fixture_targets
         ]
+
+    def _action_intent_later_outcome_target_hint(
+        self,
+        *,
+        choice: str,
+        action_object: str,
+        categories: set[str],
+        evidence_text: str,
+    ) -> tuple[str, str] | None:
+        fixture_targets = self._action_intent_choice_fixture_target_candidates(choice=choice, action_object=action_object)
+        if fixture_targets:
+            return fixture_targets[0], "fixture"
+        object_targets = [
+            token
+            for token in self._action_intent_choice_target_object_candidates(choice=choice, action_object=action_object)
+            if token not in set(fixture_targets)
+        ]
+        if object_targets:
+            return object_targets[0], "object"
+        if "measure_weigh" in categories:
+            return "scale", "fixture"
+        evidence_lc = str(evidence_text or "").strip().lower()
+        if "final_place_return" in categories:
+            for token in ("fridge", "drawer", "cupboard", "rack", "dishwasher", "shelf"):
+                if token in evidence_lc:
+                    return token, ("object" if token == "shelf" else "fixture")
+        if categories & {"transfer_contents", "serve_consume", "discard", "food_prep", "clean_dry"}:
+            for token, kind in (
+                ("sink", "fixture"),
+                ("bin", "fixture"),
+                ("bowl", "object"),
+                ("plate", "object"),
+                ("tray", "object"),
+                ("pan", "object"),
+                ("pot", "object"),
+                ("saucepan", "object"),
+                ("cup", "object"),
+                ("glass", "object"),
+                ("jar", "object"),
+                ("colander", "object"),
+                ("container", "object"),
+            ):
+                if token in evidence_lc:
+                    return token, kind
+        return None
 
     def _action_intent_choice_is_same_object_active_use(self, *, choice: str, action_object: str) -> bool:
         action_object_lc = str(action_object or "").strip().lower()
@@ -7139,18 +7187,6 @@ class GraphAgentPlanner:
         if later_index is None:
             return None
         action_object = self._action_intent_question_object_hint(state)
-        fixture_targets = self._action_intent_choice_fixture_target_candidates(choice=later_choice, action_object=action_object)
-        if fixture_targets:
-            return fixture_targets[0], "fixture"
-        object_targets = [
-            token
-            for token in self._action_intent_choice_target_object_candidates(choice=later_choice, action_object=action_object)
-            if token not in set(fixture_targets)
-        ]
-        if object_targets:
-            return object_targets[0], "object"
-        if "measure_weigh" in later_categories:
-            return "scale", "fixture"
         combined_text = later_choice.lower()
         for item in payload.get("candidate_evidence") or []:
             if not isinstance(item, dict):
@@ -7160,11 +7196,12 @@ class GraphAgentPlanner:
                 continue
             combined_text = f"{combined_text} {str(item.get('support') or '').lower()} {str(item.get('contradiction') or '').lower()}"
             break
-        if "final_place_return" in later_categories:
-            for token in ("fridge", "drawer", "cupboard", "rack", "dishwasher", "shelf"):
-                if token in combined_text:
-                    return token, ("object" if token == "shelf" else "fixture")
-        return None
+        return self._action_intent_later_outcome_target_hint(
+            choice=later_choice,
+            action_object=action_object,
+            categories=later_categories,
+            evidence_text=combined_text,
+        )
 
     def _action_intent_unresolved_rerank_hand_free_object_hint(self, state: AgentState) -> str:
         reason = self._action_intent_recent_unresolved_rerank_withheld_reason(state)

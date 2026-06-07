@@ -1150,7 +1150,7 @@ class GraphAgent:
         choice_lc = str(choice or "").strip().lower()
         action_object_lc = str(action_object or "").strip().lower()
         action_object_tokens = {token for token in re.split(r"[^a-z0-9]+", action_object_lc) if token}
-        fixtures = {"tap", "faucet", "scale", "sink", "fridge", "drawer", "cupboard", "door", "dishwasher", "rack"}
+        fixtures = {"tap", "faucet", "scale", "sink", "fridge", "drawer", "cupboard", "door", "dishwasher", "rack", "bin"}
         for token in (
             "whisk",
             "knife",
@@ -1174,6 +1174,8 @@ class GraphAgent:
             "glass",
             "jar",
             "colander",
+            "container",
+            "bin",
             "scale",
             "tap",
             "faucet",
@@ -1190,6 +1192,46 @@ class GraphAgent:
             if token in action_object_tokens:
                 continue
             return token, ("fixture" if token in fixtures else "object")
+        return None
+
+    def _action_intent_later_outcome_target_token_and_kind(
+        self,
+        *,
+        choice: str,
+        action_object: str,
+        categories: set[str],
+        evidence_text: str,
+    ) -> tuple[str, str] | None:
+        direct = self._action_intent_choice_target_token_and_kind(choice=choice, action_object=action_object)
+        if direct is not None:
+            return direct
+        evidence_lc = str(evidence_text or "").strip().lower()
+        if not evidence_lc:
+            evidence_lc = str(choice or "").strip().lower()
+        if "measure_weigh" in categories:
+            return ("scale", "fixture")
+        if "final_place_return" in categories:
+            for token in ("fridge", "drawer", "cupboard", "rack", "dishwasher", "shelf"):
+                if token in evidence_lc:
+                    return token, ("object" if token == "shelf" else "fixture")
+        if categories & {"transfer_contents", "serve_consume", "discard", "food_prep", "clean_dry"}:
+            for token, kind in (
+                ("sink", "fixture"),
+                ("bin", "fixture"),
+                ("bowl", "object"),
+                ("plate", "object"),
+                ("tray", "object"),
+                ("pan", "object"),
+                ("pot", "object"),
+                ("saucepan", "object"),
+                ("cup", "object"),
+                ("glass", "object"),
+                ("jar", "object"),
+                ("colander", "object"),
+                ("container", "object"),
+            ):
+                if token in evidence_lc:
+                    return token, kind
         return None
 
     def _action_intent_resolution_generic_access_or_space_overclaim_marker(
@@ -1764,15 +1806,26 @@ class GraphAgent:
         if not (competitor_categories & later_outcome_categories):
             return ""
         action_object = self._action_intent_question_object(str(getattr(state, "question", "") or ""))
-        target = self._action_intent_choice_target_token_and_kind(choice=competitor_choice, action_object=action_object)
-        if target is None and "measure_weigh" in competitor_categories:
-            target = ("scale", "fixture")
-        if target is None and "final_place_return" in competitor_categories:
-            combined_text = f"{competitor_choice} {raw_result.get('reason') or ''} {raw_result.get('decisive_observation') or ''}".lower()
-            for token in ("fridge", "drawer", "cupboard", "rack", "dishwasher", "shelf"):
-                if token in combined_text:
-                    target = (token, "fixture" if token != "shelf" else "object")
-                    break
+        combined_text = " ".join(
+            str(raw_result.get(key) or "")
+            for key in ("reason", "decisive_observation", "needed_observation")
+        ).lower()
+        for item in raw_result.get("candidate_evidence") or []:
+            if not isinstance(item, dict):
+                continue
+            index = self._coerce_choice_index(item.get("index"), choices)
+            if index != competitor_index:
+                continue
+            combined_text = (
+                f"{combined_text} {str(item.get('support') or '').lower()} {str(item.get('contradiction') or '').lower()}"
+            ).strip()
+            break
+        target = self._action_intent_later_outcome_target_token_and_kind(
+            choice=competitor_choice,
+            action_object=action_object,
+            categories=competitor_categories,
+            evidence_text=combined_text,
+        )
         if target is None:
             return ""
         target_name, target_kind = target
