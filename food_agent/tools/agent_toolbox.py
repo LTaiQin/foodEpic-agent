@@ -4466,6 +4466,16 @@ class AgentToolbox:
         if any(term in choice_lc for term in ("check", "inspect", "read", "label", "date", "look")):
             if not self._text_has_any(support_text, ("check", "inspect", "look", "read", "label", "date", "visible", "查看", "看", "读", "标签")):
                 gaps.append("missing_inspection_evidence")
+            inspection_support = str(support_text or "").strip()
+            inspection_context = f"{support_text} {context_text}".strip()
+            if self._choice_is_label_or_date_inspection_future_use_purpose(choice):
+                if not self._action_intent_has_label_or_date_reading_chain(inspection_support):
+                    gaps.append("missing_label_or_date_reading_chain")
+            elif self._choice_is_specific_cooking_inspection_future_use_purpose(choice):
+                if not self._explanation_uses_brief_cooking_inspection_chain(inspection_context, action_object=""):
+                    gaps.append("missing_brief_cooking_inspection_chain")
+            elif not self._action_intent_has_direct_generic_inspection_chain(inspection_support):
+                gaps.append("missing_direct_object_inspection_chain")
         if "hand_free_enablement" in categories:
             if not self._text_has_grouped_terms(
                 support_text,
@@ -4602,6 +4612,12 @@ class AgentToolbox:
             return "post-action frames showing an actual measurement reading, zeroing/tare action, or explicit app/readout update rather than only generic measurement context"
         if any("measurement" in gap for gap in gaps):
             return "post-action frames showing the scale/measurement setup and the object being weighed"
+        if any("label_or_date_reading_chain" in gap for gap in gaps):
+            return "close post-action frames showing the person actually reading or checking the label/date text, expiry, or printed information on the target"
+        if any("brief_cooking_inspection_chain" in gap for gap in gaps):
+            return "post-action frames showing a real brief check chain: the container is looked into or checked while staying near the hob/container area, rather than being poured, served, or carried away"
+        if any("direct_object_inspection_chain" in gap for gap in gaps):
+            return "post-action frames showing what property of the object is actually being inspected, not just that it was briefly lifted or moved into view"
         if any("transfer_or_emptying" in gap for gap in gaps):
             return "post-action frames showing pouring, draining, emptying, or liquid/contents transfer"
         if any("serving_or_consumption" in gap for gap in gaps):
@@ -4625,6 +4641,165 @@ class AgentToolbox:
     def _text_has_grouped_terms(self, text: str, groups: tuple[tuple[str, ...], ...]) -> bool:
         lowered = str(text or "").lower()
         return all(any(term in lowered for term in group) for group in groups)
+
+    def _choice_is_label_or_date_inspection_future_use_purpose(self, choice: str) -> bool:
+        text = str(choice or "").lower()
+        has_target = any(
+            token in text
+            for token in (
+                "label",
+                "date",
+                "expiry",
+                "expiration",
+                "best before",
+                "use by",
+                "sell by",
+                "printed information",
+                "标签",
+                "日期",
+                "保质期",
+            )
+        )
+        has_inspection = any(
+            token in text
+            for token in ("check", "inspect", "read", "look", "verify", "查看", "读", "看", "确认")
+        )
+        return has_target and has_inspection
+
+    def _choice_is_specific_cooking_inspection_future_use_purpose(self, choice: str) -> bool:
+        text = str(choice or "").lower()
+        return any(
+            token in text
+            for token in (
+                "check the boiling",
+                "boiling water",
+                "check the contents",
+                "look inside",
+                "look into",
+                "see inside",
+                "check inside",
+                "check the consistency",
+                "consistency",
+                "see if it is cooked",
+                "see whether it is cooked",
+                "doneness",
+                "cooked",
+                "boiling",
+                "contents of the pan",
+                "contents of the pot",
+                "contents of the bowl",
+                "检查是否沸腾",
+                "查看内容物",
+                "检查状态",
+                "检查熟了",
+                "检查浓稠度",
+            )
+        )
+
+    def _action_intent_has_label_or_date_reading_chain(self, text: str) -> bool:
+        return self._text_has_grouped_terms(
+            text,
+            (
+                ("check", "inspect", "read", "reading", "look", "look at", "verify", "查看", "读", "看", "确认"),
+                (
+                    "label",
+                    "date",
+                    "expiry",
+                    "expiration",
+                    "best before",
+                    "use by",
+                    "sell by",
+                    "printed information",
+                    "printed text",
+                    "text on",
+                    "label text",
+                    "date text",
+                    "标签",
+                    "日期",
+                    "保质期",
+                    "文字",
+                ),
+            ),
+        )
+
+    def _action_intent_has_direct_generic_inspection_chain(self, text: str) -> bool:
+        lowered = str(text or "").lower()
+        has_inspection = self._text_has_any(
+            lowered,
+            (
+                "check",
+                "inspect",
+                "read",
+                "reading",
+                "look",
+                "look at",
+                "look inside",
+                "look into",
+                "examined",
+                "examining",
+                "查看",
+                "检查",
+                "看",
+                "读",
+            ),
+        )
+        if not has_inspection:
+            return False
+        has_specific_target_or_state = self._text_has_any(
+            lowered,
+            (
+                "inside",
+                "contents",
+                "condition",
+                "state",
+                "whether",
+                "if it is",
+                "doneness",
+                "cooked",
+                "boiling",
+                "consistency",
+                "label",
+                "date",
+                "expiry",
+                "expiration",
+                "printed information",
+                "printed text",
+                "readout",
+                "display",
+                "surface condition",
+                "damage",
+                "dirty",
+                "clean enough",
+                "empty",
+                "full",
+                "blocked",
+                "里面",
+                "内容物",
+                "状态",
+                "标签",
+                "日期",
+                "保质期",
+                "读数",
+                "显示",
+                "是否",
+            ),
+        )
+        weak_only = self._text_has_any(
+            lowered,
+            (
+                "could in principle be inspected",
+                "inspection remains possible",
+                "might be inspected",
+                "briefly lifted into view",
+                "simply visible",
+                "only visible",
+                "just visible",
+                "只是看得到",
+                "只是抬起来",
+                "仅仅可见",
+            ),
+        )
+        return has_specific_target_or_state and not weak_only
 
     def _apply_action_intent_pairwise_sufficiency(
         self,

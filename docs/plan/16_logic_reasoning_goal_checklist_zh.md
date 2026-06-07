@@ -167,7 +167,18 @@
 - 本轮提交：新增 2 条 measurement 定向测试，分别保护：
   - generic measurement context 但缺 direct measurement role 时，`future_use sufficiency` 会继续要证据
   - generic measurement-meta 但缺 reading / tare / readout 信号时，`future_use sufficiency` 会继续要证据
-- 本轮提交：measurement 正例回归与 why 专项总回归均保持通过；当前专项结果仍为 `207 passed, 339 deselected`
+- 本轮提交：`toolbox` 的 `future_use sufficiency` 继续向 inspection bucket 收紧：
+  - `to check / inspect / read / label / date` 不再只因为 support 里出现 `look / visible / inspect` 之类宽泛字样就算过
+  - cooking inspection（如 `check the boiling water / check the contents / check the consistency`）现在必须形成更完整的“短暂查看 + 仍停留在灶台/容器语境 + 非 pour/serve/empty”检查链
+  - `check the label / check the date` 现在必须看到更直接的 reading chain，例如真的在看或读标签、日期、保质期或 printed text，而不是只看到“标签一度可见”
+  - generic `inspect the object` 现在必须指出“在检查物体的什么状态/属性”，而不是只看到“物体被短暂拿起或转到视野里”
+- 本轮提交：新增并通过 `5` 条 inspection 定向测试，分别保护：
+  - generic inspect claim 缺 direct inspection chain 时继续要证据
+  - brief boiling check chain 可直接通过
+  - contents check chain 可直接通过
+  - label/date 只有 visible 但没有 reading chain 时继续要证据
+  - explicit label reading chain 可直接通过
+- 本轮提交：inspection 定向测试 `5 passed`，why 专项总回归仍保持通过；当前专项结果更新为 `207 passed, 344 deselected`
 
 ### 16.2.4 当前真正的瓶颈
 
