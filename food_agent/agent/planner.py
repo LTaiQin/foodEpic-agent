@@ -6520,6 +6520,67 @@ class GraphAgentPlanner:
             return False
         return True
 
+    def _action_intent_spatial_has_storage_closure_cue(self, spatial: dict[str, Any]) -> bool:
+        if not isinstance(spatial, dict):
+            return False
+        audio_labels = " ".join(
+            str(item.get("label") or item.get("event_type") or "").strip().lower()
+            for item in spatial.get("audio_events") or []
+            if isinstance(item, dict)
+        )
+        if any(token in audio_labels for token in ("door", "close", "closed", "shut", "click", "drawer")):
+            return True
+        for collection_name in ("object_tracks", "object_masks"):
+            for item in spatial.get(collection_name) or []:
+                if not isinstance(item, dict):
+                    continue
+                object_name = str(item.get("object_name") or "").strip().lower()
+                if any(token in object_name for token in ("door", "door handle", "drawer")):
+                    return True
+        return False
+
+    def _action_intent_long_horizon_spatial_context_looks_nonexclusive_storage_anchor(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        spatial: dict[str, Any],
+        anchor_time: float,
+    ) -> bool:
+        if not self._action_intent_prefers_long_horizon_object_retrieval(state=state):
+            return False
+        target_fixture = self._action_intent_spatial_target_mask_fixture(state, spatial)
+        if self._action_intent_fixture_bucket(target_fixture) != "storage":
+            return False
+        bias_profile = self._action_intent_timeline_review_bias_profile(state)
+        needed_profile = self._action_intent_needed_observation_profile(state=state)
+        if not (
+            bias_profile["final_location_unclear"]
+            or needed_profile["prefer_final_placement"]
+            or needed_profile["prefer_future_use_outcome"]
+        ):
+            return False
+        anchor_node = self._action_intent_long_horizon_anchor_node_at_time(
+            state=state,
+            hints=hints,
+            anchor_time=anchor_time,
+        )
+        if anchor_node is None:
+            return False
+        _node, start_time, end_time = anchor_node
+        duration = max(0.0, end_time - start_time)
+        if duration > 1.5:
+            return False
+        if self._action_intent_spatial_has_storage_closure_cue(spatial):
+            return False
+        if not self._action_intent_has_later_long_horizon_node_after(
+            state=state,
+            hints=hints,
+            after_time=end_time,
+        ):
+            return False
+        return True
+
     def _recipe_following_activity_step_decision(
         self,
         *,
@@ -7383,6 +7444,20 @@ class GraphAgentPlanner:
                     except Exception:  # noqa: BLE001
                         anchor_value = None
                     if anchor_value is not None:
+                        if self._action_intent_long_horizon_spatial_context_looks_nonexclusive_storage_anchor(
+                            state=state,
+                            hints=hints,
+                            spatial=last_result,
+                            anchor_time=anchor_value,
+                        ):
+                            long_horizon_revisit = self._build_action_intent_cached_long_horizon_revisit_decision(
+                                state=state,
+                                hints=hints,
+                                thought="why 题当前只是短暂停在 fridge/cabinet/shelf 一类 storage 附近，但还没有真正放回闭环；继续沿更晚节点向后追。",
+                                after_time=anchor_value,
+                            )
+                            if long_horizon_revisit is not None:
+                                return long_horizon_revisit
                         if self._action_intent_long_horizon_spatial_context_looks_transit_near_decisive_fixture(
                             state=state,
                             hints=hints,
