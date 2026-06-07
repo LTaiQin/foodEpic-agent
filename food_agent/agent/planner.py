@@ -6581,6 +6581,108 @@ class GraphAgentPlanner:
             return False
         return True
 
+    def _latest_action_intent_target_spatial_anchor_time(self, state: AgentState) -> float | None:
+        target = self._action_intent_question_object_hint(state).strip().lower()
+        if not target:
+            return None
+        for entry in reversed(getattr(state, "tool_trace", [])):
+            if not isinstance(entry, dict) or entry.get("tool") != "query_spatial_context":
+                continue
+            args = entry.get("args") or {}
+            if not isinstance(args, dict):
+                continue
+            object_name = str(args.get("object_name") or "").strip().lower()
+            if object_name != target:
+                continue
+            try:
+                return float(args.get("time_s"))
+            except Exception:  # noqa: BLE001
+                continue
+        return None
+
+    def _action_intent_result_looks_weak_late_anchor_support(
+        self,
+        *,
+        state: AgentState,
+        result: dict[str, Any] | None,
+    ) -> bool:
+        if not self._action_intent_prefers_long_horizon_object_retrieval(state=state):
+            return False
+        if not isinstance(result, dict):
+            return False
+        if self._action_intent_result_has_direct_post_action_evidence(result):
+            return False
+        text = self._action_intent_result_support_text(result)
+        if not text:
+            return False
+        proximity_terms = (
+            "remains in hand",
+            "visible in hand",
+            "stays in hand",
+            "stays near",
+            "near the fridge",
+            "near the fridge opening",
+            "near the shelf",
+            "near the counter",
+            "near the sink",
+            "near the hob",
+            "within reach",
+            "visible while held",
+            "held near",
+            "still held",
+            "靠近",
+            "拿在手里",
+            "仍在手里",
+            "附近",
+        )
+        uncertainty_terms = (
+            "not decisively grounded",
+            "still unclear",
+            "it is not yet visible whether",
+            "whether",
+            "could still",
+            "may be",
+            "might be",
+            "remains plausible",
+            "not shown",
+            "not visible",
+            "unclear",
+            "still contested",
+            "不明确",
+            "未显示",
+            "可能",
+            "是否",
+        )
+        has_proximity = any(term in text for term in proximity_terms)
+        has_uncertainty = any(term in text for term in uncertainty_terms) or self._action_intent_result_has_indecisive_post_action_support(result)
+        return has_proximity and has_uncertainty
+
+    def _build_action_intent_weak_late_anchor_revisit_decision(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        result: dict[str, Any] | None,
+        thought: str,
+    ) -> PlannerDecision | None:
+        if not self._action_intent_result_looks_weak_late_anchor_support(state=state, result=result):
+            return None
+        anchor_time = self._latest_action_intent_target_spatial_anchor_time(state)
+        latest_followup_end = self._latest_action_intent_followup_end_time(state)
+        after_time: float | None = None
+        if anchor_time is not None and latest_followup_end is not None:
+            after_time = max(anchor_time, latest_followup_end)
+        elif latest_followup_end is not None:
+            after_time = latest_followup_end
+        else:
+            after_time = anchor_time
+        return self._build_action_intent_cached_long_horizon_revisit_decision(
+            state=state,
+            hints=hints,
+            thought=thought,
+            after_time=after_time,
+        )
+
     def _recipe_following_activity_step_decision(
         self,
         *,
@@ -7657,6 +7759,14 @@ class GraphAgentPlanner:
                 if precondition is not None:
                     return precondition
             if self._action_intent_requires_followup(state, result=last_result):
+                weak_late_anchor_revisit = self._build_action_intent_weak_late_anchor_revisit_decision(
+                    state=state,
+                    hints=hints,
+                    result=last_result,
+                    thought="why 题当前虽然已经补到晚锚点，但输出仍只是弱邻近/手持证据；继续沿更晚节点向后追，再决定是否补近窗或进入专用裁决。",
+                )
+                if weak_late_anchor_revisit is not None:
+                    return weak_late_anchor_revisit
                 initial_transition_probe = self._build_action_intent_transition_probe_decision(
                     state=state,
                     hints=hints,
@@ -7748,6 +7858,14 @@ class GraphAgentPlanner:
                 if pairwise is not None:
                     return pairwise
             if self._action_intent_needs_future_use_evidence(state=state, result=last_result):
+                weak_late_anchor_revisit = self._build_action_intent_weak_late_anchor_revisit_decision(
+                    state=state,
+                    hints=hints,
+                    result=last_result,
+                    thought="why 题当前晚锚点给出的只是弱邻近/手持证据，仍不能排除多个后续用途；继续沿更晚节点向后追，再决定是否进入用途专用裁决。",
+                )
+                if weak_late_anchor_revisit is not None:
+                    return weak_late_anchor_revisit
                 initial_transition_probe = self._build_action_intent_transition_probe_decision(
                     state=state,
                     hints=hints,
@@ -8197,6 +8315,14 @@ class GraphAgentPlanner:
             )
             if transition_probe is not None:
                 return transition_probe
+            weak_late_anchor_revisit = self._build_action_intent_weak_late_anchor_revisit_decision(
+                state=state,
+                hints=hints,
+                result=last_result,
+                thought="why 题当前后续用途裁决仍只落在晚锚点的弱邻近/手持证据上，排他性仍不足；继续沿更晚节点向后追，再决定是否允许收口。",
+            )
+            if weak_late_anchor_revisit is not None:
+                return weak_late_anchor_revisit
             peak_guided = self._build_action_intent_peak_guided_followup_decision(
                 state=state,
                 hints=hints,
