@@ -6828,6 +6828,64 @@ class GraphAgentPlanner:
             after_time=after_time,
         )
 
+    def _action_intent_recent_later_outcome_finalize_withheld_marker(self, state: AgentState) -> str:
+        recent = list(getattr(state, "working_memory", []))[-16:]
+        marker_prefixes = (
+            "action_intent_resolution_withheld_for_nonexclusive_concrete_late_anchor=1",
+            "action_intent_resolution_withheld_for_timeline_review_bias_gap=1",
+            "action_intent_resolution_withheld_for_workspace_or_final_placement_claim=1",
+        )
+        for item in reversed(recent):
+            if not isinstance(item, str):
+                continue
+            for prefix in marker_prefixes:
+                if item.startswith(prefix):
+                    return prefix
+        return ""
+
+    def _build_action_intent_finalize_withheld_long_horizon_revisit_decision(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        thought: str,
+    ) -> PlannerDecision | None:
+        marker = self._action_intent_recent_later_outcome_finalize_withheld_marker(state)
+        if not marker:
+            return None
+        anchor_time = self._latest_action_intent_target_spatial_anchor_time(state)
+        latest_followup_end = self._latest_action_intent_followup_end_time(state)
+        after_time: float | None = None
+        if anchor_time is not None and latest_followup_end is not None:
+            after_time = max(anchor_time, latest_followup_end)
+        elif latest_followup_end is not None:
+            after_time = latest_followup_end
+        else:
+            after_time = anchor_time
+        nodes = self._latest_action_intent_long_horizon_nodes(state)
+        if not nodes:
+            return None
+        min_start_time = None if after_time is None else float(after_time) + 0.15
+        selected = self._action_intent_select_long_horizon_node(
+            state=state,
+            hints=hints,
+            nodes=nodes,
+            min_start_time=min_start_time,
+        )
+        if selected is None:
+            return None
+        _node, start_time, end_time = selected
+        anchor_time = start_time if abs(end_time - start_time) < 0.25 else (start_time + min(end_time, start_time + 1.2)) / 2
+        return PlannerDecision(
+            thought=thought,
+            tool="query_spatial_context",
+            args={
+                "time_s": anchor_time,
+                "object_name": self._action_intent_question_object_hint(state),
+                "limit": 16,
+            },
+        )
+
     def _recipe_following_activity_step_decision(
         self,
         *,
@@ -11426,6 +11484,13 @@ class GraphAgentPlanner:
                 if precondition is not None:
                     return precondition
             if blocker_hint in {"post_action_evidence", "future_use_close_call"}:
+                finalize_long_horizon_revisit = self._build_action_intent_finalize_withheld_long_horizon_revisit_decision(
+                    state=state,
+                    hints=hints,
+                    thought="why 题被 verifier/finalizer 拦下，因为后续用途或最终位置仍未排他；直接沿缓存的更晚目标节点向后追，而不是继续停留在近窗半成品证据上。",
+                )
+                if finalize_long_horizon_revisit is not None:
+                    return finalize_long_horizon_revisit
                 initial_transition_probe = self._build_action_intent_transition_probe_decision(
                     state=state,
                     hints=hints,
@@ -11463,6 +11528,13 @@ class GraphAgentPlanner:
                 if extra_followup is not None:
                     return extra_followup
             if blocker_hint == "pairwise_close_call":
+                finalize_long_horizon_revisit = self._build_action_intent_finalize_withheld_long_horizon_revisit_decision(
+                    state=state,
+                    hints=hints,
+                    thought="why 题被 verifier/finalizer 拦下，因为 pairwise 竞争在更晚用途/最终位置上仍未排他；直接追更晚目标节点，而不是只在当前局部结果附近反复补帧。",
+                )
+                if finalize_long_horizon_revisit is not None:
+                    return finalize_long_horizon_revisit
                 initial_transition_probe = self._build_action_intent_transition_probe_decision(
                     state=state,
                     hints=hints,
@@ -11524,6 +11596,13 @@ class GraphAgentPlanner:
                 window_s=8.0 if self._action_intent_needs_future_use_evidence(state=state, result=payload) else 6.0,
             )
             return extra_followup
+        finalize_long_horizon_revisit = self._build_action_intent_finalize_withheld_long_horizon_revisit_decision(
+            state=state,
+            hints=hints,
+            thought="why 题专用裁决被 verifier/finalizer 拦下，因为更晚用途/最终位置仍未排他；继续沿缓存目标节点向后追，优先找真正的后续落点证据。",
+        )
+        if finalize_long_horizon_revisit is not None:
+            return finalize_long_horizon_revisit
         transition_probe = self._build_action_intent_transition_probe_decision(
             state=state,
             hints=hints,
