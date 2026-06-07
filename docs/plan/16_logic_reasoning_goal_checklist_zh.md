@@ -29,7 +29,7 @@
 ### 16.2.2 当前稳定基线
 
 - 专项回归命令：`pytest -q tests/test_graph_agent.py -k 'action_intent'`
-- 2026-06-07 当前结果：`242 passed, 344 deselected`
+- 2026-06-07 当前结果：`246 passed, 344 deselected`
 - 相比本轮进入专项时的起点 `107 passed, 300 deselected`，当前阶段性增量为 `+135 passed`
 - 当前执行策略：why 逻辑不再追求“接近完美覆盖”，而是维持“足够可用、回归稳定、无明显结构性退化”的维护态；后续优先级切换到完整 agent 功能闭环与小样本真实验证。
 
@@ -141,7 +141,17 @@
   - `check label` 但只有“标签朝外/可见”时不能 finish
   - `put back in the fridge` 但只有“拿走/离开原位”时不能 finish
   - `check label vs put back` 的 unresolved rerank 在双方都只有弱支持时必须继续等待证据
-- 本轮提交：why 专项回归已更新到 `242 passed, 344 deselected`
+- 本轮提交：why 题的 deterministic finalize 继续收紧到 `workspace / final placement / exact downstream use` close-call。现在如果当前答案只是：
+  - `to make space / make room / generic workspace effect`
+  - `put away / store / put back / right place`
+  - `exact downstream target/use/placement`
+  但证据文本里没有真正闭合“下一目标是谁、是否立刻发生、是否出现了确切终点/归位链”，而只是“台面更空了、位置更开阔了、物体离开了原位、暂时被放到一边”这类宽泛变化，那么 `graph_agent` 不再允许 deterministic finalize 直接 finish
+- 本轮提交：这一步新增并通过 4 条定向测试，分别保护：
+  - generic `make space` 但没有排除 `pick up whisk` 这类 exact downstream use 时不能 finish
+  - `sink slot / exact targeted placement` 但只有“区域更空了”这类弱证据时不能 finish
+  - 真的出现“下一物体 + 具体终点 + 立刻发生”链条时，exact targeted placement 仍允许正常 finalize
+  - `put the napkin away` 但文本同时承认“left on the counter within reach / not final placement”时不能 finish
+- 本轮提交：why 专项回归已更新到 `246 passed, 344 deselected`
 - 本轮提交：why 题在 `followup_transition / followup_peaks` 之后新增“短时序证据复核”分支，先让 agent 总结动作后立刻结果、下一步手部动作和 `hand-free / access / next-use` 证据，再回到 `infer_action_intent`
 - 本轮提交：`inspect_visual_evidence` 的写回字段扩到 `timeline_summary / immediate_result / next_action_hint / direct_purpose_hint / ambiguity_note`，并在 `needs_more_evidence=true` 时显式保留 `need_disambiguating_evidence`
 - 本轮提交：why 题 `inspect_visual_evidence -> infer_action_intent` 的回跳逻辑已改为识别 timeline review；若复核仍判定证据不足，则继续 `followup_ext2` 或转入 `future_use / pairwise` 专用裁决，而不是重新退回只看 `segment` 的早收口路径

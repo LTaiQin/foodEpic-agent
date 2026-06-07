@@ -898,6 +898,12 @@ class GraphAgent:
             ):
                 state.add_memory("action_intent_resolution_withheld_for_mixed_horizon_claim=1")
                 continue
+            elif self._action_intent_resolution_should_withhold_workspace_or_final_placement_overclaim(
+                raw_result=raw_result,
+                state=state,
+            ):
+                state.add_memory("action_intent_resolution_withheld_for_workspace_or_final_placement_claim=1")
+                continue
             confidence = self._coerce_confidence(raw_result.get("confidence"), default=0.78)
             if raw_result.get("need_more_evidence"):
                 confidence = min(confidence, 0.62)
@@ -1201,6 +1207,254 @@ class GraphAgent:
         if competitor_index is None or competitor_index == best_index:
             return None
         return best_index, competitor_index
+
+    def _action_intent_resolution_should_withhold_workspace_or_final_placement_overclaim(
+        self,
+        *,
+        raw_result: dict[str, Any],
+        state: AgentState,
+    ) -> bool:
+        pair = self._action_intent_resolution_competing_pair(raw_result=raw_result, state=state)
+        if pair is None:
+            return False
+        best_index, competitor_index = pair
+        choices = [str(choice) for choice in getattr(state, "choices", [])]
+        best_choice = choices[best_index].lower()
+        competitor_choice = choices[competitor_index].lower()
+        question = str(getattr(state, "question", "") or "").lower()
+        action_object = self._action_intent_question_object(question)
+        global_context = self._action_intent_scoped_global_context(state).lower()
+        text = " ".join(
+            str(raw_result.get(key) or "")
+            for key in ("reason", "decisive_observation", "needed_observation")
+        ).lower()
+        best_is_generic_workspace = self._action_intent_choice_is_generic_direct_space_purpose(best_choice)
+        competitor_is_generic_workspace = self._action_intent_choice_is_generic_direct_space_purpose(competitor_choice)
+        best_is_exact_workspace = self._action_intent_choice_is_exact_workspace_or_downstream_candidate(
+            best_choice
+        )
+        competitor_is_exact_workspace = self._action_intent_choice_is_exact_workspace_or_downstream_candidate(
+            competitor_choice
+        )
+        best_is_final_placement = self._action_intent_choice_is_final_placement_candidate(best_choice)
+        competitor_is_final_placement = self._action_intent_choice_is_final_placement_candidate(competitor_choice)
+        if not any(
+            (
+                best_is_generic_workspace and (competitor_is_exact_workspace or competitor_is_final_placement),
+                best_is_exact_workspace and competitor_is_generic_workspace,
+                best_is_final_placement and not competitor_is_final_placement,
+            )
+        ):
+            return False
+        if self._action_intent_text_has_negative_evidence(text):
+            return True
+        if any(
+            token in text
+            for token in (
+                "whether",
+                "still unclear",
+                "unclear",
+                "not visible",
+                "not shown",
+                "cannot tell",
+                "can't tell",
+                "ambiguous",
+                "multiple explanations",
+                "是否",
+                "不明确",
+                "仍不清楚",
+                "有歧义",
+            )
+        ):
+            return True
+        if best_is_generic_workspace and (competitor_is_exact_workspace or competitor_is_final_placement):
+            return not self._action_intent_text_explicitly_rules_out_exact_downstream_chain(text)
+        if best_is_exact_workspace and competitor_is_generic_workspace:
+            return not self._action_intent_choice_has_explicit_workspace_or_downstream_chain(
+                question=question,
+                choice=best_choice,
+                text=text,
+                action_object=action_object,
+                global_context=global_context,
+            )
+        if best_is_final_placement:
+            return not self._action_intent_choice_has_explicit_final_placement_evidence(best_choice, text)
+        return False
+
+    def _action_intent_text_explicitly_rules_out_exact_downstream_chain(self, text: str) -> bool:
+        text_lc = str(text or "").lower()
+        return any(
+            token in text_lc
+            for token in (
+                "no single exact next object use shown",
+                "no exact next object",
+                "no exact next target",
+                "no specific next target",
+                "no single immediate next target",
+                "no direct next-use evidence is shown",
+                "target is still ambiguous",
+                "without yet showing a single specific",
+                "exact next target is still ambiguous",
+                "no concrete hidden target is retrieved",
+                "no actual retrieval is shown",
+                "no direct carry path is visible",
+                "no specific destination is shown",
+                "没有具体下一目标",
+                "没有明确下一目标",
+                "目标仍不明确",
+                "没有实际取出",
+                "没有直接搬运路径",
+                "没有具体终点",
+            )
+        )
+
+    def _action_intent_choice_is_exact_workspace_or_downstream_candidate(self, choice: str) -> bool:
+        text = str(choice or "").lower()
+        if self._action_intent_choice_has_specific_space_target(text):
+            return True
+        return any(
+            token in text
+            for token in (
+                "pick up",
+                "retrieve",
+                "reach",
+                "open the",
+                "turn on",
+                "turn off",
+                "switch on",
+                "switch off",
+                "wash",
+                "rinse",
+                "measure",
+                "weigh",
+                "put into",
+                "place into",
+                "put on the",
+                "move the",
+                "to the sink",
+                "sink slot",
+                "slot",
+                "rack",
+                "freed area",
+                "free slot",
+                "exact slot",
+                "拿起",
+                "取出",
+                "伸手去拿",
+                "打开",
+                "开启",
+                "清洗",
+                "冲洗",
+                "称量",
+                "放进",
+                "放到",
+                "水槽",
+                "槽位",
+            )
+        )
+
+    def _action_intent_choice_has_explicit_workspace_or_downstream_chain(
+        self,
+        *,
+        question: str,
+        choice: str,
+        text: str,
+        action_object: str,
+        global_context: str,
+    ) -> bool:
+        return any(
+            (
+                self._action_intent_choice_is_exact_workspace_creation(
+                    choice=choice,
+                    support=text,
+                    contradiction="",
+                    action_object=action_object,
+                    global_context=global_context,
+                ),
+                self._action_intent_choice_is_exact_downstream_targeted_placement(
+                    question=question,
+                    choice=choice,
+                    support=text,
+                    contradiction="",
+                    action_object=action_object,
+                    global_context=global_context,
+                ),
+                self._action_intent_choice_is_exact_immediate_downstream_use(
+                    question=question,
+                    choice=choice,
+                    support=text,
+                    contradiction="",
+                    action_object=action_object,
+                    global_context=global_context,
+                ),
+            )
+        )
+
+    def _action_intent_choice_is_final_placement_candidate(self, choice: str) -> bool:
+        text = str(choice or "").lower()
+        if re.search(r"\bput(?:\s+(?:the|this|that|it|them|an|a))?(?:\s+[a-z0-9_-]+){0,4}\s+away\b", text):
+            return True
+        if re.search(r"\breturn(?:\s+(?:the|this|that|it|them|an|a))?(?:\s+[a-z0-9_-]+){0,4}\b", text):
+            return True
+        return any(
+            token in text
+            for token in (
+                "put away",
+                "store",
+                "put back",
+                "return it",
+                "return the",
+                "returned",
+                "hang back",
+                "right place",
+                "proper place",
+                "放回",
+                "收起来",
+                "收纳",
+                "归位",
+            )
+        )
+
+    def _action_intent_choice_has_explicit_final_placement_evidence(self, choice: str, text: str) -> bool:
+        choice_lc = str(choice or "").lower()
+        text_lc = str(text or "").lower()
+        if not self._action_intent_choice_is_final_placement_candidate(choice_lc):
+            return False
+        if "not final placement" in text_lc or "没有收纳" in text_lc or "暂时放在" in text_lc:
+            return False
+        if self._action_intent_choice_is_temporary_relocation_not_storage(
+            choice=choice_lc,
+            support=text_lc,
+            contradiction=text_lc,
+            action_object="",
+            global_context="",
+        ):
+            return False
+        return any(
+            token in text_lc
+            for token in (
+                "returned to the drawer",
+                "returned to the cupboard",
+                "hung back on the hook",
+                "placed back in storage",
+                "stored away",
+                "put back in the fridge",
+                "returned to the fridge",
+                "returned to the shelf",
+                "placed into the freed slot",
+                "inserted into",
+                "exact rack slot",
+                "available spot",
+                "freed slot",
+                "放回抽屉",
+                "放回橱柜",
+                "挂回挂钩",
+                "收纳回去",
+                "放回冰箱",
+                "归位",
+                "放进腾出的槽位",
+            )
+        )
 
     def _resolve_unresolved_action_intent_answer(
         self,
