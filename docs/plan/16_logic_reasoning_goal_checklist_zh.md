@@ -178,7 +178,14 @@
   - contents check chain 可直接通过
   - label/date 只有 visible 但没有 reading chain 时继续要证据
   - explicit label reading chain 可直接通过
-- 本轮提交：inspection 定向测试 `5 passed`，why 专项总回归仍保持通过；当前专项结果更新为 `207 passed, 344 deselected`
+- 本轮提交：`planner` 的 transition probe 新增了 `mixed temporal horizon` 路径，专门处理“一个候选需要看动作后立刻发生的微结果，另一个候选需要看稍后结果”的 why close-call：
+  - 典型场景是 `check label/date` vs `put back / weigh / pour later`，以及 `open/close` vs `measure/use later`
+  - 这类冲突不再被迫在“只看近窗”或“只看后移窗”里二选一；现在会主动取一个更长但仍然有针对性的混合窗口，兼顾动作后立刻微结果和稍后用途结果
+  - 同时加入了更严格的触发门槛：只有模型已经明确承认 `need_future_evidence / ambiguity / need_more_evidence` 时，这条 mixed-horizon 路径才会抢在旧的后续词汇启发式之前生效，避免打坏已有稳定路径
+- 本轮提交：新增并通过 `2` 条 mixed-horizon 定向测试，分别保护：
+  - `check the label` vs `put back in the fridge` 会走 hybrid transition probe
+  - `open the jar` vs `use the jar to weigh the ingredients` 会走 hybrid transition probe
+- 本轮提交：inspection 与 mixed-horizon 定向测试均通过，why 专项总回归更新为 `209 passed, 344 deselected`
 
 ### 16.2.4 当前真正的瓶颈
 

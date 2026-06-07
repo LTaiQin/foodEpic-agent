@@ -1017,7 +1017,7 @@ class GraphAgentPlanner:
         state: AgentState,
         hints: dict[str, Any],
         result: dict[str, Any] | None = None,
-    ) -> tuple[float, float] | None:
+    ) -> tuple[float, float, float, int] | None:
         combined_times: list[float] = []
         for key in ("times", "input_times"):
             for value in hints.get(key) or []:
@@ -1042,25 +1042,44 @@ class GraphAgentPlanner:
         if mode == "state_change":
             start_time = max(0.0, action_end - 0.1)
             end_time = action_end + 3.0
+            stride_s = 0.35
+            max_frames = 6
+        elif mode == "mixed_temporal_horizon":
+            start_time = max(0.0, action_end - 0.12)
+            end_time = action_end + 5.2
+            stride_s = 0.5
+            max_frames = 8
         elif mode == "hand_free_next_action":
             start_time = max(0.0, action_end - 0.15)
             end_time = action_end + 3.6
+            stride_s = 0.4
+            max_frames = 6
         elif mode == "reveal_or_access_result":
             start_time = max(0.0, action_end - 0.15)
             end_time = action_end + 3.2
+            stride_s = 0.4
+            max_frames = 6
         elif mode == "safety_or_spill_result":
             start_time = max(0.0, action_end - 0.08)
             end_time = action_end + 2.8
+            stride_s = 0.4
+            max_frames = 6
         elif mode == "final_placement_result":
             start_time = action_end + 0.2
             end_time = action_end + 4.0
+            stride_s = 0.4
+            max_frames = 6
         elif mode == "future_use_outcome":
             start_time = action_end + 0.1
             end_time = action_end + 4.3
+            stride_s = 0.4
+            max_frames = 6
         else:
             start_time = max(0.0, action_end - 0.2)
             end_time = action_end + 2.4
-        return start_time, end_time
+            stride_s = 0.4
+            max_frames = 6
+        return start_time, end_time, stride_s, max_frames
 
     def _action_intent_transition_probe_mode(
         self,
@@ -1071,6 +1090,8 @@ class GraphAgentPlanner:
     ) -> str:
         if self._action_intent_prefers_followup_state_change_only(state):
             return "state_change"
+        if self._action_intent_pair_spans_immediate_and_later_outcomes(state=state, result=result):
+            return "mixed_temporal_horizon"
         if self._action_intent_has_hand_free_future_use_conflict(state=state, result=result):
             return "hand_free_next_action"
         timeline_text = self._action_intent_timeline_review_text(state)
@@ -1169,6 +1190,99 @@ class GraphAgentPlanner:
                 return "future_use_outcome"
         return "immediate_result"
 
+    def _action_intent_pair_spans_immediate_and_later_outcomes(
+        self,
+        *,
+        state: AgentState,
+        result: dict[str, Any] | None,
+    ) -> bool:
+        if not self._is_action_intent_task(state) or not isinstance(result, dict):
+            return False
+        best_index = self._coerce_choice_index(result.get("best_index"), state.choices)
+        competitor_index = self._action_intent_competing_candidate_index(result, state)
+        if competitor_index is None:
+            for index in self._latest_action_intent_candidate_indices(state, result=result):
+                if best_index is not None and index != best_index:
+                    competitor_index = index
+                    break
+        if best_index is None or competitor_index is None or best_index == competitor_index:
+            return False
+        categories = selected_choice_categories(
+            [str(choice) for choice in getattr(state, "choices", [])],
+            [best_index, competitor_index],
+        )
+        best_categories = set(categories.get(best_index) or set())
+        competitor_categories = set(categories.get(competitor_index) or set())
+        later_outcome_categories = {
+            "final_place_return",
+            "measure_weigh",
+            "transfer_contents",
+            "serve_consume",
+            "clean_dry",
+            "food_prep",
+            "discard",
+        }
+        best_choice = str(getattr(state, "choices", [])[best_index] if 0 <= best_index < len(getattr(state, "choices", [])) else "")
+        competitor_choice = str(
+            getattr(state, "choices", [])[competitor_index] if 0 <= competitor_index < len(getattr(state, "choices", [])) else ""
+        )
+        best_is_immediate = self._action_intent_choice_is_immediate_micro_outcome_candidate(best_choice, best_categories)
+        competitor_is_immediate = self._action_intent_choice_is_immediate_micro_outcome_candidate(
+            competitor_choice,
+            competitor_categories,
+        )
+        return bool(
+            (best_is_immediate and competitor_categories & later_outcome_categories)
+            or (competitor_is_immediate and best_categories & later_outcome_categories)
+        )
+
+    def _action_intent_choice_is_immediate_micro_outcome_candidate(
+        self,
+        choice: str,
+        categories: set[str],
+    ) -> bool:
+        text = str(choice or "").lower()
+        if "inspect_check" in categories and any(
+            token in text
+            for token in (
+                "label",
+                "date",
+                "expiry",
+                "expiration",
+                "best before",
+                "use by",
+                "sell by",
+                "printed information",
+                "read",
+                "标签",
+                "日期",
+                "保质期",
+                "读",
+            )
+        ):
+            return True
+        if "open_close" in categories and "hand_free_enablement" not in categories and any(
+            token in text
+            for token in (
+                "open",
+                "close",
+                "turn on",
+                "turn off",
+                "switch on",
+                "switch off",
+                "uncap",
+                "cap",
+                "unscrew",
+                "打开",
+                "关闭",
+                "开启",
+                "拧开",
+                "盖上",
+            )
+        ):
+            return True
+        return False
+
     def _action_intent_has_hand_free_future_use_conflict(
         self,
         *,
@@ -1217,8 +1331,6 @@ class GraphAgentPlanner:
             return False
         if self._action_intent_transition_probe_window(state=state, hints=hints, result=result) is None:
             return False
-        if self._action_intent_result_has_direct_post_action_evidence(result):
-            return False
         candidate_indices = self._latest_action_intent_candidate_indices(state, result=result)
         profile = action_intent_conflict_profile(
             question=str(getattr(state, "question", "") or ""),
@@ -1226,6 +1338,10 @@ class GraphAgentPlanner:
             indices=candidate_indices if len(candidate_indices) >= 2 else None,
         )
         hand_free_future_use = self._action_intent_has_hand_free_future_use_conflict(state=state, result=result)
+        mixed_temporal_horizon = self._action_intent_pair_spans_immediate_and_later_outcomes(
+            state=state,
+            result=result,
+        )
         support_text = self._action_intent_result_support_text(result)
         uncertainty_markers = (
             "still unclear",
@@ -1238,6 +1354,19 @@ class GraphAgentPlanner:
             "看不清",
             "不明确",
         )
+        if (
+            mixed_temporal_horizon
+            and any(marker in support_text for marker in uncertainty_markers)
+            and isinstance(result, dict)
+            and (
+                bool(result.get("need_future_evidence"))
+                or bool(result.get("ambiguity"))
+                or bool(result.get("need_more_evidence"))
+            )
+        ):
+            return True
+        if self._action_intent_result_has_direct_post_action_evidence(result):
+            return False
         if bool(profile["has_hidden_access_exact_use_conflict"]) and not hand_free_future_use:
             return False
         if self._action_intent_needs_future_use_evidence(state=state, result=result) and not hand_free_future_use:
@@ -1304,15 +1433,15 @@ class GraphAgentPlanner:
         probe_window = self._action_intent_transition_probe_window(state=state, hints=hints, result=result)
         if probe_window is None:
             return None
-        start_time, end_time = probe_window
+        start_time, end_time, stride_s, max_frames = probe_window
         return PlannerDecision(
             thought=thought,
             tool="extract_frames_for_range",
             args={
                 "start_time": start_time,
                 "end_time": end_time,
-                "stride_s": 0.35 if self._action_intent_prefers_followup_state_change_only(state) else 0.4,
-                "max_frames": 6,
+                "stride_s": stride_s,
+                "max_frames": max_frames,
                 "tag": f"{state.task_family}_followup_transition",
             },
         )
@@ -1943,15 +2072,15 @@ class GraphAgentPlanner:
         probe_window = self._action_intent_transition_probe_window(state=state, hints=hints, result=result)
         if probe_window is None:
             return None
-        start_time, end_time = probe_window
+        start_time, end_time, stride_s, max_frames = probe_window
         return PlannerDecision(
             thought=thought,
             tool="extract_frames_for_range",
             args={
                 "start_time": start_time,
                 "end_time": end_time,
-                "stride_s": 0.35 if self._action_intent_prefers_followup_state_change_only(state) else 0.4,
-                "max_frames": 6,
+                "stride_s": stride_s,
+                "max_frames": max_frames,
                 "tag": f"{state.task_family}_followup_transition",
             },
         )
