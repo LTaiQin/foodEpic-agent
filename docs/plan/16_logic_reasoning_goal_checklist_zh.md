@@ -29,8 +29,8 @@
 ### 16.2.2 当前稳定基线
 
 - 专项回归命令：`pytest -q tests/test_graph_agent.py -k 'action_intent'`
-- 2026-06-07 当前结果：`235 passed, 344 deselected`
-- 相比本轮进入专项时的起点 `107 passed, 300 deselected`，当前阶段性增量为 `+128 passed`
+- 2026-06-07 当前结果：`237 passed, 344 deselected`
+- 相比本轮进入专项时的起点 `107 passed, 300 deselected`，当前阶段性增量为 `+130 passed`
 - 当前执行策略：why 逻辑不再追求“接近完美覆盖”，而是维持“足够可用、回归稳定、无明显结构性退化”的维护态；后续优先级切换到完整 agent 功能闭环与小样本真实验证。
 
 这说明 why 题已经不再是“直接把问题丢给模型猜答案”，而是已经存在完整骨架：
@@ -112,7 +112,15 @@
   - `tap kitchen scale` 在首次 `infer_action_intent` 仍不确定时，也会直接进入近窗 `followup_transition`
   - `pick up tea towel` 的 `transport-vs-use` close-call 会在第一次歧义时优先补动作后近窗关键帧，而不会先被 `precontext` 截走
 - 本轮提交：同时收紧了 `transport-vs-use` 的前移触发门槛。只有模型已经显式承认 `need_more_evidence / ambiguity / whether X or Y` 时，才会抢先看近窗后果；普通高置信但只是泛化“暂时看不清”的 towel/cloth 题仍保持原有 `precontext` 路线，不会被误伤
-- 本轮提交：why 专项回归已更新到 `235 passed, 344 deselected`
+- 本轮提交：why 初始化阶段的取帧策略也不再一刀切。过去只要还没有当前题时间窗帧，`planner` 就会统一先抽 `segment`；现在对于一开始就属于 `strict visual disambiguation` 的 why 题，会直接走 `initial transition probe`，先围绕动作尾部和后续短窗口抽更密的关键帧，而不是先看一组静态动作片段
+- 本轮提交：这一步当前先覆盖：
+  - `flip / shake / tip / turn` 一类 `residue_release / cleanup` 冲突
+  - `pick up towel/cloth` 一类 `transport-vs-use` 冲突
+  - `tap kitchen scale / press button` 一类 `state-change` 冲突
+- 本轮提交：新增并通过 2 条初始化路由测试，分别保护：
+  - `flip orange cloth` 在已有 `query_state` 但还没有当前题帧时，会直接走 `followup_transition`
+  - `pick up tea towel` 在同样条件下，也会直接走 `followup_transition`
+- 本轮提交：why 专项回归已更新到 `237 passed, 344 deselected`
 - 本轮提交：why 题在 `followup_transition / followup_peaks` 之后新增“短时序证据复核”分支，先让 agent 总结动作后立刻结果、下一步手部动作和 `hand-free / access / next-use` 证据，再回到 `infer_action_intent`
 - 本轮提交：`inspect_visual_evidence` 的写回字段扩到 `timeline_summary / immediate_result / next_action_hint / direct_purpose_hint / ambiguity_note`，并在 `needs_more_evidence=true` 时显式保留 `need_disambiguating_evidence`
 - 本轮提交：why 题 `inspect_visual_evidence -> infer_action_intent` 的回跳逻辑已改为识别 timeline review；若复核仍判定证据不足，则继续 `followup_ext2` 或转入 `future_use / pairwise` 专用裁决，而不是重新退回只看 `segment` 的早收口路径

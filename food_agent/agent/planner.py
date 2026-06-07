@@ -3911,6 +3911,36 @@ class GraphAgentPlanner:
             for tool in used_tools
         )
 
+    def _build_initial_action_intent_transition_probe_decision(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+    ) -> PlannerDecision | None:
+        if not self._is_action_intent_task(state):
+            return None
+        if not action_intent_requires_strict_visual_disambiguation(
+            question=str(getattr(state, "question", "") or ""),
+            choices=[str(choice) for choice in getattr(state, "choices", [])],
+            indices=None,
+        ):
+            return None
+        probe_window = self._action_intent_transition_probe_window(state=state, hints=hints, result=None)
+        if probe_window is None:
+            return None
+        start_time, end_time, stride_s, max_frames = probe_window
+        return PlannerDecision(
+            thought="why 题一开始就属于严格视觉消歧场景；先围绕动作尾部和紧随其后的短窗口做更密的关键帧搜索，优先抓决定性结果帧，而不是只抽静态动作片段。",
+            tool="extract_frames_for_range",
+            args={
+                "start_time": start_time,
+                "end_time": end_time,
+                "stride_s": stride_s,
+                "max_frames": max_frames,
+                "tag": f"{state.task_family}_followup_transition",
+            },
+        )
+
     def _build_initial_action_intent_specialized_decision(
         self,
         *,
@@ -3945,6 +3975,12 @@ class GraphAgentPlanner:
                     "context_notes": self._action_intent_context_notes(state, limit=12),
                 },
             )
+        initial_transition_probe = self._build_initial_action_intent_transition_probe_decision(
+            state=state,
+            hints=hints,
+        )
+        if initial_transition_probe is not None:
+            return initial_transition_probe
         return PlannerDecision(
             thought="why 题还没有当前题时间窗关键帧，先抽动作片段，再做专用动作目的判断。",
             tool="sample_sparse_frames",
