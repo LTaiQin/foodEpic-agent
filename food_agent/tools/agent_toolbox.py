@@ -3227,6 +3227,82 @@ class AgentToolbox:
                 "while an exact detergent-bottle pickup is not yet directly established."
             ).strip()
             return adjusted
+        immediate_reuse_index = next(
+            (
+                index
+                for index in valid_indices
+                if self._choice_is_immediate_reuse_future_use_purpose(str(choices[index]))
+            ),
+            None,
+        )
+        exact_final_placement_index = next(
+            (
+                index
+                for index in valid_indices
+                if self._choice_is_exact_final_placement_future_use_purpose(str(choices[index]))
+            ),
+            None,
+        )
+        generic_store_index = next(
+            (
+                index
+                for index in valid_indices
+                if self._choice_is_generic_store_or_put_away_future_use_purpose(str(choices[index]))
+            ),
+            None,
+        )
+        finished_with_object_index = next(
+            (
+                index
+                for index in valid_indices
+                if self._choice_is_finished_with_object_future_use_purpose(str(choices[index]))
+            ),
+            None,
+        )
+        storage_like_indices = {
+            index
+            for index in (
+                generic_store_index,
+                exact_final_placement_index,
+                finished_with_object_index,
+            )
+            if index is not None
+        }
+        if (
+            immediate_reuse_index is not None
+            and best_index in storage_like_indices
+            and best_index != immediate_reuse_index
+            and self._explanation_uses_immediate_reuse_future_use_chain(explanation)
+            and not self._explanation_uses_exact_final_placement_chain(explanation)
+        ):
+            adjusted = dict(result)
+            adjusted["best_index"] = immediate_reuse_index
+            adjusted["answer"] = str(choices[immediate_reuse_index])
+            adjusted["confidence"] = max(0.8, min(0.9, float(result.get("confidence") or 0.0) + 0.04))
+            adjusted["causal_hierarchy_adjusted"] = True
+            adjusted["reason"] = (
+                f"{result.get('reason') or ''} causal_hierarchy_adjustment: "
+                "the evidence shows the object is kept nearby, remains within reach, or is used again shortly after, "
+                "so immediate reuse staging is a more direct explanation than storage or being finished with the object."
+            ).strip()
+            return adjusted
+        if (
+            exact_final_placement_index is not None
+            and best_index in {index for index in (generic_store_index, finished_with_object_index) if index is not None}
+            and best_index != exact_final_placement_index
+            and self._explanation_uses_exact_final_placement_chain(explanation)
+        ):
+            adjusted = dict(result)
+            adjusted["best_index"] = exact_final_placement_index
+            adjusted["answer"] = str(choices[exact_final_placement_index])
+            adjusted["confidence"] = max(0.8, min(0.9, float(result.get("confidence") or 0.0) + 0.04))
+            adjusted["causal_hierarchy_adjusted"] = True
+            adjusted["reason"] = (
+                f"{result.get('reason') or ''} causal_hierarchy_adjustment: "
+                "the evidence shows a concrete return location such as a drawer, cupboard, hook, rack, or other precise home position, "
+                "so exact final placement is stronger than a generic store-away or finished-with interpretation."
+            ).strip()
+            return adjusted
         return result
 
     def _valid_future_use_scores(self, raw_items: Any, valid_indices: list[int]) -> list[tuple[int, float]]:
@@ -4494,6 +4570,231 @@ class AgentToolbox:
             text,
         )
         return re.sub(r"\s+", " ", text).strip()
+
+    def _choice_is_immediate_reuse_future_use_purpose(self, choice: str) -> bool:
+        text = str(choice or "").lower()
+        return any(
+            token in text
+            for token in (
+                "keep",
+                "nearby",
+                "within reach",
+                "ready for the next",
+                "ready for next use",
+                "next step",
+                "next stir",
+                "later immediate use",
+                "放在旁边",
+                "方便下一步",
+                "随手可拿",
+            )
+        )
+
+    def _choice_is_finished_with_object_future_use_purpose(self, choice: str) -> bool:
+        text = str(choice or "").lower()
+        return any(
+            token in text
+            for token in (
+                "finished with",
+                "finished now",
+                "done with",
+                "no longer need",
+                "finished using",
+                "no longer needed",
+                "用完",
+                "不再需要",
+            )
+        )
+
+    def _choice_is_exact_final_placement_future_use_purpose(self, choice: str) -> bool:
+        text = str(choice or "").lower()
+        categories = choice_categories(text)
+        if "final_place_return" not in categories:
+            return False
+        return any(
+            token in text
+            for token in (
+                "drawer",
+                "cupboard",
+                "cabinet",
+                "hook",
+                "holder",
+                "rack",
+                "slot",
+                "fridge",
+                "freezer",
+                "sink",
+                "right place",
+                "proper place",
+                "specific place",
+                "back on",
+                "back in",
+                "抽屉",
+                "橱柜",
+                "柜子",
+                "挂钩",
+                "架子",
+                "卡槽",
+                "冰箱",
+                "水槽",
+                "归位",
+            )
+        )
+
+    def _choice_is_generic_store_or_put_away_future_use_purpose(self, choice: str) -> bool:
+        text = str(choice or "").lower()
+        categories = choice_categories(text)
+        if "final_place_return" not in categories:
+            return False
+        has_storage_language = any(
+            token in text
+            for token in (
+                "store",
+                "put away",
+                "put back",
+                "return it",
+                "return the",
+                "away",
+                "放回",
+                "收起来",
+                "收纳",
+            )
+        )
+        return has_storage_language and not self._choice_is_exact_final_placement_future_use_purpose(text)
+
+    def _explanation_uses_immediate_reuse_future_use_chain(self, explanation: str) -> bool:
+        text = str(explanation or "").lower()
+        has_reuse_signal = any(
+            token in text
+            for token in (
+                "within reach",
+                "ready for the next",
+                "ready for next use",
+                "kept nearby",
+                "later reused",
+                "immediate reuse",
+                "used again moments later",
+                "used again shortly after",
+                "used again in the next step",
+                "next stir",
+                "next step",
+                "placed beside the",
+                "left beside the",
+                "by the hob",
+                "temporary reuse setup",
+                "就在旁边",
+                "稍后继续使用",
+                "下一步还要用",
+                "放在旁边",
+                "方便下一步",
+            )
+        )
+        has_nonstorage_signal = any(
+            token in text
+            for token in (
+                "not stored",
+                "not put away",
+                "not returned",
+                "not returned to",
+                "not back in",
+                "no drawer",
+                "no cupboard",
+                "no hook return",
+                "no holder return",
+                "not final placement",
+                "temporarily placed",
+                "merely relocated",
+                "placed on the counter",
+                "left on the side",
+                "没有收纳",
+                "没有放回",
+                "暂时放在",
+                "放在台面",
+            )
+        )
+        has_true_storage_signal = any(
+            token in text
+            for token in (
+                "returned to the drawer",
+                "returned to the cupboard",
+                "hung back on the hook",
+                "placed back in storage",
+                "stored away",
+                "returned to its slot",
+                "put back in the rack",
+                "放回抽屉",
+                "放回橱柜",
+                "挂回挂钩",
+                "收纳回去",
+                "放回卡槽",
+            )
+        )
+        return has_reuse_signal and (has_nonstorage_signal or not has_true_storage_signal)
+
+    def _explanation_uses_exact_final_placement_chain(self, explanation: str) -> bool:
+        text = str(explanation or "").lower()
+        has_return_action = any(
+            token in text
+            for token in (
+                "returned to",
+                "put back in",
+                "put back on",
+                "hung back",
+                "placed back in",
+                "stored in",
+                "returned into",
+                "back into",
+                "放回",
+                "挂回",
+                "归位",
+                "收回",
+            )
+        )
+        has_exact_home = any(
+            token in text
+            for token in (
+                "drawer",
+                "cupboard",
+                "cabinet",
+                "hook",
+                "holder",
+                "rack",
+                "slot",
+                "fridge",
+                "freezer",
+                "specific holder",
+                "proper place",
+                "right place",
+                "抽屉",
+                "橱柜",
+                "柜子",
+                "挂钩",
+                "架子",
+                "卡槽",
+                "冰箱",
+                "归位",
+            )
+        )
+        has_nonstorage_signal = any(
+            token in text
+            for token in (
+                "not stored",
+                "not put away",
+                "not returned",
+                "not returned to",
+                "not back in",
+                "no drawer",
+                "no cupboard",
+                "no hook return",
+                "no holder return",
+                "temporarily placed",
+                "merely relocated",
+                "没有收纳",
+                "没有放回",
+                "暂时放在",
+            )
+        )
+        return has_return_action and has_exact_home and not has_nonstorage_signal
 
     def _explanation_uses_direct_safety_avoidance_chain(self, explanation: str) -> bool:
         text = str(explanation or "").lower()
