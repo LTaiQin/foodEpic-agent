@@ -29,7 +29,7 @@
 ### 16.2.2 当前稳定基线
 
 - 专项回归命令：`pytest -q tests/test_graph_agent.py -k 'action_intent'`
-- 2026-06-07 当前结果：`120 passed, 332 deselected`
+- 2026-06-07 当前结果：`121 passed, 332 deselected`
 - 相比本轮进入专项时的起点 `107 passed, 300 deselected`，当前阶段性增量为 `+13 passed`
 
 这说明 why 题已经不再是“直接把问题丢给模型猜答案”，而是已经存在完整骨架：
@@ -319,13 +319,13 @@ why 题专用裁决工具入口：
 #### P0.1 基线快照
 
 - [x] 重新跑 why 专项回归
-- [x] 记录当前通过数：`120 passed, 332 deselected`
+- [x] 记录当前通过数：`121 passed, 332 deselected`
 - [x] 将基线结果写入本清单
 - [ ] 建立后续 replay 统一结果模板
 
 进展补充：
 
-- [x] 本轮代码推进后，专项回归已从 `107 passed, 300 deselected` 提升到 `120 passed, 332 deselected`
+- [x] 本轮代码推进后，专项回归已从 `107 passed, 300 deselected` 提升到 `121 passed, 332 deselected`
 
 完成标准：
 
@@ -494,6 +494,11 @@ why 题专用裁决工具入口：
 - [x] 已补上 followup 的 candidate-aware 版本：
   - `future_use`、`pairwise`、`precontext` 的 followup 选路优先继承当前 top-2 候选语义
   - 不再因为完整 choice set 中存在无关 `clean_dry`/`precondition` 词面而误走前置路由
+- [x] 已把 why 题 `textual fallback -> alternative evidence recovery` 的恢复入口继续候选化到当前任务 artifact：
+  - 当 `fine_grained_why_recognition` 在连续视觉失败后暂时回落到 `rank_choices_from_state`
+  - 且 verifier 仍报告 `need_alternative_evidence_path`
+  - 当前会优先复用 `fine_grained_why_recognition_segment` artifact，而不是先退回泛化 `query_time`
+  - 这一轮是直接由真实 residual why run 反推出来的 planner 缺口，不是单测孤例补丁
 
 完成标准：
 
@@ -591,6 +596,21 @@ why 题专用裁决工具入口：
   - 有后续帧但仍冲突
   - 工具调用失败
   - 真正视觉证据耗尽
+
+进展补充：
+
+- [x] why 题当前已区分“连续视觉失败后的文本 fallback”与“fallback 后 verifier 仍不满意”的恢复阶段：
+  - 若 `infer_action_intent` 连续失败，允许暂时回退到 `rank_choices_from_state`
+  - 但若 verifier 仍提示 `need_alternative_evidence_path`，不会直接在 `query_time` 上空转
+  - 而是优先复用当前任务的 `segment` artifact，先走更便宜的原始证据恢复路径
+- [x] 已新增并通过 planner 定向测试：
+  - `planner_action_intent_verifier_blocked_text_fallback_prefers_cached_segment_artifacts`
+- [x] 已补跑 planner why 定向回归：
+  - `pytest -q tests/test_graph_agent.py -k 'planner_action_intent'`
+  - 结果：`38 passed, 415 deselected`
+- [x] 已补跑专项总回归：
+  - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+  - 结果：`121 passed, 332 deselected`
 
 完成标准：
 

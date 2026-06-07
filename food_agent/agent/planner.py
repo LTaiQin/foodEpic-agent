@@ -3798,6 +3798,27 @@ class GraphAgentPlanner:
         failed_tools = {str(item.get("tool")) for item in recent_failures[-5:] if item.get("tool")}
         recent_ineffective = [item for item in getattr(state, "ineffective_tools", []) if isinstance(item, dict)]
         ineffective_tools = {str(item.get("tool")) for item in recent_ineffective[-5:] if item.get("tool")}
+        if (
+            self._is_action_intent_task(state)
+            and combined_times
+            and "need_alternative_evidence_path" in open_questions
+        ):
+            raw_reuse_or_resample = self._build_raw_reuse_or_resample_decision(
+                state=state,
+                used_tools=used_tools,
+                failed_tools=failed_tools,
+                ineffective_tools=ineffective_tools,
+                combined_times=combined_times,
+                tag_hint=f"{state.task_family}_segment",
+                sample_tag=f"{state.task_family}_recover_frames",
+                sample_count=4,
+                retrieve_limit=6,
+                retrieve_thought="why 题文本 fallback 仍不够时，先复用当前动作片段 artifact，优先走更便宜的原始证据恢复。",
+                revisit_thought="why 题文本 fallback 仍不够时，先回到已访问的动作关键时刻补单帧，而不是继续泛化时间检索。",
+                resample_thought="why 题文本 fallback 仍不够且没有可复用 artifact 时，再重新稀疏抽当前动作时间窗关键帧。",
+            )
+            if raw_reuse_or_resample is not None:
+                return raw_reuse_or_resample
         if self._is_recipe_following_activity_task(state):
             recipe_step_hint = hints.get("recipe_step_hint")
             if "query_event" not in used_tools and "query_event" not in failed_tools and "query_event" not in ineffective_tools:
