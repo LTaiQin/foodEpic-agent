@@ -6843,6 +6843,28 @@ class GraphAgentPlanner:
                     return prefix
         return ""
 
+    def _action_intent_recent_unresolved_rerank_withheld_reason(self, state: AgentState) -> str:
+        recent = list(getattr(state, "working_memory", []))[-16:]
+        for item in reversed(recent):
+            if not isinstance(item, str) or not item.startswith("action_intent_unresolved_rerank_withheld"):
+                continue
+            match = re.search(r"reason=([a-z0-9_,.-]+)", item)
+            if match:
+                return str(match.group(1) or "").strip().lower()
+        return ""
+
+    def _action_intent_unresolved_rerank_reason_prefers_later_outcome_revisit(self, state: AgentState) -> bool:
+        reason = self._action_intent_recent_unresolved_rerank_withheld_reason(state)
+        if not reason:
+            return False
+        later_outcome_gaps = (
+            "timeline_review_final_location_gap",
+            "timeline_review_next_use_gap",
+            "timeline_review_revealed_slot_gap",
+            "missing_later_outcome_evidence",
+        )
+        return any(gap in reason for gap in later_outcome_gaps)
+
     def _build_action_intent_finalize_withheld_long_horizon_revisit_decision(
         self,
         *,
@@ -6881,6 +6903,48 @@ class GraphAgentPlanner:
             tool="query_spatial_context",
             args={
                 "time_s": anchor_time,
+                "object_name": self._action_intent_question_object_hint(state),
+                "limit": 16,
+            },
+        )
+
+    def _build_action_intent_unresolved_rerank_long_horizon_revisit_decision(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        thought: str,
+    ) -> PlannerDecision | None:
+        if not self._action_intent_unresolved_rerank_reason_prefers_later_outcome_revisit(state):
+            return None
+        nodes = self._latest_action_intent_long_horizon_nodes(state)
+        if not nodes:
+            return None
+        anchor_time = self._latest_action_intent_target_spatial_anchor_time(state)
+        latest_followup_end = self._latest_action_intent_followup_end_time(state)
+        after_time: float | None = None
+        if anchor_time is not None and latest_followup_end is not None:
+            after_time = max(anchor_time, latest_followup_end)
+        elif latest_followup_end is not None:
+            after_time = latest_followup_end
+        else:
+            after_time = anchor_time
+        min_start_time = None if after_time is None else float(after_time) + 0.15
+        selected = self._action_intent_select_long_horizon_node(
+            state=state,
+            hints=hints,
+            nodes=nodes,
+            min_start_time=min_start_time,
+        )
+        if selected is None:
+            return None
+        _node, start_time, end_time = selected
+        query_time = start_time if abs(end_time - start_time) < 0.25 else (start_time + min(end_time, start_time + 1.2)) / 2
+        return PlannerDecision(
+            thought=thought,
+            tool="query_spatial_context",
+            args={
+                "time_s": query_time,
                 "object_name": self._action_intent_question_object_hint(state),
                 "limit": 16,
             },
@@ -8427,6 +8491,13 @@ class GraphAgentPlanner:
                 )
                 if precondition is not None:
                     return precondition
+            unresolved_rerank_long_horizon_revisit = self._build_action_intent_unresolved_rerank_long_horizon_revisit_decision(
+                state=state,
+                hints=hints,
+                thought="why 题当前 unresolved rerank 已明确指出更晚用途/最终落点仍缺证据；直接沿缓存的目标 object node 向后追，而不是继续做泛化 pairwise followup。",
+            )
+            if unresolved_rerank_long_horizon_revisit is not None:
+                return unresolved_rerank_long_horizon_revisit
             transition_probe = self._build_action_intent_resolution_transition_recovery_decision(
                 state=state,
                 hints=hints,
@@ -8518,6 +8589,13 @@ class GraphAgentPlanner:
                 )
                 if precondition is not None:
                     return precondition
+            unresolved_rerank_long_horizon_revisit = self._build_action_intent_unresolved_rerank_long_horizon_revisit_decision(
+                state=state,
+                hints=hints,
+                thought="why 题 unresolved rerank 已明确指出 later-use / final-location 还缺更晚证据；直接沿缓存目标节点向后追，而不是继续做泛化 future-use followup。",
+            )
+            if unresolved_rerank_long_horizon_revisit is not None:
+                return unresolved_rerank_long_horizon_revisit
             transition_probe = self._build_action_intent_resolution_transition_recovery_decision(
                 state=state,
                 hints=hints,
