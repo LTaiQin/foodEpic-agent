@@ -3621,20 +3621,143 @@ class AgentToolbox:
             confidence = 0.0
         if confidence < 0.74 and not downstream_action:
             missing_reasons.append("weak_pairwise_outcome_support")
+        semantic_gaps = self._action_intent_pairwise_semantic_gaps(result=result)
+        missing_reasons.extend(gap for gap in semantic_gaps if gap not in missing_reasons)
         if not missing_reasons:
             return result
         adjusted = dict(result)
         adjusted["need_more_evidence"] = True
         if not adjusted.get("needed_observation"):
-            adjusted["needed_observation"] = (
-                "more post-action frames showing the direct physical effect of the action and what happens next"
-            )
+            adjusted["needed_observation"] = self._action_intent_needed_observation_for_pairwise_gaps(missing_reasons)
         adjusted["reason"] = (
             f"{result.get('reason') or ''} pairwise_sufficiency_check="
             + ",".join(missing_reasons)
         ).strip()
         adjusted["confidence"] = min(confidence, 0.66)
         return adjusted
+
+    def _action_intent_pairwise_semantic_gaps(self, *, result: dict[str, Any]) -> list[str]:
+        answer = str(result.get("answer") or "")
+        answer_lc = answer.lower()
+        categories = choice_categories(answer)
+        evidence_text = " ".join(
+            str(result.get(key) or "")
+            for key in ("reason", "direct_effect", "downstream_action")
+        ).lower()
+        gaps: list[str] = []
+        if "access_retrieve" in categories:
+            has_access_target = self._text_has_any(
+                evidence_text,
+                (
+                    "retrieve",
+                    "retrieved",
+                    "picked up",
+                    "take out",
+                    "reached",
+                    "reach for",
+                    "gets the",
+                    "got the",
+                    "revealed target",
+                    "visible target",
+                    "specific item behind",
+                    "object behind",
+                    "bottle behind",
+                    "jar behind",
+                    "scale behind",
+                    "tap behind",
+                    "取到",
+                    "拿到",
+                    "拿出",
+                    "够到",
+                ),
+            )
+            generic_reveal_only = self._text_has_any(
+                evidence_text,
+                (
+                    "area behind",
+                    "hidden area",
+                    "can now be seen",
+                    "becomes visible",
+                    "reveals the area",
+                    "see behind",
+                    "看见后面",
+                    "露出后面区域",
+                    "后面的区域",
+                ),
+            )
+            if not has_access_target or generic_reveal_only:
+                gaps.append("missing_pairwise_access_or_retrieval_result")
+        if self._choice_is_direct_space_purpose(answer):
+            if not self._text_has_any(
+                evidence_text,
+                (
+                    "space",
+                    "room",
+                    "clear",
+                    "cleared",
+                    "freed",
+                    "slot",
+                    "available spot",
+                    "workspace",
+                    "out of the way",
+                    "腾出",
+                    "空位",
+                    "空间",
+                ),
+            ):
+                gaps.append("missing_pairwise_space_creation_result")
+        if self._choice_is_downstream_place_purpose(answer):
+            if not self._text_has_any(
+                evidence_text,
+                (
+                    "placed into",
+                    "put into",
+                    "fit into",
+                    "inserted into",
+                    "exact slot",
+                    "exact freed",
+                    "right afterwards",
+                    "newly cleared room",
+                    "available spot",
+                    "put back into",
+                    "slot",
+                    "placed in the cleared space",
+                    "放进",
+                    "放入",
+                    "归位",
+                    "卡槽",
+                    "空位",
+                ),
+            ):
+                gaps.append("missing_pairwise_exact_placement_result")
+            if any(token in answer_lc for token in ("right place", "proper place")) and not self._text_has_any(
+                evidence_text,
+                (
+                    "exact",
+                    "slot",
+                    "specific",
+                    "precise",
+                    "right afterwards",
+                    "fit",
+                    "into the sink",
+                    "into the rack",
+                    "into the slot",
+                    "精确",
+                    "具体位置",
+                    "卡槽",
+                ),
+            ):
+                gaps.append("missing_pairwise_precise_target_marker")
+        return list(dict.fromkeys(gaps))
+
+    def _action_intent_needed_observation_for_pairwise_gaps(self, gaps: list[str]) -> str:
+        if any("access_or_retrieval" in gap for gap in gaps):
+            return "more post-action frames showing whether a specific hidden/blocked target is actually reached, retrieved, or used after the move/open action"
+        if any("space_creation" in gap for gap in gaps):
+            return "more post-action frames showing whether the action truly creates usable space or only changes object position without a clear downstream result"
+        if any("exact_placement" in gap or "precise_target_marker" in gap for gap in gaps):
+            return "more post-action frames showing whether another object is placed into a specific freed slot/target position rather than the action only making generic space"
+        return "more post-action frames showing the direct physical effect of the action and what happens next"
 
     def _apply_action_intent_pairwise_causal_hierarchy(
         self,
