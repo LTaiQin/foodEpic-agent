@@ -1059,6 +1059,23 @@ class GraphAgent:
             global_context=global_context,
         ):
             adjusted += 0.28
+        if self._action_intent_choice_is_direct_hazard_avoidance(
+            question=question_lc,
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            action_object=action_object,
+            global_context=global_context,
+        ):
+            adjusted += 0.34
+        if self._action_intent_choice_is_generic_mixing_under_hazard_context(
+            question=question_lc,
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            global_context=global_context,
+        ):
+            adjusted -= 0.26
         if self._action_intent_choice_is_pure_hand_free_enablement(
             choice=choice_lc,
             support=support_lc,
@@ -2679,6 +2696,239 @@ class GraphAgent:
                 "脏",
                 "托盘",
                 "砧板",
+            )
+        )
+
+    def _action_intent_choice_is_direct_hazard_avoidance(
+        self,
+        *,
+        question: str,
+        choice: str,
+        support: str,
+        contradiction: str,
+        action_object: str,
+        global_context: str,
+    ) -> bool:
+        if not any(
+            token in choice
+            for token in (
+                "burn",
+                "burned",
+                "burning",
+                "too hot",
+                "hot",
+                "spill",
+                "spilling",
+                "messy",
+                "dirty",
+                "temperature",
+                "flame",
+                "overheat",
+                "don't spill",
+                "don't burn",
+                "doesn't get burned",
+                "doesn't spill",
+                "烫",
+                "烧焦",
+                "烧糊",
+                "溢出",
+                "洒出",
+            )
+        ):
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        if any(token in contradiction for token in ("no heat risk", "no spill risk", "没有热风险", "没有溢出风险")):
+            return False
+        heat_choice = any(
+            token in choice
+            for token in ("burn", "burned", "burning", "too hot", "hot", "temperature", "flame", "overheat", "烫", "烧焦", "烧糊")
+        )
+        spill_choice = any(
+            token in choice
+            for token in ("spill", "spilling", "doesn't spill", "don't spill", "messy", "dirty", "溢出", "洒出")
+        )
+        if heat_choice:
+            if not any(
+                token in signal_text
+                for token in (
+                    "hot",
+                    "too hot",
+                    "burn",
+                    "burning",
+                    "getting burnt",
+                    "getting burned",
+                    "flame",
+                    "stove",
+                    "hob",
+                    "pan",
+                    "pot",
+                    "saucepan",
+                    "frying pan",
+                    "oil",
+                    "garlic",
+                    "lentils",
+                    "chillies",
+                    "pancake",
+                    "one side",
+                    "keep moving",
+                    "reduce the flame",
+                    "adjust temperature",
+                    "temperature",
+                    "edge of the hob",
+                    "热",
+                    "烧焦",
+                    "火",
+                    "灶台",
+                    "锅",
+                    "油",
+                )
+            ):
+                return False
+            return any(
+                token in signal_text
+                for token in (
+                    "too hot",
+                    "getting burnt",
+                    "getting burned",
+                    "don't get burned",
+                    "doesn't get burned",
+                    "stop the frying pan from burning",
+                    "not to burn",
+                    "so it doesn't burn",
+                    "reduce the flame",
+                    "adjust temperature",
+                    "avoid burning",
+                    "keep moving",
+                    "edge of the hob",
+                    "one side",
+                    "太烫",
+                    "烧焦",
+                    "避免烧糊",
+                )
+            )
+        if spill_choice:
+            if any(
+                token in signal_text
+                for token in (
+                    "washed",
+                    "rinsed",
+                    "water droplets",
+                    "soap suds",
+                    "洗过",
+                    "冲洗",
+                    "肥皂",
+                )
+            ):
+                return False
+            if not any(
+                token in signal_text
+                for token in (
+                    "spill",
+                    "spilling",
+                    "both hands",
+                    "oil",
+                    "porridge",
+                    "carry",
+                    "holding",
+                    "counter",
+                    "pan",
+                    "lid",
+                    "over the pan",
+                    "dirty end",
+                    "muffin tray",
+                    "chopping board",
+                    "溢出",
+                    "洒出",
+                    "双手",
+                    "拿着",
+                    "锅",
+                    "台面",
+                )
+            ):
+                return False
+            return any(
+                token in signal_text
+                for token in (
+                    "both hands",
+                    "don't spill",
+                    "doesn't spill",
+                    "spill over",
+                    "so the counter does not get messy",
+                    "dirty end",
+                    "oil doesn't spill over",
+                    "holding porridge in both hands",
+                    "双手",
+                    "避免溢出",
+                    "不洒出来",
+                    "不弄脏",
+                )
+            )
+        return False
+
+    def _action_intent_choice_is_generic_mixing_under_hazard_context(
+        self,
+        *,
+        question: str,
+        choice: str,
+        support: str,
+        contradiction: str,
+        global_context: str,
+    ) -> bool:
+        if not any(token in question for token in ("stir ", "shake ", "rotate knob", "turn knob", "move pan", "shake pan")):
+            return False
+        if any(
+            token in choice
+            for token in ("burn", "burned", "burning", "too hot", "hot", "spill", "temperature", "flame", "烧焦", "烫", "溢出")
+        ):
+            return False
+        if not any(
+            token in choice
+            for token in (
+                "mix",
+                "mixed",
+                "coated",
+                "distributed",
+                "stir",
+                "thoroughly",
+                "均匀",
+                "混合",
+                "搅拌",
+            )
+        ):
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        if not any(
+            token in signal_text
+            for token in (
+                "burn",
+                "burning",
+                "too hot",
+                "heat management",
+                "one side",
+                "keep moving",
+                "stop the frying pan from burning",
+                "risk being managed",
+                "avoid burning",
+                "hot",
+                "stove",
+                "hob",
+                "烧焦",
+                "太烫",
+                "避免烧糊",
+            )
+        ):
+            return False
+        return any(
+            token in contradiction
+            for token in (
+                "more specific to heat management",
+                "direct visible risk being managed",
+                "risk being managed",
+                "one side from burning",
+                "heat-management context",
+                "更像是在控温",
+                "直接规避的风险",
+                "避免一侧烧焦",
             )
         )
 
