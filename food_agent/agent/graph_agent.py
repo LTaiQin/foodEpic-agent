@@ -997,6 +997,14 @@ class GraphAgent:
             global_context=global_context,
         ):
             adjusted += 0.3
+        if self._action_intent_choice_is_brief_cooking_inspection_over_disposal(
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            action_object=action_object,
+            global_context=global_context,
+        ):
+            adjusted += 0.32
         if self._action_intent_choice_is_generic_inspection_under_hidden_target_context(
             choice=choice_lc,
             support=support_lc,
@@ -1004,6 +1012,14 @@ class GraphAgent:
             global_context=global_context,
         ):
             adjusted -= 0.22
+        if self._action_intent_choice_is_generic_disposal_without_pour_signal(
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            action_object=action_object,
+            global_context=global_context,
+        ):
+            adjusted -= 0.26
         if self._action_intent_choice_is_hidden_target_access_or_retrieval(
             choice=choice_lc,
             support=support_lc,
@@ -2259,6 +2275,190 @@ class GraphAgent:
                 "检索目的更直接",
                 "不是单纯查看",
                 "后面的目标更直接",
+            )
+        )
+
+    def _action_intent_choice_is_brief_cooking_inspection_over_disposal(
+        self,
+        *,
+        choice: str,
+        support: str,
+        contradiction: str,
+        action_object: str,
+        global_context: str,
+    ) -> bool:
+        if not action_object:
+            return False
+        if not any(
+            token in choice
+            for token in (
+                "check",
+                "inspect",
+                "see whether",
+                "look at",
+                "look inside",
+                "boiling",
+                "done",
+                "doneness",
+                "cooked",
+                "检查",
+                "看看",
+                "确认",
+                "熟了",
+                "沸腾",
+            )
+        ):
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        if not self._signal_mentions_action_object(signal_text, action_object):
+            return False
+        has_cooking_context = any(
+            token in signal_text
+            for token in (
+                "hob",
+                "stove",
+                "burner",
+                "boiling",
+                "water",
+                "steam",
+                "contents",
+                "liquid",
+                "simmer",
+                "cooking",
+                "pan",
+                "pot",
+                "saucepan",
+                "灶",
+                "锅",
+                "沸腾",
+                "水",
+                "蒸汽",
+                "内容物",
+            )
+        )
+        if not has_cooking_context:
+            return False
+        if any(
+            token in signal_text
+            for token in (
+                "scale",
+                "weigh",
+                "weighing",
+                "butter",
+                "kitchen scale",
+                "秤",
+                "称量",
+                "黄油",
+            )
+        ):
+            return False
+        return any(
+            token in signal_text
+            for token in (
+                "briefly raised",
+                "raised near the hob",
+                "briefly raised near the hob",
+                "briefly lifted",
+                "brief lift",
+                "quick check",
+                "as if checking",
+                "checks the contents",
+                "check the boil",
+                "check the boiling",
+                "before continuing cooking",
+                "set back down",
+                "kept near the hob",
+                "stays near the hob",
+                "remains above the hob",
+                "not tilted",
+                "no tilt",
+                "no pouring",
+                "not poured",
+                "not toward the sink",
+                "not carried to the sink",
+                "rather than emptying",
+                "rather than serving",
+                "quick inspection",
+                "brief inspection",
+                "短暂拿起",
+                "快速检查",
+                "检查是否沸腾",
+                "没有倾倒",
+                "没有倒出",
+                "没有拿去水槽",
+                "放回灶台附近",
+            )
+        )
+
+    def _action_intent_choice_is_generic_disposal_without_pour_signal(
+        self,
+        *,
+        choice: str,
+        support: str,
+        contradiction: str,
+        action_object: str,
+        global_context: str,
+    ) -> bool:
+        if not any(
+            token in choice
+            for token in (
+                "empty",
+                "pour out",
+                "drain",
+                "serve",
+                "tip out",
+                "倒掉",
+                "倒出",
+                "沥干",
+                "盛出",
+            )
+        ):
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        if action_object and not self._signal_mentions_action_object(signal_text, action_object):
+            return False
+        if not any(
+            token in signal_text
+            for token in (
+                "hob",
+                "stove",
+                "boiling",
+                "water",
+                "liquid",
+                "contents",
+                "灶",
+                "沸腾",
+                "水",
+                "内容物",
+            )
+        ):
+            return False
+        return any(
+            token in signal_text
+            for token in (
+                "briefly lifted",
+                "brief lift",
+                "quick check",
+                "not tilted",
+                "no tilt",
+                "no pouring",
+                "not poured",
+                "no serving",
+                "not served",
+                "not toward the sink",
+                "not carried to the sink",
+                "stays near the hob",
+                "kept near the hob",
+                "quick inspection",
+                "rather than emptying",
+                "rather than serving",
+                "短暂拿起",
+                "快速检查",
+                "没有倾倒",
+                "没有倒出",
+                "没有盛出",
+                "没有拿去水槽",
+                "仍在灶台附近",
             )
         )
 
