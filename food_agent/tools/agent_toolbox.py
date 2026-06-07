@@ -3122,11 +3122,112 @@ class AgentToolbox:
             "need_more_evidence": bool(payload.get("need_more_evidence")),
             "needed_observation": str(payload.get("needed_observation") or ""),
         }
+        result = self._apply_action_intent_future_use_causal_hierarchy(
+            question=question,
+            choices=[str(choice) for choice in choices],
+            valid_indices=valid_indices,
+            result=result,
+        )
         return self._apply_action_intent_future_use_sufficiency(
             result=result,
             valid_indices=valid_indices,
             choices=[str(choice) for choice in choices],
         )
+
+    def _apply_action_intent_future_use_causal_hierarchy(
+        self,
+        *,
+        question: str,
+        choices: list[str],
+        valid_indices: list[int],
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        if len(valid_indices) < 2 or result.get("need_more_evidence"):
+            return result
+        question_lc = str(question or "").lower()
+        action_match = re.search(r"<([^>]+)>", question_lc)
+        action_text = action_match.group(1) if action_match else question_lc
+        explanation = " ".join(
+            str(result.get(key) or "")
+            for key in ("decisive_observation", "reason")
+        ).lower()
+        action_object = self._extract_action_object_from_question(question)
+        cleaning_target_index = next(
+            (
+                index
+                for index in valid_indices
+                if self._choice_is_cleaning_target_action(
+                    choice=str(choices[index]).lower(),
+                    support=self._action_intent_candidate_support_text(result=result, index=index),
+                    contradiction=self._action_intent_candidate_context_text(result=result, index=index),
+                    action_object=action_object,
+                    global_context=explanation,
+                )
+            ),
+            None,
+        )
+        supply_retrieval_index = next(
+            (
+                index
+                for index in valid_indices
+                if self._choice_is_cleaning_supply_retrieval_candidate(
+                    str(choices[index]).lower(),
+                    action_object=action_object,
+                )
+            ),
+            None,
+        )
+        workflow_initiation_index = next(
+            (
+                index
+                for index in valid_indices
+                if self._choice_is_cleaning_workflow_initiation(
+                    choice=str(choices[index]).lower(),
+                    support=self._action_intent_candidate_support_text(result=result, index=index),
+                    contradiction=self._action_intent_candidate_context_text(result=result, index=index),
+                    action_object=action_object,
+                    global_context=explanation,
+                )
+            ),
+            None,
+        )
+        best_index = int(result.get("best_index", -1))
+        if (
+            supply_retrieval_index is not None
+            and best_index == supply_retrieval_index
+            and cleaning_target_index is not None
+            and self._explanation_uses_exact_cleaning_target_chain(explanation)
+        ):
+            adjusted = dict(result)
+            adjusted["best_index"] = cleaning_target_index
+            adjusted["answer"] = str(choices[cleaning_target_index])
+            adjusted["confidence"] = max(0.8, min(0.9, float(result.get("confidence") or 0.0) + 0.04))
+            adjusted["causal_hierarchy_adjusted"] = True
+            adjusted["reason"] = (
+                f"{result.get('reason') or ''} causal_hierarchy_adjustment: "
+                "the evidence already shows a more direct visible cleaning target, "
+                "so that exact cleaning action is stronger than a generic detergent-bottle retrieval interpretation."
+            ).strip()
+            return adjusted
+        if (
+            supply_retrieval_index is not None
+            and best_index == supply_retrieval_index
+            and workflow_initiation_index is not None
+            and self._explanation_uses_cleaning_workflow_initiation_chain(explanation)
+            and not self._explanation_uses_exact_cleaning_target_chain(explanation)
+        ):
+            adjusted = dict(result)
+            adjusted["best_index"] = workflow_initiation_index
+            adjusted["answer"] = str(choices[workflow_initiation_index])
+            adjusted["confidence"] = max(0.78, min(0.88, float(result.get("confidence") or 0.0) + 0.03))
+            adjusted["causal_hierarchy_adjusted"] = True
+            adjusted["reason"] = (
+                f"{result.get('reason') or ''} causal_hierarchy_adjustment: "
+                "the evidence shows the cleaning workflow is already starting under/near water, "
+                "while an exact detergent-bottle pickup is not yet directly established."
+            ).strip()
+            return adjusted
+        return result
 
     def _valid_future_use_scores(self, raw_items: Any, valid_indices: list[int]) -> list[tuple[int, float]]:
         scored: list[tuple[int, float]] = []
@@ -4086,6 +4187,314 @@ class AgentToolbox:
             )
         )
 
+    def _choice_is_cleaning_target_action(
+        self,
+        *,
+        choice: str,
+        support: str,
+        contradiction: str,
+        action_object: str,
+        global_context: str,
+    ) -> bool:
+        choice = str(choice or "").lower()
+        support = str(support or "").lower()
+        contradiction = str(contradiction or "").lower()
+        action_object = str(action_object or "").lower()
+        global_context = str(global_context or "").lower()
+        if not any(
+            token in action_object
+            for token in ("sponge", "brush", "cloth", "towel", "napkin", "paper towel", "scrubber")
+        ):
+            return False
+        action_object_tokens = [token for token in re.split(r"[^a-z0-9]+", action_object) if token]
+        if action_object_tokens and all(token in choice for token in action_object_tokens):
+            return False
+        if any(
+            token in choice
+            for token in (
+                "bottle",
+                "washing up liquid",
+                "hand wash liquid",
+                "liquid soap",
+                "pick up the washing",
+                "reach for the bottle",
+                "pick up the bottle",
+                "瓶",
+                "洗洁精",
+            )
+        ):
+            return False
+        if not any(token in choice for token in ("wash", "rinse", "scrub", "wipe", "clean", "冲洗", "清洗", "擦", "刷")):
+            return False
+        if any(
+            token in choice
+            for token in (
+                "whole thing",
+                "dry hand",
+                "dry hands",
+                "wash hands",
+                "wipe hands",
+                "clean the whole",
+                "to clean.",
+                "to dry.",
+                "to clean the whole thing",
+            )
+        ):
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        target_terms = [
+            token
+            for token in (
+                "peeler",
+                "knife",
+                "spoon",
+                "utensil",
+                "tray",
+                "counter",
+                "surface",
+                "hob",
+                "sink",
+                "cup",
+                "bowl",
+                "pot",
+                "pan",
+                "colander",
+                "board",
+                "blender cup",
+                "ice cube tray",
+                "counter surface",
+                "刨刀",
+                "刀",
+                "勺",
+                "托盘",
+                "台面",
+                "灶台",
+                "水槽",
+                "杯",
+                "碗",
+                "锅",
+                "滤盆",
+                "砧板",
+            )
+            if token in choice
+        ]
+        if not target_terms:
+            return False
+        if not any(token in signal_text for token in target_terms):
+            return False
+        if any(token in support for token in ("could", "can be used", "compatible with", "theoretically", "理论", "可能")):
+            if not any(
+                token in signal_text
+                for token in (
+                    "ready for wiping",
+                    "staged for wiping",
+                    "compatible with preparing to wipe",
+                    "laid out",
+                    "beside crumbs",
+                    "next visible cleaning target",
+                    "target is the",
+                    "toward the utensil",
+                    "cleaning target",
+                    "wiping motion",
+                    "scrubbing motion",
+                    "准备擦",
+                    "清洗目标",
+                    "擦拭目标",
+                )
+            ):
+                return False
+        return any(
+            token in signal_text
+            for token in (
+                "while holding",
+                "holding",
+                "other hand",
+                "free hand",
+                "running water",
+                "under water",
+                "scrub",
+                "wipe",
+                "wash",
+                "rinse",
+                "counter",
+                "sink",
+                "sponge",
+                "brush",
+                "one hand",
+                "另一只手",
+                "一只手",
+                "拿着",
+                "流水",
+                "水槽",
+                "海绵",
+                "刷子",
+                "擦",
+                "清洗",
+                "冲洗",
+                "next visible cleaning target",
+                "target is the",
+                "toward the utensil",
+                "target object",
+                "cleaning target",
+                "下一个清洗目标",
+                "清洗目标",
+            )
+        )
+
+    def _choice_is_cleaning_supply_retrieval_candidate(
+        self,
+        choice: str,
+        *,
+        action_object: str,
+    ) -> bool:
+        choice = str(choice or "").lower()
+        action_object = str(action_object or "").lower()
+        if not any(
+            token in action_object
+            for token in ("sponge", "brush", "cloth", "towel", "napkin", "paper towel", "scrubber")
+        ):
+            return False
+        return any(
+            token in choice
+            for token in (
+                "pick up the bottle",
+                "reach for the bottle",
+                "washing up liquid",
+                "hand wash liquid",
+                "liquid soap",
+                "pick up the washing",
+                "拿起洗洁精",
+                "拿起瓶子",
+            )
+        )
+
+    def _choice_is_cleaning_supply_retrieval(
+        self,
+        *,
+        choice: str,
+        support: str,
+        contradiction: str,
+        action_object: str,
+        global_context: str,
+    ) -> bool:
+        choice = str(choice or "").lower()
+        support = str(support or "").lower()
+        contradiction = str(contradiction or "").lower()
+        action_object = str(action_object or "").lower()
+        global_context = str(global_context or "").lower()
+        if not self._choice_is_cleaning_supply_retrieval_candidate(choice, action_object=action_object):
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        if any(
+            token in contradiction
+            for token in (
+                "no bottle pickup",
+                "not directly shown",
+                "less direct than",
+                "intermediate possibility",
+                "visible surface target",
+                "visible utensil-cleaning target",
+                "没有拿起瓶子",
+                "没有直接拿",
+            )
+        ):
+            return False
+        return any(
+            token in signal_text
+            for token in (
+                "immediately reaches for",
+                "picks up the washing-up-liquid bottle",
+                "picks up the bottle",
+                "reaches for the bottle",
+                "washing-up-liquid bottle",
+                "hand wash liquid bottle",
+                "liquid bottle",
+                "immediate next target is the bottle",
+                "立即伸手拿瓶子",
+                "拿起洗洁精瓶",
+                "下一步就是拿瓶子",
+            )
+        )
+
+    def _choice_is_cleaning_workflow_initiation(
+        self,
+        *,
+        choice: str,
+        support: str,
+        contradiction: str,
+        action_object: str,
+        global_context: str,
+    ) -> bool:
+        choice = str(choice or "").lower()
+        support = str(support or "").lower()
+        contradiction = str(contradiction or "").lower()
+        action_object = str(action_object or "").lower()
+        global_context = str(global_context or "").lower()
+        if not any(
+            token in action_object
+            for token in ("sponge", "brush", "cloth", "towel", "napkin", "paper towel", "scrubber")
+        ):
+            return False
+        if not any(
+            token in choice
+            for token in (
+                "begin washing",
+                "start washing",
+                "wet the sponge",
+                "washing sequence",
+                "开始清洗",
+                "开始洗",
+            )
+        ):
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        if not any(
+            token in signal_text
+            for token in (
+                "active washing position",
+                "under/near water",
+                "under running water",
+                "washing sequence",
+                "washing is starting",
+                "no specific target yet",
+                "exact first item washed is not explicit",
+                "water",
+                "sink",
+                "active washing",
+                "进入清洗位置",
+                "开始清洗",
+                "水槽",
+                "流水",
+            )
+        ):
+            return False
+        return not any(
+            token in signal_text
+            for token in (
+                "immediately reaches for",
+                "picks up the bottle",
+                "washing-up-liquid bottle",
+                "next visible cleaning target",
+                "visible utensil-cleaning target",
+                "immediate next target is the bottle",
+                "target is the utensil",
+                "拿起洗洁精瓶",
+                "清洗目标已经明确",
+            )
+        )
+
+    def _extract_action_object_from_question(self, question: str) -> str:
+        match = re.search(r"<([^>]+)>", str(question or "").lower())
+        if not match:
+            return ""
+        text = match.group(1)
+        text = re.sub(
+            r"\b(move|transfer|pick up|pickup|take|lift|shift|remove|open|close|turn|place|put|shake|tip|stir)\b",
+            " ",
+            text,
+        )
+        return re.sub(r"\s+", " ", text).strip()
+
     def _explanation_uses_direct_safety_avoidance_chain(self, explanation: str) -> bool:
         text = str(explanation or "").lower()
         has_hazard = any(
@@ -4219,6 +4628,70 @@ class AgentToolbox:
         )
         lacks_exact_chain = not self._explanation_uses_exact_hand_free_target_chain(text)
         return has_hand_enablement and has_ambiguity and lacks_exact_chain
+
+    def _explanation_uses_exact_cleaning_target_chain(self, explanation: str) -> bool:
+        text = str(explanation or "").lower()
+        has_cleaning_action = any(
+            token in text
+            for token in (
+                "scrub",
+                "scrubbing",
+                "wash the",
+                "rinse the",
+                "wipe the",
+                "clean the",
+                "next visible cleaning target",
+                "cleaning target",
+                "target is the",
+                "toward the utensil",
+            )
+        )
+        has_specific_target = any(
+            token in text
+            for token in (
+                "utensil",
+                "knife",
+                "spoon",
+                "beaker",
+                "pan",
+                "pot",
+                "hob",
+                "surface",
+                "counter",
+                "cup",
+                "board",
+                "tray",
+            )
+        )
+        return has_cleaning_action and has_specific_target
+
+    def _explanation_uses_cleaning_workflow_initiation_chain(self, explanation: str) -> bool:
+        text = str(explanation or "").lower()
+        has_workflow_start = any(
+            token in text
+            for token in (
+                "active washing position",
+                "under/near water",
+                "under running water",
+                "washing sequence",
+                "washing is starting",
+                "begin washing",
+                "start washing",
+                "wet the sponge",
+                "active washing",
+            )
+        )
+        has_not_yet_specific_target = any(
+            token in text
+            for token in (
+                "no specific target yet",
+                "exact first item washed is not explicit",
+                "without yet showing a single specific",
+                "exact next target is still ambiguous",
+                "not yet directly established",
+            )
+        )
+        return has_workflow_start and has_not_yet_specific_target
 
     def _explanation_uses_exact_reveal_then_take_or_place_chain(self, explanation: str) -> bool:
         text = str(explanation or "").lower()
