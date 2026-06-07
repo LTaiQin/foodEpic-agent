@@ -864,6 +864,17 @@ class GraphAgent:
                 f"action_intent_causal_override_best_index={causal_override[0]} score={best_score:.2f}"
             )
             return causal_override
+        exact_use_override = self._override_generic_space_with_exact_immediate_use_candidate(
+            state=state,
+            candidate_rows=candidate_rows,
+            unresolved_best_index=best_index,
+            unresolved_best_score=best_score,
+        )
+        if exact_use_override is not None:
+            state.add_memory(
+                f"action_intent_exact_use_override_best_index={exact_use_override[0]} score={best_score:.2f}"
+            )
+            return exact_use_override
         state.add_memory(f"action_intent_unresolved_rerank_best_index={best_index} score={best_score:.2f}")
         return best_index, best_choice, min(max(0.36 + max(best_score, 0.0) * 0.45, 0.36), 0.68)
 
@@ -934,6 +945,12 @@ class GraphAgent:
             contradiction=contradiction_lc,
         ):
             adjusted -= 0.18
+        if self._action_intent_choice_is_direct_space_without_exact_next_use(
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+        ):
+            adjusted += 0.24
         if "clean" in choice_lc and any(term in contradiction_lc for term in ("no actual cleaning", "no visible wiping", "没有任何明确清洁", "没有擦")):
             adjusted -= 0.16
         if "away" in choice_lc and any(term in contradiction_lc for term in ("not stored", "not put", "counter", "没有看到把", "暂时", "台面")):
@@ -944,6 +961,7 @@ class GraphAgent:
             question=question_lc,
             choice=choice_lc,
             support=support_lc,
+            contradiction=contradiction_lc,
             global_context=global_context,
             action_object=action_object,
         ):
@@ -1051,6 +1069,15 @@ class GraphAgent:
             global_context=global_context,
         ):
             adjusted += 0.36
+        if self._action_intent_choice_is_exact_immediate_downstream_use(
+            question=question_lc,
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            action_object=action_object,
+            global_context=global_context,
+        ):
+            adjusted += 0.32
         if self._action_intent_choice_is_cleaning_tool_specific_target_use(
             choice=choice_lc,
             support=support_lc,
@@ -1233,12 +1260,22 @@ class GraphAgent:
         question: str,
         choice: str,
         support: str,
+        contradiction: str,
         global_context: str,
         action_object: str,
     ) -> bool:
         if not any(token in question for token in ("move ", "transfer ", "shift ", "remove ", "clear ")):
             return False
         if self._choice_is_same_object_active_use(choice, action_object):
+            return False
+        if self._action_intent_choice_is_exact_immediate_downstream_use(
+            question=question,
+            choice=choice,
+            support=support,
+            contradiction=contradiction,
+            action_object=action_object,
+            global_context=global_context,
+        ):
             return False
         if self._action_intent_choice_is_hand_free_enablement(
             choice=choice,
@@ -1430,6 +1467,67 @@ class GraphAgent:
         if unresolved_best_score > alt_score + 0.34 and unresolved_best_score >= 0.82:
             return None
         confidence = min(max(0.48 + max(alt_score, 0.0) * 0.38, 0.48), 0.72)
+        return alt_index, alt_choice, confidence
+
+    def _override_generic_space_with_exact_immediate_use_candidate(
+        self,
+        *,
+        state: AgentState,
+        candidate_rows: list[dict[str, Any]],
+        unresolved_best_index: int,
+        unresolved_best_score: float,
+    ) -> tuple[int, str, float] | None:
+        question = str(getattr(state, "question", "") or "")
+        question_lc = question.lower()
+        if not any(token in question_lc for token in ("move ", "transfer ", "shift ", "remove ", "clear ")):
+            return None
+        best_row = next(
+            (
+                row
+                for row in candidate_rows
+                if int(row.get("index", -1)) == unresolved_best_index
+            ),
+            None,
+        )
+        if best_row is None:
+            return None
+        best_choice = str(best_row.get("choice") or "").lower()
+        if not self._action_intent_choice_is_generic_direct_space_purpose(best_choice):
+            return None
+        action_object = self._action_intent_question_object(question)
+        exact_candidates: list[tuple[float, int, str]] = []
+        for row in candidate_rows:
+            index = int(row.get("index", -1))
+            if index == unresolved_best_index:
+                continue
+            choice = str(row.get("choice") or "").lower()
+            support = str(row.get("support") or "").lower()
+            contradiction = str(row.get("contradiction") or "").lower()
+            adjusted_score = float(row.get("adjusted_score") or 0.0)
+            if not self._action_intent_choice_is_exact_immediate_downstream_use(
+                question=question_lc,
+                choice=choice,
+                support=support,
+                contradiction=contradiction,
+                action_object=action_object,
+                global_context=" ".join(
+                    str(item)
+                    for item in list(getattr(state, "evidence_bundle", []))[-24:]
+                    + list(getattr(state, "working_memory", []))[-24:]
+                    if isinstance(item, str)
+                ).lower(),
+            ):
+                continue
+            if adjusted_score < 0.12:
+                continue
+            exact_candidates.append((adjusted_score, index, str(state.choices[index])))
+        if not exact_candidates:
+            return None
+        exact_candidates.sort(key=lambda item: (-item[0], item[1]))
+        alt_score, alt_index, alt_choice = exact_candidates[0]
+        if unresolved_best_score > alt_score + 0.26 and unresolved_best_score >= 0.8:
+            return None
+        confidence = min(max(0.5 + max(alt_score, 0.0) * 0.36, 0.5), 0.74)
         return alt_index, alt_choice, confidence
 
     def _action_intent_question_object(self, question: str) -> str:
@@ -2027,6 +2125,70 @@ class GraphAgent:
             return True
         return False
 
+    def _action_intent_choice_is_generic_direct_space_purpose(self, choice: str) -> bool:
+        text = str(choice or "").lower()
+        if not any(
+            token in text
+            for token in (
+                "make space",
+                "make some space",
+                "create space",
+                "free up space",
+                "clear space",
+                "make room",
+                "create room",
+                "free up room",
+                "clear room",
+                "some room",
+                "腾空间",
+                "腾出空间",
+                "让开",
+            )
+        ):
+            return False
+        return not self._action_intent_choice_has_specific_space_target(text)
+
+    def _action_intent_choice_is_direct_space_without_exact_next_use(
+        self,
+        *,
+        choice: str,
+        support: str,
+        contradiction: str,
+    ) -> bool:
+        if not self._action_intent_choice_is_generic_direct_space_purpose(choice):
+            return False
+        signal_text = f"{support} {contradiction}"
+        if not any(
+            token in signal_text
+            for token in (
+                "space",
+                "room",
+                "clear",
+                "counter room",
+                "workspace",
+                "腾出空间",
+                "让开",
+            )
+        ):
+            return False
+        return any(
+            token in contradiction
+            for token in (
+                "no single exact next object use shown",
+                "no exact next object",
+                "no exact next target",
+                "no specific next target",
+                "no single immediate next target",
+                "no direct next-use evidence is shown",
+                "target is still ambiguous",
+                "without yet showing a single specific",
+                "exact next target is still ambiguous",
+                "没有具体下一目标",
+                "没有明确下一目标",
+                "目标仍不明确",
+            )
+        )
+
     def _action_intent_choice_is_exact_workspace_creation(
         self,
         *,
@@ -2293,6 +2455,209 @@ class GraphAgent:
             )
         )
 
+    def _action_intent_choice_is_exact_immediate_downstream_use(
+        self,
+        *,
+        question: str,
+        choice: str,
+        support: str,
+        contradiction: str,
+        action_object: str,
+        global_context: str,
+    ) -> bool:
+        if not any(token in question for token in ("move ", "transfer ", "shift ", "remove ", "clear ", "place ", "put ")):
+            return False
+        if self._action_intent_choice_is_generic_direct_space_purpose(choice):
+            return False
+        if self._choice_is_same_object_active_use(choice, action_object):
+            return False
+        if self._action_intent_choice_is_exact_downstream_targeted_placement(
+            question=question,
+            choice=choice,
+            support=support,
+            contradiction=contradiction,
+            action_object=action_object,
+            global_context=global_context,
+        ):
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        if any(
+            token in signal_text
+            for token in (
+                "later downstream",
+                "picked up later",
+                "may be picked up later",
+                "later during cooking",
+                "speculative",
+                "只是后续可能",
+                "后面才会",
+                "后续才会",
+            )
+        ) and not any(
+            token in signal_text
+            for token in (
+                "immediately",
+                "immediate next",
+                "right afterwards",
+                "directly afterwards",
+                "next visible",
+                "直接下一步",
+                "立刻",
+                "紧接着",
+            )
+        ):
+            return False
+        if not any(
+            token in choice
+            for token in (
+                "pick up",
+                "grab",
+                "reach for",
+                "turn on",
+                "turn off",
+                "open",
+                "adjust",
+                "measure",
+                "weigh",
+                "wash",
+                "rinse",
+                "scrub",
+                "wipe",
+                "clean",
+                "use",
+                "stir",
+                "pour",
+                "拿起",
+                "打开",
+                "调节",
+                "称量",
+                "清洗",
+                "冲洗",
+                "擦",
+                "使用",
+                "搅拌",
+            )
+        ):
+            return False
+        if any(
+            token in choice
+            for token in (
+                "make space",
+                "make room",
+                "free up",
+                "some space",
+                "some room",
+                "access",
+                "inspect",
+                "store",
+                "later",
+                "future",
+                "腾空间",
+                "让开",
+                "检查",
+                "收起来",
+            )
+        ):
+            return False
+        choice_targets = [
+            token
+            for token in (
+                "whisk",
+                "knife",
+                "fork",
+                "spoon",
+                "spatula",
+                "bottle",
+                "sponge",
+                "brush",
+                "cloth",
+                "towel",
+                "lid",
+                "cover",
+                "bowl",
+                "plate",
+                "tray",
+                "pot",
+                "pan",
+                "saucepan",
+                "cup",
+                "glass",
+                "jar",
+                "colander",
+                "scale",
+                "tap",
+                "faucet",
+                "sink",
+                "hob",
+                "microwave",
+                "oven",
+                "fridge",
+                "door",
+                "drawer",
+                "cupboard",
+                "rack",
+                "dishwasher",
+            )
+            if token in choice
+        ]
+        action_object_tokens = {token for token in re.split(r"[^a-z0-9]+", action_object) if token}
+        non_action_targets = [token for token in choice_targets if token not in action_object_tokens]
+        if not non_action_targets:
+            return False
+        if not any(token in signal_text for token in non_action_targets):
+            return False
+        has_immediacy = any(
+            token in signal_text
+            for token in (
+                "immediately afterwards",
+                "immediately after",
+                "immediately reaches for",
+                "immediate next target",
+                "immediate next step",
+                "immediate next use",
+                "right afterwards",
+                "directly afterwards",
+                "directly after",
+                "next visible target",
+                "next visible object",
+                "used next",
+                "about to",
+                "prepare to",
+                "紧接着",
+                "随后立刻",
+                "立刻",
+                "下一步就是",
+                "直接下一步",
+            )
+        )
+        if not has_immediacy:
+            return False
+        return any(
+            token in signal_text
+            for token in (
+                "direct next target",
+                "direct next functional use",
+                "direct purpose",
+                "specific next target",
+                "immediate next target",
+                "immediate next use",
+                "reaches for",
+                "picks up the",
+                "opens the",
+                "turns on the",
+                "uses the",
+                "next tool",
+                "next visible target",
+                "rather than only a broad workspace effect",
+                "rather than only generic space",
+                "not just a broad workspace effect",
+                "不是泛化空间效果",
+                "直接下一目标",
+                "具体下一目标",
+                "直接功能目的",
+            )
+        )
+
     def _action_intent_choice_is_direct_same_object_inspection_or_alignment(
         self,
         *,
@@ -2337,6 +2702,21 @@ class GraphAgent:
                 "after that picks up",
                 "之后再",
                 "后续才",
+            )
+        ):
+            return False
+        if any(
+            token in contradiction
+            for token in (
+                "no sign of checking",
+                "no inspection cue",
+                "no clear inspection",
+                "not inspecting",
+                "weaker than the exact",
+                "there is no sign of",
+                "没有检查",
+                "没有查看",
+                "没有明显检查",
             )
         ):
             return False
