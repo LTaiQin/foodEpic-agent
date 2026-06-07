@@ -6199,6 +6199,7 @@ class GraphAgentPlanner:
         state: AgentState,
         hints: dict[str, Any],
         nodes: list[dict[str, Any]],
+        min_start_time: float | None = None,
     ) -> tuple[dict[str, Any], float, float] | None:
         if not self._is_action_intent_task(state):
             return None
@@ -6210,6 +6211,8 @@ class GraphAgentPlanner:
             return None
         latest_followup_end = self._latest_action_intent_followup_end_time(state)
         lower_bound = max(action_end + 0.35, (latest_followup_end or action_end) + 0.35)
+        if min_start_time is not None:
+            lower_bound = max(lower_bound, float(min_start_time))
         prefer_latest = self._action_intent_long_horizon_prefers_latest_candidate(state)
         candidates: list[tuple[tuple[int, int, float], dict[str, Any], float, float]] = []
         for node in nodes:
@@ -6320,13 +6323,20 @@ class GraphAgentPlanner:
         state: AgentState,
         hints: dict[str, Any],
         thought: str,
+        after_time: float | None = None,
     ) -> PlannerDecision | None:
         if not self._action_intent_prefers_long_horizon_object_retrieval(state=state):
             return None
         nodes = self._latest_action_intent_long_horizon_nodes(state)
         if not nodes:
             return None
-        selected = self._action_intent_select_long_horizon_node(state=state, hints=hints, nodes=nodes)
+        min_start_time = None if after_time is None else float(after_time) + 0.15
+        selected = self._action_intent_select_long_horizon_node(
+            state=state,
+            hints=hints,
+            nodes=nodes,
+            min_start_time=min_start_time,
+        )
         if selected is None:
             return None
         _node, start_time, end_time = selected
@@ -6340,6 +6350,71 @@ class GraphAgentPlanner:
                 "limit": 16,
             },
         )
+
+    def _action_intent_spatial_target_mask_fixture(self, state: AgentState, spatial: dict[str, Any]) -> str:
+        if not self._is_action_intent_task(state) or not isinstance(spatial, dict):
+            return ""
+        target = self._action_intent_question_object_hint(state).strip().lower()
+        if not target:
+            return ""
+        target_tokens = [token for token in re.split(r"[\s_/:-]+", target) if token]
+        if not target_tokens:
+            return ""
+        for item in spatial.get("object_masks") or []:
+            if not isinstance(item, dict):
+                continue
+            object_name = str(item.get("object_name") or "").strip().lower()
+            if object_name and all(token in object_name for token in target_tokens):
+                return str(item.get("fixture") or "").strip()
+        return ""
+
+    def _action_intent_fixture_bucket(self, fixture: str) -> str:
+        text = str(fixture or "").strip().lower()
+        if not text:
+            return "unknown"
+        if any(token in text for token in ("fridge", "freezer", "cupboard", "cabinet", "drawer", "shelf", "rack", "pantry")):
+            return "storage"
+        if any(token in text for token in ("scale", "weigh")):
+            return "scale"
+        if any(token in text for token in ("sink", "drain", "tap", "faucet")):
+            return "sink"
+        if any(token in text for token in ("hob", "stove", "burner", "oven", "microwave", "airfryer", "toaster", "kettle")):
+            return "appliance"
+        if any(token in text for token in ("counter", "table", "board", "worktop", "surface", "island")):
+            return "workspace"
+        return "other"
+
+    def _action_intent_long_horizon_spatial_context_looks_intermediate(
+        self,
+        *,
+        state: AgentState,
+        spatial: dict[str, Any],
+    ) -> bool:
+        if not self._action_intent_prefers_long_horizon_object_retrieval(state=state):
+            return False
+        target_fixture = self._action_intent_spatial_target_mask_fixture(state, spatial)
+        fixture_bucket = self._action_intent_fixture_bucket(target_fixture)
+        has_target_track = False
+        target = self._action_intent_question_object_hint(state).strip().lower()
+        target_tokens = [token for token in re.split(r"[\s_/:-]+", target) if token]
+        for item in spatial.get("object_tracks") or []:
+            if not isinstance(item, dict):
+                continue
+            object_name = str(item.get("object_name") or "").strip().lower()
+            if object_name and target_tokens and all(token in object_name for token in target_tokens):
+                has_target_track = True
+                break
+        if not has_target_track and not target_fixture:
+            return False
+        bias_profile = self._action_intent_timeline_review_bias_profile(state)
+        if bias_profile["final_location_unclear"]:
+            return fixture_bucket in {"unknown", "workspace", "other"} or not target_fixture
+        if bias_profile["next_use_unclear"]:
+            return fixture_bucket in {"unknown", "workspace", "other"} or not target_fixture
+        needed_profile = self._action_intent_needed_observation_profile(state=state)
+        if needed_profile["prefer_final_placement"] or needed_profile["prefer_future_use_outcome"]:
+            return fixture_bucket in {"unknown", "workspace", "other"} or not target_fixture
+        return False
 
     def _recipe_following_activity_step_decision(
         self,
@@ -7204,6 +7279,15 @@ class GraphAgentPlanner:
                     except Exception:  # noqa: BLE001
                         anchor_value = None
                     if anchor_value is not None:
+                        if self._action_intent_long_horizon_spatial_context_looks_intermediate(state=state, spatial=last_result):
+                            long_horizon_revisit = self._build_action_intent_cached_long_horizon_revisit_decision(
+                                state=state,
+                                hints=hints,
+                                thought="why 题当前只看到目标对象还处在中间态 workspace / active-area 里，不能把这一下当成最终去向或真实用途；继续沿更晚节点向后追。",
+                                after_time=anchor_value,
+                            )
+                            if long_horizon_revisit is not None:
+                                return long_horizon_revisit
                         attempt_count = self._action_intent_followup_attempt_count(state)
                         return PlannerDecision(
                             thought="why 题已补到更晚时刻的空间上下文；继续围绕该对象后续位置抽关键帧，检查它后来到底被放回、再使用，还是仅暂时移开。",
