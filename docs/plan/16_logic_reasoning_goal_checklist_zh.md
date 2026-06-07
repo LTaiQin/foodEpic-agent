@@ -185,7 +185,15 @@
 - 本轮提交：新增并通过 `2` 条 mixed-horizon 定向测试，分别保护：
   - `check the label` vs `put back in the fridge` 会走 hybrid transition probe
   - `open the jar` vs `use the jar to weigh the ingredients` 会走 hybrid transition probe
-- 本轮提交：inspection 与 mixed-horizon 定向测试均通过，why 专项总回归更新为 `209 passed, 344 deselected`
+- 本轮提交：`planner / verifier` 的 `direct post-action evidence` 判断继续收紧，不再把“不确定的后续动作词”误当成已经观察到的决定性结果：
+  - `reason / answer` 里只要出现 `put back / returned / turned on / opened / poured` 这类词，过去就可能被误判为“已经看到动作后结果”
+  - 现在 direct-evidence 判断改为只读取 `reason / decisive_observation / direct_effect / downstream_action`，不再把候选答案文本本身当作证据
+  - 同时加入 clause 级别的 conservative 判定：如果相关子句里包含 `still unclear whether / not yet visible whether / may / might / could still / remains plausible` 这类不确定语言，即使同句出现 `put back / returned / weighed / opened`，也不算 direct evidence
+- 本轮提交：新增并通过 `3` 条 direct-evidence 定向测试，分别保护：
+  - planner 不会把 `still unclear whether it is returned to the fridge` 误判成 direct evidence
+  - planner 仍会接受 `shortly after ... returned to the fridge ...` 这类真实后续结果链
+  - verifier 在 `uncertain return` 语义下仍会阻止 finish
+- 本轮提交：inspection、mixed-horizon、direct-evidence 定向测试均通过，why 专项总回归更新为 `212 passed, 344 deselected`
 
 ### 16.2.4 当前真正的瓶颈
 

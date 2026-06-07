@@ -502,7 +502,7 @@ class GraphAgentPlanner:
             return False
         text = " ".join(
             str(result.get(key) or "")
-            for key in ("reason", "decisive_observation", "direct_effect", "downstream_action", "answer")
+            for key in ("reason", "decisive_observation", "direct_effect", "downstream_action")
         ).strip().lower()
         if not text:
             return False
@@ -551,16 +551,6 @@ class GraphAgentPlanner:
             "放回",
             "取到后面的",
         )
-        temporal_only_terms = (
-            "immediately",
-            "right after",
-            "shortly after",
-            "next step",
-            "afterwards",
-            "立刻",
-            "随后",
-            "接着",
-        )
         blocked_terms = (
             "not enough",
             "insufficient",
@@ -581,7 +571,6 @@ class GraphAgentPlanner:
             "briefly",
             "visible in hand",
             "near the counter",
-            "after pickup",
             "picked up but not yet used",
             "picked up but the next use is not shown",
             "still unclear",
@@ -593,9 +582,53 @@ class GraphAgentPlanner:
             "仅仅",
             "只是",
         )
-        if any(term in text for term in blocked_terms):
-            return any(term in text for term in strong_result_terms if term not in temporal_only_terms)
-        return any(term in text for term in strong_result_terms)
+        return self._action_intent_text_has_direct_outcome_clause(
+            text=text,
+            strong_result_terms=strong_result_terms,
+            blocked_terms=blocked_terms,
+        )
+
+    def _action_intent_text_has_direct_outcome_clause(
+        self,
+        *,
+        text: str,
+        strong_result_terms: tuple[str, ...],
+        blocked_terms: tuple[str, ...],
+    ) -> bool:
+        if not text.strip():
+            return False
+        normalized = str(text).lower()
+        for separator in ("\n", ";", ".", ", but ", " but ", " however ", " although ", " though "):
+            normalized = normalized.replace(separator, "|")
+        clauses = [clause.strip() for clause in normalized.split("|") if clause.strip()]
+        if not clauses:
+            clauses = [normalized.strip()]
+        for clause in clauses:
+            if not any(term in clause for term in strong_result_terms):
+                continue
+            if any(term in clause for term in blocked_terms):
+                continue
+            if any(
+                token in clause
+                for token in (
+                    "whether",
+                    "not yet visible whether",
+                    "it may",
+                    "may be",
+                    "might be",
+                    "could be",
+                    "could still be",
+                    "still remains plausible",
+                    "remains plausible",
+                    "possible next",
+                    "it is possible",
+                    "是否",
+                    "可能",
+                )
+            ):
+                continue
+            return True
+        return False
 
     def _action_intent_has_peak_guided_followup_frames(self, state: AgentState) -> bool:
         for path in self._filter_visual_image_paths(list(getattr(state, "retrieved_frames", []) or [])):

@@ -419,7 +419,7 @@ class GraphAgentVerifier:
             decisive = str(payload.get("decisive_observation") or "").strip()
             score_gap = self._action_intent_future_use_score_gap(payload)
             return confidence < 0.84 or not decisive or score_gap < 0.18
-        support_text = " ".join(str(payload.get(key) or "") for key in ("reason", "answer")).lower()
+        support_text = " ".join(str(payload.get(key) or "") for key in ("reason", "decisive_observation")).lower()
         direct_result_markers = (
             "immediately",
             "right after",
@@ -442,7 +442,74 @@ class GraphAgentVerifier:
             "放回",
             "放到秤上",
         )
-        return confidence < 0.9 or not any(marker in support_text for marker in direct_result_markers)
+        blocked_terms = (
+            "not enough",
+            "insufficient",
+            "unclear",
+            "uncertain",
+            "ambiguous",
+            "cannot tell",
+            "can't tell",
+            "not visible",
+            "not shown",
+            "no visible",
+            "no actual",
+            "missing",
+            "lack",
+            "still unclear",
+            "still contested",
+            "未显示",
+            "没有看到",
+            "看不清",
+            "不明确",
+        )
+        return confidence < 0.9 or not self._action_intent_text_has_direct_outcome_clause(
+            text=support_text,
+            strong_result_terms=direct_result_markers,
+            blocked_terms=blocked_terms,
+        )
+
+    def _action_intent_text_has_direct_outcome_clause(
+        self,
+        *,
+        text: str,
+        strong_result_terms: tuple[str, ...],
+        blocked_terms: tuple[str, ...],
+    ) -> bool:
+        if not str(text or "").strip():
+            return False
+        normalized = str(text).lower()
+        for separator in ("\n", ";", ".", ", but ", " but ", " however ", " although ", " though "):
+            normalized = normalized.replace(separator, "|")
+        clauses = [clause.strip() for clause in normalized.split("|") if clause.strip()]
+        if not clauses:
+            clauses = [normalized.strip()]
+        for clause in clauses:
+            if not any(term in clause for term in strong_result_terms):
+                continue
+            if any(term in clause for term in blocked_terms):
+                continue
+            if any(
+                token in clause
+                for token in (
+                    "whether",
+                    "not yet visible whether",
+                    "it may",
+                    "may be",
+                    "might be",
+                    "could be",
+                    "could still be",
+                    "still remains plausible",
+                    "remains plausible",
+                    "possible next",
+                    "it is possible",
+                    "是否",
+                    "可能",
+                )
+            ):
+                continue
+            return True
+        return False
 
     def _latest_action_intent_resolution_payload(self, state: AgentState) -> tuple[str, dict[str, Any]] | None:
         for call in reversed(list(getattr(state, "tool_trace", []) or [])):
