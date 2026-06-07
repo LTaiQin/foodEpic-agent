@@ -62,7 +62,7 @@ class ModelConfig:
     model: str
     api_key: str
     base_url: str
-    provider_mode: str = "chat_completions"
+    provider_mode: str = "responses"
     vision_provider_mode: str = "auto"
     max_retries: int = 3
     vision_max_retries: int = 0
@@ -77,8 +77,8 @@ class ModelConfig:
         return cls(
             model=os.environ.get("FOOD_AGENT_MODEL", "gpt-5.4"),
             api_key=os.environ.get("OPENAI_API_KEY", ""),
-            base_url=os.environ.get("OPENAI_BASE_URL", "https://icoe.pp.ua/v1"),
-            provider_mode=os.environ.get("FOOD_AGENT_PROVIDER_MODE", "chat_completions"),
+            base_url=os.environ.get("OPENAI_BASE_URL", "https://right.codes/codex/v1"),
+            provider_mode=os.environ.get("FOOD_AGENT_PROVIDER_MODE", "responses"),
             vision_provider_mode=os.environ.get("FOOD_AGENT_VISION_PROVIDER_MODE", "auto"),
             max_retries=int(os.environ.get("FOOD_AGENT_MODEL_MAX_RETRIES", "3")),
             vision_max_retries=int(os.environ.get("FOOD_AGENT_VISION_MAX_RETRIES", "0")),

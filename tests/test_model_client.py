@@ -9,7 +9,12 @@ from food_agent.model_client import ModelResponse, OpenAICompatibleModelClient
 
 def test_model_client_complete_with_mock(monkeypatch) -> None:
     client = OpenAICompatibleModelClient.__new__(OpenAICompatibleModelClient)
-    client.config = ModelConfig(model="mock", api_key="key", base_url="http://example.com/v1")
+    client.config = ModelConfig(
+        model="mock",
+        api_key="key",
+        base_url="http://example.com/v1",
+        provider_mode="chat_completions",
+    )
 
     class MockCompletions:
         def create(self, **kwargs):
@@ -45,7 +50,14 @@ def test_model_client_usage_snapshot_accumulates_usage_and_cost() -> None:
 
 def test_model_client_retries_on_retryable_status(monkeypatch) -> None:
     client = OpenAICompatibleModelClient.__new__(OpenAICompatibleModelClient)
-    client.config = ModelConfig(model="mock", api_key="key", base_url="http://example.com/v1", max_retries=2, retry_backoff_seconds=0.0)
+    client.config = ModelConfig(
+        model="mock",
+        api_key="key",
+        base_url="http://example.com/v1",
+        provider_mode="chat_completions",
+        max_retries=2,
+        retry_backoff_seconds=0.0,
+    )
     calls = {"count": 0}
 
     class MockResponse:
@@ -97,6 +109,20 @@ def test_model_client_extracts_sse_string_payload() -> None:
         'data: [DONE]\n\n'
     )
     assert client._extract_content(raw) == "OK"
+
+
+def test_model_client_extracts_responses_completed_sse_payload() -> None:
+    client = OpenAICompatibleModelClient.__new__(OpenAICompatibleModelClient)
+    client.config = ModelConfig(model="mock", api_key="key", base_url="http://example.com/v1")
+    client.client = None
+    raw = (
+        'event: response.created\n'
+        'data: {"type":"response.created","response":{"id":"resp_1","output":[]}}\n\n'
+        'event: response.completed\n'
+        'data: {"type":"response.completed","response":{"id":"resp_1","output":[{"type":"message","content":[{"type":"output_text","text":"{\\"ok\\":true}"}]}]}}\n\n'
+        'data: [DONE]\n\n'
+    )
+    assert client._extract_content(raw) == '{"ok":true}'
 
 
 def test_model_client_complete_json_extracts_object() -> None:
@@ -187,6 +213,18 @@ def test_model_client_prefers_responses_for_cctq_vision_auto_mode() -> None:
         vision_provider_mode="auto",
     )
     assert client._preferred_vision_mode() == "responses"
+
+
+def test_model_client_prefers_chat_completions_for_right_codes_vision_auto_mode() -> None:
+    client = OpenAICompatibleModelClient.__new__(OpenAICompatibleModelClient)
+    client.config = ModelConfig(
+        model="mock",
+        api_key="key",
+        base_url="https://right.codes/codex/v1",
+        provider_mode="responses",
+        vision_provider_mode="auto",
+    )
+    assert client._preferred_vision_mode() == "chat_completions"
 
 
 def test_model_client_inspect_images_uses_vision_timeout(tmp_path: Path) -> None:
