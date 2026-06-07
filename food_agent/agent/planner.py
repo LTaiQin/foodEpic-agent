@@ -1472,7 +1472,11 @@ class GraphAgentPlanner:
             return False
         if self._action_intent_has_transition_followup_frames(state):
             return False
-        if self._action_intent_followup_attempt_count(state) < 1:
+        if self._action_intent_followup_attempt_count(state) < 1 and not self._action_intent_should_preempt_initial_followup_with_transition(
+            state=state,
+            hints=hints,
+            result=result,
+        ):
             return False
         if self._action_intent_transition_probe_window(state=state, hints=hints, result=result) is None:
             return False
@@ -2376,6 +2380,68 @@ class GraphAgentPlanner:
 
     def _action_intent_initial_followup_budget(self, state: AgentState) -> int:
         return 2 if self._action_intent_prefers_result_driven_followup(state) else 1
+
+    def _action_intent_should_preempt_initial_followup_with_transition(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        result: dict[str, Any] | None = None,
+    ) -> bool:
+        if not self._is_action_intent_task(state):
+            return False
+        if not isinstance(result, dict):
+            return False
+        if self._action_intent_followup_attempt_count(state) > 0:
+            return False
+        if self._action_intent_has_transition_followup_frames(state):
+            return False
+        if self._action_intent_transition_probe_window(state=state, hints=hints, result=result) is None:
+            return False
+        needed_profile = self._action_intent_needed_observation_profile(state=state, result=result)
+        if not needed_profile["prefer_receptacle_outcome"]:
+            return False
+        if self._action_intent_result_has_direct_post_action_evidence(result):
+            return False
+        support_text = self._action_intent_result_support_text(result)
+        needed_observation = str(result.get("needed_observation") or "").lower()
+        uncertainty_markers = (
+            "still unclear",
+            "unclear",
+            "not visible",
+            "not shown",
+            "cannot tell",
+            "can't tell",
+            "缺少",
+            "看不清",
+            "不明确",
+        )
+        receptacle_markers = (
+            "sink",
+            "pan",
+            "pot",
+            "bowl",
+            "container",
+            "crumb",
+            "residue",
+            "drop",
+            "fall",
+            "release",
+            "碎屑",
+            "残渣",
+            "掉",
+            "落",
+        )
+        if any(marker in needed_observation for marker in receptacle_markers):
+            return True
+        return (
+            (
+                bool(result.get("need_more_evidence"))
+                or bool(result.get("ambiguity"))
+                or bool(result.get("need_future_evidence"))
+            )
+            and any(marker in support_text for marker in uncertainty_markers)
+        )
 
     def _action_intent_pending_resolution_tool(self, state: AgentState) -> str:
         for item in reversed(list(getattr(state, "working_memory", []))):
@@ -5881,6 +5947,11 @@ class GraphAgentPlanner:
             if (
                 self._action_intent_needs_precondition_context(state=state, result=last_result)
                 and not self._action_intent_has_precondition_frames(state=state, hints=hints)
+                and not self._action_intent_should_preempt_initial_followup_with_transition(
+                    state=state,
+                    hints=hints,
+                    result=last_result,
+                )
             ):
                 precondition = self._build_action_intent_precondition_sampling_decision(
                     state=state,
@@ -5890,6 +5961,14 @@ class GraphAgentPlanner:
                 if precondition is not None:
                     return precondition
             if self._action_intent_requires_followup(state, result=last_result):
+                initial_transition_probe = self._build_action_intent_transition_probe_decision(
+                    state=state,
+                    hints=hints,
+                    result=last_result,
+                    thought="why 题一开始就落在近窗结果歧义上；先直接围绕动作尾部做更密的关键帧搜索，确认是否真的出现掉回水槽/容器这类决定性结果，再决定是否补泛化 followup。",
+                )
+                if initial_transition_probe is not None and self._action_intent_followup_attempt_count(state) < 1:
+                    return initial_transition_probe
                 if self._action_intent_followup_attempt_count(state) < self._action_intent_initial_followup_budget(state):
                     followup = self._build_action_intent_followup_sampling_decision(state=state, hints=hints)
                     if followup is not None:
@@ -5930,6 +6009,14 @@ class GraphAgentPlanner:
                     },
                 )
             if self._action_intent_pair_needs_outcome_resolution(state=state, result=last_result):
+                initial_transition_probe = self._build_action_intent_transition_probe_decision(
+                    state=state,
+                    hints=hints,
+                    result=last_result,
+                    thought="why 题 top-2 的冲突本身就取决于动作后紧接着发生的近窗结果；先直接补更密的尾部关键帧，再决定是否进入泛化 followup。",
+                )
+                if initial_transition_probe is not None and self._action_intent_followup_attempt_count(state) < 1:
+                    return initial_transition_probe
                 if self._action_intent_followup_attempt_count(state) < self._action_intent_initial_followup_budget(state):
                     followup = self._build_action_intent_followup_sampling_decision(state=state, hints=hints)
                     if followup is not None:
@@ -5951,6 +6038,14 @@ class GraphAgentPlanner:
                 if pairwise is not None:
                     return pairwise
             if self._action_intent_needs_future_use_evidence(state=state, result=last_result):
+                initial_transition_probe = self._build_action_intent_transition_probe_decision(
+                    state=state,
+                    hints=hints,
+                    result=last_result,
+                    thought="why 题当前先要确认动作后是否立刻出现关键微结果；先围绕尾部短窗口密采样，再决定是否继续拉长 followup 去看更晚用途。",
+                )
+                if initial_transition_probe is not None and self._action_intent_followup_attempt_count(state) < 1:
+                    return initial_transition_probe
                 if self._action_intent_followup_attempt_count(state) < self._action_intent_initial_followup_budget(state):
                     followup = self._build_action_intent_followup_sampling_decision(state=state, hints=hints)
                     if followup is not None:
@@ -9218,6 +9313,14 @@ class GraphAgentPlanner:
                 if precondition is not None:
                     return precondition
             if blocker_hint in {"post_action_evidence", "future_use_close_call"}:
+                initial_transition_probe = self._build_action_intent_transition_probe_decision(
+                    state=state,
+                    hints=hints,
+                    result=payload,
+                    thought="why 题被 verifier 判为缺少动作后决定性证据，且当前歧义属于近窗结果型；先直接围绕动作尾部补更密的关键帧，再决定是否扩 followup。",
+                )
+                if initial_transition_probe is not None and self._action_intent_followup_attempt_count(state) < 1:
+                    return initial_transition_probe
                 if self._action_intent_followup_attempt_count(state) < self._action_intent_initial_followup_budget(state):
                     followup = self._build_action_intent_followup_sampling_decision(state=state, hints=hints)
                     if followup is not None:
@@ -9247,6 +9350,14 @@ class GraphAgentPlanner:
                 if extra_followup is not None:
                     return extra_followup
             if blocker_hint == "pairwise_close_call":
+                initial_transition_probe = self._build_action_intent_transition_probe_decision(
+                    state=state,
+                    hints=hints,
+                    result=payload,
+                    thought="why 题被 verifier 判为 top-2 close call，且分歧集中在动作后立刻结果；先直接补尾部密采样关键帧，再决定是否做泛化 followup。",
+                )
+                if initial_transition_probe is not None and self._action_intent_followup_attempt_count(state) < 1:
+                    return initial_transition_probe
                 if self._action_intent_followup_attempt_count(state) < self._action_intent_initial_followup_budget(state):
                     followup = self._build_action_intent_followup_sampling_decision(state=state, hints=hints)
                     if followup is not None:

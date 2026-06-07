@@ -29,8 +29,8 @@
 ### 16.2.2 当前稳定基线
 
 - 专项回归命令：`pytest -q tests/test_graph_agent.py -k 'action_intent'`
-- 2026-06-07 当前结果：`231 passed, 344 deselected`
-- 相比本轮进入专项时的起点 `107 passed, 300 deselected`，当前阶段性增量为 `+124 passed`
+- 2026-06-07 当前结果：`233 passed, 344 deselected`
+- 相比本轮进入专项时的起点 `107 passed, 300 deselected`，当前阶段性增量为 `+126 passed`
 - 当前执行策略：why 逻辑不再追求“接近完美覆盖”，而是维持“足够可用、回归稳定、无明显结构性退化”的维护态；后续优先级切换到完整 agent 功能闭环与小样本真实验证。
 
 这说明 why 题已经不再是“直接把问题丢给模型猜答案”，而是已经存在完整骨架：
@@ -100,6 +100,11 @@
 - 本轮提交：why 题 textual fallback 的输入证据改为当前题/当前时窗 scoped evidence，不再把无关 session summary、旧时窗观测、planner/verifier 噪声直接喂给 `rank_choices_from_state`
 - 本轮提交：why 题 repeated visual failure 的恢复顺序改为 `specialized resolution > textual fallback`，当前题已有足够原始帧时先走 `future_use/pairwise` 专用裁决
 - 本轮提交：`future_use` toolbox hierarchy 补上 same-object residue-release，高频 `tap/shake/tilt/hit` 动作在专用裁决层优先翻正到“残余内容物掉回原容器/锅/碗/水槽”
+- 本轮提交：why 题在首次 `infer_action_intent` 就暴露 `receptacle_outcome` 近窗歧义时，不再机械地先走一轮泛化 `followup`。现在会直接围绕动作尾部触发 `followup_transition`，主动去找“是否真的掉回 sink/pan/bowl/container”的决定性关键帧；同时这条路径会压过误触发的 `precontext`，避免 `flip cloth / shake / tap / tilt` 一类题被无关前置状态采样截走
+- 本轮提交：新增并通过 2 条定向测试，分别保护：
+  - `receptacle_outcome` 型 why close-call 会在第一次歧义时直接进入 `followup_transition`
+  - 普通 `future_use` 型 why 题仍保持原来的初始 `followup`，不会被误改成近窗密采样
+- 本轮提交：why 专项回归已更新到 `233 passed, 344 deselected`
 - 本轮提交：why 题在 `followup_transition / followup_peaks` 之后新增“短时序证据复核”分支，先让 agent 总结动作后立刻结果、下一步手部动作和 `hand-free / access / next-use` 证据，再回到 `infer_action_intent`
 - 本轮提交：`inspect_visual_evidence` 的写回字段扩到 `timeline_summary / immediate_result / next_action_hint / direct_purpose_hint / ambiguity_note`，并在 `needs_more_evidence=true` 时显式保留 `need_disambiguating_evidence`
 - 本轮提交：why 题 `inspect_visual_evidence -> infer_action_intent` 的回跳逻辑已改为识别 timeline review；若复核仍判定证据不足，则继续 `followup_ext2` 或转入 `future_use / pairwise` 专用裁决，而不是重新退回只看 `segment` 的早收口路径
