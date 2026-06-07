@@ -920,6 +920,12 @@ class GraphAgent:
             global_context=global_context,
         ):
             adjusted -= 0.2
+        if self._action_intent_choice_is_generic_space_side_effect(
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+        ):
+            adjusted -= 0.18
         if "clean" in choice_lc and any(term in contradiction_lc for term in ("no actual cleaning", "no visible wiping", "没有任何明确清洁", "没有擦")):
             adjusted -= 0.16
         if "away" in choice_lc and any(term in contradiction_lc for term in ("not stored", "not put", "counter", "没有看到把", "暂时", "台面")):
@@ -949,6 +955,22 @@ class GraphAgent:
             global_context=global_context,
         ):
             adjusted += 0.28
+        if self._action_intent_choice_is_direct_same_object_role_use(
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            action_object=action_object,
+            global_context=global_context,
+        ):
+            adjusted += 0.34
+        if self._action_intent_choice_is_direct_same_object_inspection_or_alignment(
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            action_object=action_object,
+            global_context=global_context,
+        ):
+            adjusted += 0.3
         if self._action_intent_choice_is_cleaning_tool_specific_target_use(
             choice=choice_lc,
             support=support_lc,
@@ -1360,6 +1382,29 @@ class GraphAgent:
             )
         )
 
+    def _signal_mentions_action_object(self, signal_text: str, action_object: str) -> bool:
+        if not action_object:
+            return False
+        object_tokens = [token for token in re.split(r"[^a-z0-9]+", action_object) if token and len(token) >= 3]
+        if object_tokens and any(token in signal_text for token in object_tokens):
+            return True
+        return any(
+            token in signal_text
+            for token in (
+                "same object",
+                "same item",
+                "main object",
+                "remains held",
+                "kept in one hand",
+                "carried directly",
+                "held throughout",
+                "当前这个物体",
+                "同一个物体",
+                "仍拿着",
+                "一直拿着",
+            )
+        )
+
     def _action_intent_choice_is_direct_same_object_manipulation(
         self,
         *,
@@ -1449,6 +1494,276 @@ class GraphAgent:
                 "刷子",
                 "水龙头",
                 "流水",
+            )
+        )
+
+    def _action_intent_choice_is_direct_same_object_role_use(
+        self,
+        *,
+        choice: str,
+        support: str,
+        contradiction: str,
+        action_object: str,
+        global_context: str,
+    ) -> bool:
+        if not action_object:
+            return False
+        if any(
+            token in action_object
+            for token in ("sponge", "brush", "cloth", "towel", "napkin", "paper towel", "scrubber")
+        ):
+            return False
+        if any(
+            token in choice
+            for token in (
+                "wash",
+                "rinse",
+                "clean",
+                "scrub",
+                "wipe",
+                "dry",
+                "open",
+                "uncap",
+                "cap",
+                "lid",
+                "unscrew",
+                "冲洗",
+                "清洗",
+                "擦",
+                "晾",
+                "打开",
+                "拧开",
+            )
+        ):
+            return False
+        if not any(
+            token in choice
+            for token in (
+                "measure",
+                "weigh",
+                "tare",
+                "record",
+                "reading",
+                "stir",
+                "scoop",
+                "drain",
+                "pour",
+                "fill",
+                "move the",
+                "place the",
+                "put the",
+                "bring the",
+                "carry the",
+                "to the sink",
+                "on the hob",
+                "on the scale",
+                "on the counter",
+                "dish drainer",
+                "drain rack",
+                "while holding",
+                "in left hand",
+                "in right hand",
+                "称",
+                "测量",
+                "搅拌",
+                "舀",
+                "倒",
+                "移到水槽",
+                "放到灶台",
+            )
+        ):
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        if not self._signal_mentions_action_object(signal_text, action_object):
+            return False
+        if any(
+            token in signal_text
+            for token in (
+                "later downstream",
+                "after that picks up",
+                "之后再去拿",
+                "后续才",
+            )
+        ):
+            return False
+        matched_terms = [
+            token
+            for token in (
+                "sink",
+                "hob",
+                "scale",
+                "counter",
+                "dish drainer",
+                "drain rack",
+                "cheese",
+                "onions",
+                "potato",
+                "mixture",
+                "saucepan",
+                "pan",
+                "bowl",
+                "pot",
+                "cup",
+            )
+            if token in choice
+        ]
+        if matched_terms and not any(token in signal_text for token in matched_terms):
+            return False
+        return any(
+            token in signal_text
+            for token in (
+                "remains the moved object",
+                "remains held",
+                "kept in one hand",
+                "carried directly",
+                "moved directly toward",
+                "placed on the hob",
+                "placed on the scale",
+                "moved to the sink",
+                "used to measure",
+                "used for measuring",
+                "used to stir",
+                "used for stirring",
+                "used to scoop",
+                "used to drain",
+                "used to pour",
+                "direct purpose visible in the sequence",
+                "main object",
+                "while the other hand",
+                "held in the other hand",
+                "仍然是当前操作的主体",
+                "直接移到水槽",
+                "放到灶台上",
+                "放到秤上",
+                "用来称量",
+                "用来搅拌",
+                "一只手拿着",
+                "另一只手",
+            )
+        )
+
+    def _action_intent_choice_is_generic_space_side_effect(
+        self,
+        *,
+        choice: str,
+        support: str,
+        contradiction: str,
+    ) -> bool:
+        if not any(
+            token in choice
+            for token in (
+                "make space",
+                "make some space",
+                "create space",
+                "free up space",
+                "make room",
+                "some room",
+                "free counter room",
+                "腾空间",
+                "腾出空间",
+            )
+        ):
+            return False
+        if not any(
+            token in contradiction
+            for token in (
+                "side effect",
+                "secondary",
+                "generic workspace effect",
+                "more direct",
+                "explicit next functional use",
+                "direct purpose",
+                "只是副作用",
+                "更直接的目的",
+                "泛化的空间效果",
+            )
+        ):
+            return False
+        return any(
+            token in f"{support} {contradiction}"
+            for token in (
+                "workspace",
+                "counter room",
+                "make room",
+                "free room",
+                "space",
+                "room",
+                "台面空间",
+                "腾出空间",
+            )
+        )
+
+    def _action_intent_choice_is_direct_same_object_inspection_or_alignment(
+        self,
+        *,
+        choice: str,
+        support: str,
+        contradiction: str,
+        action_object: str,
+        global_context: str,
+    ) -> bool:
+        if not action_object:
+            return False
+        if not any(
+            token in choice
+            for token in (
+                "check",
+                "confirm",
+                "inspect",
+                "look at",
+                "look what's",
+                "see whether",
+                "correct side",
+                "facing",
+                "upright",
+                "fits",
+                "fit",
+                "doneness",
+                "检查",
+                "确认",
+                "朝向",
+                "正面",
+                "合适",
+            )
+        ):
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        if not self._signal_mentions_action_object(signal_text, action_object):
+            return False
+        if any(
+            token in signal_text
+            for token in (
+                "later downstream",
+                "after that picks up",
+                "之后再",
+                "后续才",
+            )
+        ):
+            return False
+        return any(
+            token in signal_text
+            for token in (
+                "correct side",
+                "facing the right hand",
+                "face upright",
+                "standing upright",
+                "confirm the",
+                "check the",
+                "inspect the",
+                "cover fits",
+                "sitting well",
+                "oily part",
+                "dirty side",
+                "orientation",
+                "alignment",
+                "to inspect",
+                "to check",
+                "确认",
+                "检查",
+                "朝上",
+                "正朝",
+                "摆正",
+                "盖子是否合适",
             )
         )
 
