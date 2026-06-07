@@ -977,6 +977,22 @@ class GraphAgent:
             adjusted -= 0.14
         if "dry" in choice_lc and "hand" in choice_lc and any(term in contradiction_lc for term in ("no visible hand", "no clear wet-hand", "没有看到双手", "没有先洗手")):
             adjusted -= 0.14
+        if self._action_intent_choice_is_temporary_relocation_not_storage(
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            action_object=action_object,
+            global_context=global_context,
+        ):
+            adjusted -= 0.24
+        if self._action_intent_choice_is_unsupported_hand_drying_goal(
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            action_object=action_object,
+            global_context=global_context,
+        ):
+            adjusted -= 0.22
         if self._action_intent_support_is_likely_downstream_to_move_action(
             question=question_lc,
             choice=choice_lc,
@@ -1147,6 +1163,22 @@ class GraphAgent:
             global_context=global_context,
         ):
             adjusted += 0.32
+        if self._action_intent_choice_is_surface_wipe_preparation(
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            action_object=action_object,
+            global_context=global_context,
+        ):
+            adjusted += 0.28
+        if self._action_intent_choice_is_explicit_hand_drying_goal(
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            action_object=action_object,
+            global_context=global_context,
+        ):
+            adjusted += 0.3
         if self._action_intent_choice_is_postwash_residue_or_water_removal(
             question=question_lc,
             choice=choice_lc,
@@ -3681,6 +3713,27 @@ class GraphAgent:
             return False
         if not any(token in signal_text for token in target_terms):
             return False
+        if any(token in support for token in ("could", "can be used", "compatible with", "theoretically", "理论", "可能")):
+            if not any(
+                token in signal_text
+                for token in (
+                    "ready for wiping",
+                    "staged for wiping",
+                    "compatible with preparing to wipe",
+                    "laid out",
+                    "beside crumbs",
+                    "next visible cleaning target",
+                    "target is the",
+                    "toward the utensil",
+                    "cleaning target",
+                    "wiping motion",
+                    "scrubbing motion",
+                    "准备擦",
+                    "清洗目标",
+                    "擦拭目标",
+                )
+            ):
+                return False
         return any(
             token in signal_text
             for token in (
@@ -3838,6 +3891,293 @@ class GraphAgent:
             )
         )
 
+    def _action_intent_choice_is_surface_wipe_preparation(
+        self,
+        *,
+        choice: str,
+        support: str,
+        contradiction: str,
+        action_object: str,
+        global_context: str,
+    ) -> bool:
+        if not any(
+            token in action_object
+            for token in ("cloth", "towel", "tea towel", "dish cloth", "napkin", "paper towel", "sponge", "scrubber")
+        ):
+            return False
+        if not any(token in choice for token in ("wipe", "clean", "擦", "清洁")):
+            return False
+        if not any(
+            token in choice
+            for token in (
+                "surface",
+                "counter",
+                "countertop",
+                "worktop",
+                "bench",
+                "table",
+                "hob",
+                "kitchen side",
+                "台面",
+                "桌面",
+                "灶台",
+            )
+        ):
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        if any(
+            token in signal_text
+            for token in (
+                "hand-drying motion",
+                "hands are wiped dry",
+                "applied to the hands",
+                "brought to both hands",
+                "both hands",
+                "wipes them",
+                "双手",
+                "擦手",
+                "擦干双手",
+            )
+        ):
+            return False
+        has_surface_staging = any(
+            token in signal_text
+            for token in (
+                "placed on the counter",
+                "placed on the countertop",
+                "placed on the worktop",
+                "laid on the counter",
+                "laid on the worktop",
+                "set on the counter",
+                "set on the worktop",
+                "left on the counter",
+                "countertop",
+                "worktop",
+                "work surface",
+                "within reach of the counter",
+                "compatible with preparing to wipe",
+                "ready for wiping",
+                "staged for wiping",
+                "surface target",
+                "counter surface",
+                "crumbs",
+                "spill",
+                "mess on the counter",
+                "台面上",
+                "放在台面",
+                "准备擦",
+                "擦拭台面",
+                "碎屑",
+                "污渍",
+            )
+        )
+        if not has_surface_staging:
+            return False
+        has_explicit_preparation_signal = any(
+            token in signal_text
+            for token in (
+                "ready for wiping",
+                "compatible with preparing to wipe",
+                "staged for wiping",
+                "beside crumbs",
+                "next to a visible spill",
+                "surface target",
+                "counter surface",
+                "准备擦",
+                "擦拭台面",
+                "碎屑",
+                "污渍",
+            )
+        )
+        has_nonstorage_signal = any(
+            token in signal_text
+            for token in (
+                "not stored",
+                "no drawer",
+                "no cupboard",
+                "no hook return",
+                "no holder return",
+                "not put away",
+                "rather than storing",
+                "instead of storing",
+                "later reused",
+                "kept nearby",
+                "temporarily placed",
+                "merely relocated",
+                "没有收纳",
+                "没有放回",
+                "不是收起来",
+                "暂时放在",
+                "稍后继续使用",
+            )
+        )
+        return has_explicit_preparation_signal or has_nonstorage_signal
+
+    def _action_intent_choice_is_temporary_relocation_not_storage(
+        self,
+        *,
+        choice: str,
+        support: str,
+        contradiction: str,
+        action_object: str,
+        global_context: str,
+    ) -> bool:
+        del action_object
+        if not any(
+            token in choice
+            for token in ("put away", "store", "put back", "return it", "hang back", "放回", "收起来", "收纳")
+        ):
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        has_nonstorage_signal = any(
+            token in signal_text
+            for token in (
+                "not stored",
+                "not put away",
+                "no drawer",
+                "no cupboard",
+                "no hook return",
+                "no holder return",
+                "placed on the counter",
+                "placed on the countertop",
+                "placed on the worktop",
+                "laid on the counter",
+                "set on the counter",
+                "left on the side",
+                "temporarily placed",
+                "merely relocated",
+                "within reach",
+                "later reused",
+                "immediate reuse",
+                "not final placement",
+                "没有收纳",
+                "没有放回",
+                "没有挂回去",
+                "放在台面",
+                "暂时放在",
+                "后续继续使用",
+            )
+        )
+        if not has_nonstorage_signal:
+            return False
+        has_true_storage_signal = any(
+            token in signal_text
+            for token in (
+                "returned to the drawer",
+                "returned to the cupboard",
+                "hung back on the hook",
+                "placed back in storage",
+                "stored away",
+                "放回抽屉",
+                "放回橱柜",
+                "挂回挂钩",
+                "收纳回去",
+            )
+        )
+        return not has_true_storage_signal
+
+    def _action_intent_choice_is_unsupported_hand_drying_goal(
+        self,
+        *,
+        choice: str,
+        support: str,
+        contradiction: str,
+        action_object: str,
+        global_context: str,
+    ) -> bool:
+        if not any(
+            token in action_object
+            for token in ("cloth", "towel", "tea towel", "dish cloth", "napkin", "paper towel")
+        ):
+            return False
+        if not ("dry" in choice and "hand" in choice):
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        has_positive_hand_drying = any(
+            token in signal_text
+            for token in (
+                "brought to both hands",
+                "applied to the hands",
+                "hands are wiped dry",
+                "wipes the hands",
+                "wet hands",
+                "after washing hands",
+                "双手",
+                "擦手",
+                "洗手后",
+                "湿手",
+            )
+        )
+        if has_positive_hand_drying:
+            return False
+        return any(
+            token in signal_text
+            for token in (
+                "no visible hand-drying motion",
+                "no hand wiping",
+                "no wet-hand context",
+                "not applied to the hands",
+                "no visible hand use",
+                "counter placement",
+                "compatible with preparing to wipe",
+                "surface wiping",
+                "not for drying",
+                "没有擦手",
+                "没有湿手",
+                "不是擦手",
+                "台面",
+                "准备擦拭台面",
+            )
+        )
+
+    def _action_intent_choice_is_explicit_hand_drying_goal(
+        self,
+        *,
+        choice: str,
+        support: str,
+        contradiction: str,
+        action_object: str,
+        global_context: str,
+    ) -> bool:
+        if not any(
+            token in action_object
+            for token in ("cloth", "towel", "tea towel", "dish cloth", "napkin", "paper towel")
+        ):
+            return False
+        if not ("dry" in choice and "hand" in choice):
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        if any(
+            token in signal_text
+            for token in (
+                "no visible hand-drying motion",
+                "no hand wiping",
+                "no wet-hand context",
+                "not applied to the hands",
+                "没有擦手",
+                "没有湿手",
+                "不是擦手",
+            )
+        ):
+            return False
+        return any(
+            token in signal_text
+            for token in (
+                "brought to both hands",
+                "applied to the hands",
+                "hands are wiped dry",
+                "wipes the hands",
+                "used to wipe them dry",
+                "wet hands",
+                "after washing hands",
+                "双手",
+                "擦手",
+                "擦干双手",
+                "洗手后",
+                "湿手",
+            )
+        )
+
     def _action_intent_choice_is_generic_cleaning_tool_goal(
         self,
         *,
@@ -3868,6 +4208,22 @@ class GraphAgent:
         if not generic_goal:
             return False
         signal_text = f"{support} {contradiction} {global_context}"
+        if any(token in choice for token in ("dry hand", "dry hands", "wipe hands", "wash hands")) and any(
+            token in signal_text
+            for token in (
+                "brought to both hands",
+                "applied to the hands",
+                "hands are wiped dry",
+                "wipes the hands",
+                "wet hands",
+                "after washing hands",
+                "双手",
+                "擦手",
+                "洗手后",
+                "湿手",
+            )
+        ):
+            return False
         return any(
             token in signal_text
             for token in (
