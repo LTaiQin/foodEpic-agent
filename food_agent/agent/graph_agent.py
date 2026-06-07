@@ -971,6 +971,14 @@ class GraphAgent:
             global_context=global_context,
         ):
             adjusted += 0.3
+        if self._action_intent_choice_is_exact_workspace_creation(
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            action_object=action_object,
+            global_context=global_context,
+        ):
+            adjusted += 0.4
         if self._action_intent_choice_is_cleaning_tool_specific_target_use(
             choice=choice_lc,
             support=support_lc,
@@ -1649,6 +1657,8 @@ class GraphAgent:
         support: str,
         contradiction: str,
     ) -> bool:
+        if self._action_intent_choice_has_specific_space_target(choice):
+            return False
         if not any(
             token in choice
             for token in (
@@ -1690,6 +1700,191 @@ class GraphAgent:
                 "room",
                 "台面空间",
                 "腾出空间",
+            )
+        )
+
+    def _action_intent_choice_has_specific_space_target(self, choice: str) -> bool:
+        if not any(
+            token in choice
+            for token in (
+                "make space",
+                "make some space",
+                "create space",
+                "free up space",
+                "make room",
+                "clear the way",
+                "out of the way",
+                "move out of the way",
+                "腾空间",
+                "腾出空间",
+                "让开",
+            )
+        ):
+            return False
+        if any(
+            token in choice
+            for token in (
+                "holding in left hand",
+                "holding in right hand",
+                "held in left hand",
+                "held in right hand",
+                "i'm holding in left hand",
+                "i'm holding in right hand",
+                "put down",
+                "put into",
+                "be put into",
+                "fit into",
+                "measure",
+                "pick up",
+                "grab",
+                "drying rack",
+                "dishwasher",
+                "draining rack",
+                "rack",
+                "sink",
+                "hob",
+                "scale",
+                "tray",
+                "colander",
+                "chopping board",
+                "cutting board",
+                "plate",
+                "bowl",
+                "saucepan",
+                "pan",
+                "omelette",
+                "pizza oven",
+                "tupperware",
+                "knife and fork",
+                "large bowls",
+                "放下",
+                "放进",
+                "称量",
+                "水槽",
+                "灶台",
+                "晾架",
+                "砧板",
+                "托盘",
+                "碗",
+                "锅",
+            )
+        ):
+            return True
+        return False
+
+    def _action_intent_choice_is_exact_workspace_creation(
+        self,
+        *,
+        choice: str,
+        support: str,
+        contradiction: str,
+        action_object: str,
+        global_context: str,
+    ) -> bool:
+        if not self._action_intent_choice_has_specific_space_target(choice):
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        if action_object and not any(
+            token in signal_text
+            for token in [token for token in re.split(r"[^a-z0-9]+", action_object) if token and len(token) >= 3]
+        ):
+            if not any(
+                token in signal_text
+                for token in (
+                    "moved object",
+                    "picked up object",
+                    "current object",
+                    "out of the way",
+                    "remains held",
+                    "当前物体",
+                    "让开",
+                )
+            ):
+                return False
+        if any(
+            token in contradiction
+            for token in (
+                "only a generic workspace effect",
+                "side effect",
+                "just generic space",
+                "no exact next object",
+                "not tied to a specific next item",
+                "只是泛化空间效果",
+                "只是副作用",
+                "没有具体下一目标",
+            )
+        ):
+            return False
+        choice_targets = [
+            token
+            for token in (
+                "scale",
+                "sink",
+                "hob",
+                "rack",
+                "dishwasher",
+                "tray",
+                "bowl",
+                "plate",
+                "colander",
+                "chopping board",
+                "cutting board",
+                "pan",
+                "saucepan",
+                "knife",
+                "fork",
+                "omelette",
+                "pizza oven",
+                "tupperware",
+                "large bowls",
+            )
+            if token in choice
+        ]
+        if choice_targets and not any(token in signal_text for token in choice_targets):
+            return False
+        return any(
+            token in signal_text
+            for token in (
+                "prepare to put down",
+                "about to put down",
+                "about to place",
+                "can be put into",
+                "be put into the sink",
+                "put into the sink",
+                "put the tray down",
+                "put the baking tray down",
+                "put the cutting board on the drying rack",
+                "fit into the rack",
+                "fit into the draining rack",
+                "room within the rack",
+                "space for the saucepan",
+                "space for the scale",
+                "measure chicken",
+                "kitchen scale",
+                "standing upright and",
+                "out of the way as i prepare to pick up",
+                "clear the way to pick up",
+                "held in right hand",
+                "held in left hand",
+                "holding in right hand",
+                "holding in left hand",
+                "next object put down",
+                "free slot",
+                "slot in the rack",
+                "so it will fit",
+                "other tupperware",
+                "spanish omelette",
+                "plastic colander",
+                "brought forward",
+                "pick up the plastic colander",
+                "pick up the stack of large bowls",
+                "为接下来放下",
+                "放进水槽",
+                "放到晾架",
+                "为秤腾位",
+                "为接下来拿起",
+                "让开以便",
+                "腾出槽位",
             )
         )
 
