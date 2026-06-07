@@ -6657,6 +6657,119 @@ class GraphAgentPlanner:
         has_uncertainty = any(term in text for term in uncertainty_terms) or self._action_intent_result_has_indecisive_post_action_support(result)
         return has_proximity and has_uncertainty
 
+    def _action_intent_result_looks_nonexclusive_concrete_late_anchor_support(
+        self,
+        *,
+        state: AgentState,
+        result: dict[str, Any] | None,
+    ) -> bool:
+        if not self._action_intent_prefers_long_horizon_object_retrieval(state=state):
+            return False
+        if not isinstance(result, dict):
+            return False
+        if self._action_intent_result_has_direct_post_action_evidence(result):
+            return False
+        best_index = self._coerce_choice_index(result.get("best_index"), getattr(state, "choices", []))
+        competitor_index = self._action_intent_competing_candidate_index(result, state)
+        if best_index is None or competitor_index is None or best_index == competitor_index:
+            return False
+        if not self._action_intent_competing_pair_still_needs_disambiguation(
+            state=state,
+            best_index=best_index,
+            competitor_index=competitor_index,
+        ):
+            return False
+        text = self._action_intent_result_support_text(result)
+        if not text:
+            return False
+        explicit_exclusive_terms = (
+            "reads the label",
+            "reading the label",
+            "read the label",
+            "inspects the label",
+            "looks at the label",
+            "read the printed text",
+            "placed on the scale",
+            "used on the scale",
+            "weighed",
+            "put back",
+            "returned to",
+            "stored",
+            "inside the fridge",
+            "into the fridge",
+            "under running water",
+            "turns on the tap",
+            "opened the fridge",
+            "closed the fridge",
+            "poured into",
+            "wiped",
+            "dried",
+            "读标签",
+            "查看标签",
+            "放到秤上",
+            "称重",
+            "放回",
+            "回到冰箱",
+            "打开冰箱",
+            "关上冰箱",
+        )
+        if any(term in text for term in explicit_exclusive_terms):
+            return False
+        label_visibility_terms = (
+            "label is visible",
+            "label faces the camera",
+            "label faces outward",
+            "front side becomes visible",
+            "front side is visible",
+            "printed side becomes visible",
+            "printed side is visible",
+            "visible while the bottle is held",
+        )
+        label_reading_terms = (
+            "read",
+            "reading",
+            "inspect",
+            "look at the label",
+            "check the label",
+            "printed text",
+            "nutrition facts",
+            "ingredient list",
+            "read the bottle",
+            "看标签",
+            "读标签",
+            "查看标签",
+        )
+        nearby_placement_terms = (
+            "set beside",
+            "placed beside",
+            "left beside",
+            "left nearby",
+            "set nearby",
+            "placed nearby",
+            "within reach",
+            "set aside",
+            "simply set aside",
+            "near the scale area",
+            "near the counter",
+            "near the counter surface",
+            "near the sink",
+            "near the fridge area",
+            "beside the scale",
+            "beside the counter",
+            "left on the side",
+            "still near",
+            "放在旁边",
+            "放在附近",
+            "顺手放在旁边",
+            "放到一边",
+            "附近",
+        )
+        label_visible_without_reading = any(term in text for term in label_visibility_terms) and not any(
+            term in text for term in label_reading_terms
+        )
+        nearby_without_exclusive_outcome = any(term in text for term in nearby_placement_terms)
+        return label_visible_without_reading or nearby_without_exclusive_outcome
+
     def _build_action_intent_weak_late_anchor_revisit_decision(
         self,
         *,
@@ -6666,6 +6779,32 @@ class GraphAgentPlanner:
         thought: str,
     ) -> PlannerDecision | None:
         if not self._action_intent_result_looks_weak_late_anchor_support(state=state, result=result):
+            return None
+        anchor_time = self._latest_action_intent_target_spatial_anchor_time(state)
+        latest_followup_end = self._latest_action_intent_followup_end_time(state)
+        after_time: float | None = None
+        if anchor_time is not None and latest_followup_end is not None:
+            after_time = max(anchor_time, latest_followup_end)
+        elif latest_followup_end is not None:
+            after_time = latest_followup_end
+        else:
+            after_time = anchor_time
+        return self._build_action_intent_cached_long_horizon_revisit_decision(
+            state=state,
+            hints=hints,
+            thought=thought,
+            after_time=after_time,
+        )
+
+    def _build_action_intent_nonexclusive_concrete_late_anchor_revisit_decision(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        result: dict[str, Any] | None,
+        thought: str,
+    ) -> PlannerDecision | None:
+        if not self._action_intent_result_looks_nonexclusive_concrete_late_anchor_support(state=state, result=result):
             return None
         anchor_time = self._latest_action_intent_target_spatial_anchor_time(state)
         latest_followup_end = self._latest_action_intent_followup_end_time(state)
@@ -7767,6 +7906,14 @@ class GraphAgentPlanner:
                 )
                 if weak_late_anchor_revisit is not None:
                     return weak_late_anchor_revisit
+                nonexclusive_concrete_late_anchor_revisit = self._build_action_intent_nonexclusive_concrete_late_anchor_revisit_decision(
+                    state=state,
+                    hints=hints,
+                    result=last_result,
+                    thought="why 题当前虽然给出了更具体的晚锚点描述，但本质上仍只是标签可见/物体被放在某处附近的中间态，不足以在候选间形成排他结论；继续沿更晚节点向后追。",
+                )
+                if nonexclusive_concrete_late_anchor_revisit is not None:
+                    return nonexclusive_concrete_late_anchor_revisit
                 initial_transition_probe = self._build_action_intent_transition_probe_decision(
                     state=state,
                     hints=hints,
@@ -8323,6 +8470,14 @@ class GraphAgentPlanner:
             )
             if weak_late_anchor_revisit is not None:
                 return weak_late_anchor_revisit
+            nonexclusive_concrete_late_anchor_revisit = self._build_action_intent_nonexclusive_concrete_late_anchor_revisit_decision(
+                state=state,
+                hints=hints,
+                result=last_result,
+                thought="why 题当前后续用途裁决虽然给出了更具体的晚锚点描述，但仍只是标签显露或物体暂放邻近位置这类非排他中间态；继续沿更晚节点向后追，再决定是否允许收口。",
+            )
+            if nonexclusive_concrete_late_anchor_revisit is not None:
+                return nonexclusive_concrete_late_anchor_revisit
             peak_guided = self._build_action_intent_peak_guided_followup_decision(
                 state=state,
                 hints=hints,
