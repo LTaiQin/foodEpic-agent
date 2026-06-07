@@ -896,6 +896,22 @@ class GraphAgent:
             adjusted -= 0.08
         if any(term in support_lc for term in ("least contradicted", "broadest", "最不矛盾", "最宽泛")):
             adjusted -= 0.18
+        if self._action_intent_choice_is_generic_cleaning_tool_goal(
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            action_object=action_object,
+            global_context=global_context,
+        ):
+            adjusted -= 0.26
+        if self._action_intent_choice_is_generic_postwash_cleaning(
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            action_object=action_object,
+            global_context=global_context,
+        ):
+            adjusted -= 0.22
         if "clean" in choice_lc and any(term in contradiction_lc for term in ("no actual cleaning", "no visible wiping", "没有任何明确清洁", "没有擦")):
             adjusted -= 0.16
         if "away" in choice_lc and any(term in contradiction_lc for term in ("not stored", "not put", "counter", "没有看到把", "暂时", "台面")):
@@ -925,6 +941,23 @@ class GraphAgent:
             global_context=global_context,
         ):
             adjusted += 0.28
+        if self._action_intent_choice_is_cleaning_tool_specific_target_use(
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            action_object=action_object,
+            global_context=global_context,
+        ):
+            adjusted += 0.34
+        if self._action_intent_choice_is_postwash_residue_or_water_removal(
+            question=question_lc,
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            action_object=action_object,
+            global_context=global_context,
+        ):
+            adjusted += 0.3
         if self._action_intent_choice_is_direct_residue_release(
             question=question_lc,
             choice=choice_lc,
@@ -1337,6 +1370,310 @@ class GraphAgent:
                 "刷子",
                 "水龙头",
                 "流水",
+            )
+        )
+
+    def _action_intent_choice_is_cleaning_tool_specific_target_use(
+        self,
+        *,
+        choice: str,
+        support: str,
+        contradiction: str,
+        action_object: str,
+        global_context: str,
+    ) -> bool:
+        if not any(
+            token in action_object
+            for token in ("sponge", "brush", "cloth", "towel", "napkin", "paper towel", "scrubber")
+        ):
+            return False
+        action_object_tokens = [token for token in re.split(r"[^a-z0-9]+", action_object) if token]
+        if action_object_tokens and all(token in choice for token in action_object_tokens):
+            return False
+        if not any(token in choice for token in ("wash", "rinse", "scrub", "wipe", "clean", "冲洗", "清洗", "擦", "刷")):
+            return False
+        if any(
+            token in choice
+            for token in (
+                "whole thing",
+                "dry hand",
+                "dry hands",
+                "wash hands",
+                "wipe hands",
+                "clean the whole",
+                "to clean.",
+                "to dry.",
+                "to clean the whole thing",
+            )
+        ):
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        target_terms = [
+            token
+            for token in (
+                "peeler",
+                "knife",
+                "spoon",
+                "utensil",
+                "tray",
+                "counter",
+                "surface",
+                "hob",
+                "sink",
+                "cup",
+                "bowl",
+                "pot",
+                "pan",
+                "colander",
+                "board",
+                "blender cup",
+                "ice cube tray",
+                "counter surface",
+                "刨刀",
+                "刀",
+                "勺",
+                "托盘",
+                "台面",
+                "灶台",
+                "水槽",
+                "杯",
+                "碗",
+                "锅",
+                "滤盆",
+                "砧板",
+            )
+            if token in choice
+        ]
+        if not target_terms:
+            return False
+        if not any(token in signal_text for token in target_terms):
+            return False
+        return any(
+            token in signal_text
+            for token in (
+                "while holding",
+                "holding",
+                "other hand",
+                "free hand",
+                "running water",
+                "under water",
+                "scrub",
+                "wipe",
+                "wash",
+                "rinse",
+                "counter",
+                "sink",
+                "sponge",
+                "brush",
+                "one hand",
+                "另一只手",
+                "一只手",
+                "拿着",
+                "流水",
+                "水槽",
+                "海绵",
+                "刷子",
+                "擦",
+                "清洗",
+                "冲洗",
+            )
+        )
+
+    def _action_intent_choice_is_generic_cleaning_tool_goal(
+        self,
+        *,
+        choice: str,
+        support: str,
+        contradiction: str,
+        action_object: str,
+        global_context: str,
+    ) -> bool:
+        if not any(
+            token in action_object
+            for token in ("sponge", "brush", "cloth", "towel", "napkin", "paper towel", "scrubber")
+        ):
+            return False
+        generic_goal = any(
+            token in choice
+            for token in (
+                "whole thing",
+                "to clean.",
+                "to clean the whole thing",
+                "dry hand",
+                "dry hands",
+                "wipe hands",
+                "wash hands",
+                "to dry.",
+            )
+        )
+        if not generic_goal:
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        return any(
+            token in signal_text
+            for token in (
+                "peeler",
+                "knife",
+                "spoon",
+                "utensil",
+                "tray",
+                "counter",
+                "surface",
+                "hob",
+                "sink",
+                "cup",
+                "bowl",
+                "pot",
+                "pan",
+                "colander",
+                "ice cube tray",
+                "pyrex bowl",
+                "刨刀",
+                "刀",
+                "勺",
+                "台面",
+                "灶台",
+                "水槽",
+                "杯",
+                "碗",
+                "锅",
+            )
+        )
+
+    def _action_intent_choice_is_postwash_residue_or_water_removal(
+        self,
+        *,
+        question: str,
+        choice: str,
+        support: str,
+        contradiction: str,
+        action_object: str,
+        global_context: str,
+    ) -> bool:
+        if not any(token in question for token in ("run ", "flip ", "tip ", "turn ", "shake ")):
+            return False
+        if not action_object:
+            return False
+        if not any(
+            token in choice
+            for token in (
+                "soap suds",
+                "soap",
+                "rinsing water",
+                "excess water",
+                "water droplets",
+                "remove the soap",
+                "remove soap",
+                "get rid of the excess",
+                "dry",
+                "suds",
+                "肥皂",
+                "泡沫",
+                "多余水",
+                "冲洗水",
+                "水滴",
+                "晾干",
+            )
+        ):
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        if not any(
+            token in signal_text
+            for token in (
+                "sink",
+                "water",
+                "rinse",
+                "rinsing",
+                "soap",
+                "suds",
+                "washed",
+                "under running water",
+                "water droplets",
+                "水槽",
+                "流水",
+                "冲洗",
+                "肥皂",
+                "泡沫",
+                "洗过",
+            )
+        ):
+            return False
+        if any(
+            token in signal_text
+            for token in (
+                "pour into the pan",
+                "pour into the pot",
+                "into the frying pan",
+                "drain the pasta",
+                "back into the pan",
+                "锅里",
+                "炒锅",
+                "意面",
+            )
+        ):
+            return False
+        return any(
+            token in signal_text
+            for token in (
+                "cutting board",
+                "board",
+                "bowl",
+                "cup",
+                "glass",
+                "container",
+                "tray",
+                "砧板",
+                "碗",
+                "杯",
+                "托盘",
+            )
+        )
+
+    def _action_intent_choice_is_generic_postwash_cleaning(
+        self,
+        *,
+        choice: str,
+        support: str,
+        contradiction: str,
+        action_object: str,
+        global_context: str,
+    ) -> bool:
+        if not action_object:
+            return False
+        if not any(
+            token in choice
+            for token in ("rinse and clean", "to clean.", "to rinse", "to clean off any remnants", "to clean off")
+        ):
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        if not any(
+            token in signal_text
+            for token in (
+                "soap suds",
+                "remaining soap",
+                "excess rinsing water",
+                "water droplets",
+                "washing away the remaining soap",
+                "肥皂",
+                "泡沫",
+                "多余水",
+                "冲洗水",
+            )
+        ):
+            return False
+        return any(
+            token in signal_text
+            for token in (
+                "cutting board",
+                "board",
+                "bowl",
+                "cup",
+                "glass",
+                "tray",
+                "砧板",
+                "碗",
+                "杯",
+                "托盘",
             )
         )
 
