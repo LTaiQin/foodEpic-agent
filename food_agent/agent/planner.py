@@ -4564,6 +4564,117 @@ class GraphAgentPlanner:
             thought="why 题属于高歧义动作理解桶，文本 fallback 不能直接收口；回到当前题专用动作目的判断继续找证据。",
         )
 
+    def _action_intent_current_scope_artifact_prefixes(self, state: AgentState) -> tuple[str, ...]:
+        task_tag = str(getattr(state, "task_family", "") or "").lower()
+        if not task_tag:
+            return ()
+        return (
+            f"{task_tag}_segment",
+            f"{task_tag}_precontext",
+            f"{task_tag}_followup",
+            f"{task_tag}_followup_transition",
+            f"{task_tag}_followup_peaks",
+            f"{task_tag}_followup_ext",
+            f"{task_tag}_recover_frames",
+        )
+
+    def _build_action_intent_evidence_first_recovery_decision(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        used_tools: list[str],
+        failed_tools: set[str] | None = None,
+        ineffective_tools: set[str] | None = None,
+    ) -> PlannerDecision | None:
+        if not self._is_action_intent_task(state):
+            return None
+        failed = failed_tools or set()
+        ineffective = ineffective_tools or set()
+        combined_times = sorted(
+            [float(value) for value in hints.get("times") or []]
+            + [float(value) for value in hints.get("input_times") or []]
+        )
+        if not combined_times:
+            return None
+        action_frames = self._select_action_intent_frames(
+            state,
+            hints,
+            limit=8,
+            require_current_scope=True,
+        )
+        if not action_frames:
+            artifact_prefixes = self._action_intent_current_scope_artifact_prefixes(state)
+            if (
+                "retrieve_cached_artifacts" not in used_tools
+                and "retrieve_cached_artifacts" not in failed
+                and "retrieve_cached_artifacts" not in ineffective
+                and self._task_has_reusable_artifacts(state, prefixes=artifact_prefixes)
+            ):
+                precondition_margin = 6.0 if self._action_intent_needs_precondition_context(state=state, result=None) else 2.0
+                followup_margin = 8.5 if self._action_intent_prefers_result_driven_followup(state) else 5.0
+                return PlannerDecision(
+                    thought="why 题当前仍缺当前题原始帧；先回收当前题 artifact，再继续补关键帧或做专用裁决，不退回 query_time。",
+                    tool="retrieve_cached_artifacts",
+                    args={
+                        "tag_hint": f"{state.task_family}_segment",
+                        "start_time": max(0.0, min(combined_times) - precondition_margin),
+                        "end_time": max(combined_times) + followup_margin,
+                        "limit": 8,
+                    },
+                )
+            return self._build_action_intent_specialized_recovery_decision(
+                state=state,
+                hints=hints,
+                thought="why 题当前仍缺当前题原始帧；先恢复当前题时间窗关键帧，不退回 query_time 或文本猜测。",
+            )
+        if (
+            self._action_intent_needs_precondition_context(state=state, result=None)
+            and not self._action_intent_has_precondition_frames(state=state, hints=hints)
+        ):
+            precondition = self._build_action_intent_precondition_sampling_decision(
+                state=state,
+                hints=hints,
+                focus="evidence_first_recovery_precondition",
+            )
+            if precondition is not None:
+                return precondition
+        missing_followup = self._build_action_intent_missing_post_action_followup_decision(
+            state=state,
+            hints=hints,
+            action_frames=action_frames,
+            focus="evidence_first_recovery_missing_post_action",
+        )
+        if missing_followup is not None:
+            return missing_followup
+        latest_review = self._latest_action_intent_timeline_review(state)
+        if not latest_review and self._action_intent_has_post_action_frames(state=state, hints=hints, frames=action_frames):
+            image_paths = self._action_intent_timeline_review_candidate_paths(state=state, hints=hints)
+            if not image_paths:
+                image_paths = self._select_action_intent_frames(
+                    state,
+                    hints,
+                    limit=8,
+                    include_followup=True,
+                    require_current_scope=True,
+                )
+            if image_paths and self._action_intent_has_post_action_frames(state=state, hints=hints, frames=image_paths):
+                return PlannerDecision(
+                    thought="why 题当前已有动作前后关键帧，但仍不能只凭局部瞬间定答；先做短时序证据复核，再回到因果判断。",
+                    tool="inspect_visual_evidence",
+                    args={
+                        "prompt": self._action_intent_timeline_review_prompt(state=state),
+                        "image_paths": image_paths,
+                    },
+                )
+        specialized_resolution = self._build_action_intent_specialized_resolution_before_text_fallback(
+            state=state,
+            hints=hints,
+        )
+        if specialized_resolution is not None:
+            return specialized_resolution
+        return None
+
     def _can_use_visual_inspection(self, state: AgentState) -> bool:
         if any(
             isinstance(item, str) and item.startswith("vision_disabled=")
@@ -6597,6 +6708,13 @@ class GraphAgentPlanner:
                 if recovered is not None:
                     return recovered
             if retry_count >= 3:
+                evidence_first = self._build_action_intent_evidence_first_recovery_decision(
+                    state=state,
+                    hints=hints,
+                    used_tools=used_tools,
+                )
+                if evidence_first is not None:
+                    return evidence_first
                 specialized_resolution = self._build_action_intent_specialized_resolution_before_text_fallback(
                     state=state,
                     hints=hints,
@@ -7405,6 +7523,13 @@ class GraphAgentPlanner:
             )
         if isinstance(last_result, dict) and last_tool.get("tool") == "rank_choices_from_state" and last_result.get("best_index") is not None:
             if self._action_intent_text_fallback_ready(state):
+                evidence_first = self._build_action_intent_evidence_first_recovery_decision(
+                    state=state,
+                    hints=hints,
+                    used_tools=used_tools,
+                )
+                if evidence_first is not None and evidence_first.tool != "rank_choices_from_state":
+                    return evidence_first
                 if action_intent_requires_strict_visual_disambiguation(
                     question=str(getattr(state, "question", "") or ""),
                     choices=[str(choice) for choice in getattr(state, "choices", [])],
@@ -7868,6 +7993,14 @@ class GraphAgentPlanner:
             return decision
         if decision.tool == "rank_choices_from_state":
             if self._action_intent_text_fallback_ready(state):
+                recovered = self._build_action_intent_evidence_first_recovery_decision(
+                    state=state,
+                    hints=hints,
+                    used_tools=used_tools,
+                )
+                if recovered is not None and recovered.tool != decision.tool:
+                    self._state_add_memory(state, f"planner_override action_intent_textual_rank={decision.tool} -> {recovered.tool}")
+                    return recovered
                 if action_intent_requires_strict_visual_disambiguation(
                     question=str(getattr(state, "question", "") or ""),
                     choices=[str(choice) for choice in getattr(state, "choices", [])],
@@ -8688,6 +8821,23 @@ class GraphAgentPlanner:
                 )
                 if pairwise is not None:
                     return pairwise
+        if (
+            self._is_action_intent_task(state)
+            and (
+                self._action_intent_text_fallback_ready(state)
+                or "need_alternative_evidence_path" in open_questions
+                or "need_disambiguating_evidence" in open_questions
+            )
+        ):
+            evidence_first = self._build_action_intent_evidence_first_recovery_decision(
+                state=state,
+                hints=hints,
+                used_tools=used_tools,
+                failed_tools=failed_tools,
+                ineffective_tools=ineffective_tools,
+            )
+            if evidence_first is not None:
+                return evidence_first
         if (
             state.retrieved_frames
             and self._is_weight_task(state)
