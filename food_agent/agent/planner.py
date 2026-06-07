@@ -2565,6 +2565,21 @@ class GraphAgentPlanner:
             and self._action_intent_pending_resolution_tool(state)
         ):
             pending_tool = self._action_intent_pending_resolution_tool(state)
+            if (
+                self._action_intent_needs_precondition_context(state=state, result=None)
+                and not self._action_intent_has_precondition_frames(state=state, hints=hints)
+            ):
+                precondition = self._build_action_intent_precondition_sampling_decision(
+                    state=state,
+                    hints=hints,
+                    focus=(
+                        "precondition_before_pending_resolution"
+                        if pending_tool
+                        else "precondition_before_action_intent_resolution"
+                    ),
+                )
+                if precondition is not None:
+                    return precondition
             if pending_tool == "resolve_action_intent_future_use":
                 future_use = self._build_action_intent_future_use_resolution_decision(
                     state=state,

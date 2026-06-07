@@ -4,8 +4,14 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
+from food_agent.agent.action_intent import (
+    action_intent_needs_future_use_resolution,
+    action_intent_needs_pairwise_resolution,
+    action_intent_needs_precondition_context,
+)
 from food_agent.agent.state import AgentState
 from food_agent.model_client import OpenAICompatibleModelClient
 
@@ -55,6 +61,7 @@ class GraphAgentVerifier:
 
     def _heuristic_verify(self, state: AgentState) -> VerificationResult:
         missing = [item for item in state.open_questions if item and item != "need_disambiguating_evidence"]
+        missing.extend(self._action_intent_missing_grounding_types(state))
         if self._is_weight_task(state) and self._has_stable_weight_answer_evidence(state):
             missing = [item for item in missing if item != "need_alternative_evidence_path"]
         if self._is_object_motion_task(state) and self._has_stable_object_motion_answer_evidence(state):
@@ -185,13 +192,12 @@ class GraphAgentVerifier:
 
     def _has_stable_structured_family_answer_evidence(self, state: AgentState) -> bool:
         if str(getattr(state, "task_family", "")) == "fine_grained_why_recognition":
-            if any(
-                isinstance(item, str) and item.startswith("action_intent_need_future_evidence=1")
-                for item in list(state.working_memory) + list(state.evidence_bundle)
-            ):
+            if self._action_intent_has_pending_evidence_gap(state):
                 return False
             if self._has_action_intent_textual_rank_fallback_answer(state):
                 return True
+            if not self._action_intent_has_sufficient_grounding_for_stable_answer(state):
+                return False
         prefixes = (
             "ingredient_retrieval_best_index=",
             "recipe_membership_best_index=",
@@ -235,6 +241,156 @@ class GraphAgentVerifier:
             if isinstance(raw_result, dict) and raw_result.get("tool_failed"):
                 infer_failures += 1
         return infer_failures >= 3
+
+    def _action_intent_has_pending_evidence_gap(self, state: AgentState) -> bool:
+        for item in list(state.working_memory) + list(state.evidence_bundle):
+            if not isinstance(item, str):
+                continue
+            if item.startswith("action_intent_need_future_evidence=1"):
+                return True
+            if item.startswith("action_intent_pending_resolution="):
+                return True
+        if "need_disambiguating_evidence" in list(getattr(state, "open_questions", []) or []):
+            return True
+        return False
+
+    def _action_intent_missing_grounding_types(self, state: AgentState) -> list[str]:
+        if not self._is_action_intent_task(state):
+            return []
+        if self._has_action_intent_textual_rank_fallback_answer(state):
+            return []
+        missing: list[str] = []
+        choices = [str(choice) for choice in getattr(state, "choices", [])]
+        question = str(getattr(state, "question", "") or "")
+        if self._action_intent_has_pending_evidence_gap(state):
+            missing.append("need_disambiguating_evidence")
+        if not self._action_intent_has_successful_specialized_resolution(state):
+            if (
+                action_intent_needs_precondition_context(question=question, choices=choices, indices=None)
+                and not self._action_intent_has_precondition_grounding(state)
+            ):
+                missing.append("need_precondition_context")
+            if (
+                (
+                    action_intent_needs_future_use_resolution(question=question, choices=choices, indices=None)
+                    or action_intent_needs_pairwise_resolution(question=question, choices=choices, indices=None)
+                )
+                and not self._action_intent_has_post_action_grounding(state)
+            ):
+                missing.append("need_post_action_evidence")
+        return missing
+
+    def _action_intent_has_sufficient_grounding_for_stable_answer(self, state: AgentState) -> bool:
+        if not self._is_action_intent_task(state):
+            return True
+        if self._action_intent_has_successful_specialized_resolution(state):
+            return True
+        choices = [str(choice) for choice in getattr(state, "choices", [])]
+        question = str(getattr(state, "question", "") or "")
+        if action_intent_needs_precondition_context(question=question, choices=choices, indices=None):
+            if not self._action_intent_has_precondition_grounding(state):
+                return False
+        if (
+            action_intent_needs_future_use_resolution(question=question, choices=choices, indices=None)
+            or action_intent_needs_pairwise_resolution(question=question, choices=choices, indices=None)
+        ):
+            if not self._action_intent_has_post_action_grounding(state):
+                return False
+        return True
+
+    def _action_intent_has_successful_specialized_resolution(self, state: AgentState) -> bool:
+        for item in list(state.evidence_bundle) + list(state.working_memory):
+            if not isinstance(item, str):
+                continue
+            if item.startswith(
+                (
+                    "action_intent_pairwise_reason=",
+                    "action_intent_future_use_reason=",
+                    "action_intent_future_use_observation=",
+                    "action_intent_unresolved_rerank_best_index=",
+                    "action_intent_prior_direct_override_best_index=",
+                    "action_intent_causal_override_best_index=",
+                    "action_intent_exact_use_override_best_index=",
+                    "action_intent_hidden_target_override_best_index=",
+                )
+            ):
+                return True
+        for call in list(getattr(state, "tool_trace", []) or []):
+            if not isinstance(call, dict):
+                continue
+            tool = str(call.get("tool") or "")
+            if tool not in {"resolve_action_intent_pairwise", "resolve_action_intent_future_use"}:
+                continue
+            raw_result = call.get("raw_result")
+            if not isinstance(raw_result, dict):
+                continue
+            if raw_result.get("tool_failed"):
+                continue
+            if raw_result.get("best_index") is None:
+                continue
+            if bool(raw_result.get("need_more_evidence")):
+                continue
+            return True
+        return False
+
+    def _action_intent_has_precondition_grounding(self, state: AgentState) -> bool:
+        for path in list(getattr(state, "retrieved_frames", []) or []):
+            name = Path(str(path)).name.lower()
+            if "_precontext" in name:
+                return True
+        precondition_terms = (
+            "wet hands",
+            "wet-hand",
+            "dry hands",
+            "hand drying",
+            "wipe",
+            "wiping",
+            "surface",
+            "counter",
+            "worktop",
+            "washed",
+            "wash",
+            "rinsed",
+            "sink",
+            "water",
+            "hot",
+            "burn",
+            "spill",
+            "dirty",
+            "messy",
+            "擦手",
+            "干手",
+            "湿手",
+            "擦台面",
+            "台面",
+            "清洁",
+            "清洗",
+            "水槽",
+        )
+        combined = " ".join(str(item) for item in list(state.evidence_bundle) + list(state.working_memory)).lower()
+        return any(term in combined for term in precondition_terms)
+
+    def _action_intent_has_post_action_grounding(self, state: AgentState) -> bool:
+        for path in list(getattr(state, "retrieved_frames", []) or []):
+            name = Path(str(path)).name.lower()
+            if "_followup" in name:
+                return True
+        post_action_terms = (
+            "timeline_event",
+            "future_use_observation",
+            "pairwise_reason",
+            "picked up",
+            "put on the scale",
+            "used again",
+            "retrieved before",
+            "after putting",
+            "shortly after",
+            "next step",
+            "follow-up",
+            "followup",
+        )
+        combined = " ".join(str(item) for item in list(state.evidence_bundle) + list(state.working_memory)).lower()
+        return any(term in combined for term in post_action_terms)
 
     def _filter_non_blocking_conflicts(self, state: AgentState, conflicts: list[str]) -> list[str]:
         if self._is_weight_task(state) and self._has_stable_weight_answer_evidence(state):
