@@ -29,8 +29,8 @@
 ### 16.2.2 当前稳定基线
 
 - 专项回归命令：`pytest -q tests/test_graph_agent.py -k 'action_intent'`
-- 2026-06-07 当前结果：`229 passed, 344 deselected`
-- 相比本轮进入专项时的起点 `107 passed, 300 deselected`，当前阶段性增量为 `+122 passed`
+- 2026-06-07 当前结果：`231 passed, 344 deselected`
+- 相比本轮进入专项时的起点 `107 passed, 300 deselected`，当前阶段性增量为 `+124 passed`
 - 当前执行策略：why 逻辑不再追求“接近完美覆盖”，而是维持“足够可用、回归稳定、无明显结构性退化”的维护态；后续优先级切换到完整 agent 功能闭环与小样本真实验证。
 
 这说明 why 题已经不再是“直接把问题丢给模型猜答案”，而是已经存在完整骨架：
@@ -252,7 +252,14 @@
 - 本轮新增并通过 `2` 条定向测试，覆盖：
   - `flip orange cloth` 的 unresolved rerank 会从 `change side` 翻正到 `drop the crumb into the sink`
   - 若选项里根本没有明确目标接纳位置，新的弱 residue-release 规则不会乱触发
-- 本轮专项总回归更新为 `229 passed, 344 deselected`
+- 本轮提交：planner 侧也已经开始把 `sink/pan/bowl/container` 这类“接纳位置导向”当成独立的 `needed_observation` profile，而不是继续混在 generic `future_use` 或 `reveal` 里：
+  - 对 `flip / shake / tap / hit / knock` 这类题，只要待确认的是“残余物是否掉回接纳位置”，transition probe 会优先走更短、更密的近窗补帧；
+  - 最终送给视觉模型的关键帧选择也会优先保留 `followup_transition / followup_peaks`，减少被远处 `followup_ext*` 挤掉的情况；
+  - 这条 profile 采用双条件约束：必须同时有“回落/排出类语义”和“接纳位置语义”，不会误伤普通 `future_use` 题。
+- 本轮新增并通过 `2` 条 planner 定向测试，覆盖：
+  - `flip orange cloth` 的 `needed_observation` 会触发更短的 `followup_transition` 窗口；
+  - 同类题在最终选帧时会优先保留 `transition` 而不是 `ext2`
+- 本轮专项总回归更新为 `231 passed, 344 deselected`
 - 本轮小规模真实 probe：
   - 旧 `towel-cluster` 摘要中 `flip orange cloth` 仍是残差，正是本轮语义救援要消除的典型失败；
   - 新 `state-change-cluster` probe 已完成 `1/2`，当前已完成样本准确率 `1.0`；剩余样本仍在跑，说明本轮修改至少已开始覆盖真实状态变化桶，而不只是单测

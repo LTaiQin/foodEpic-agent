@@ -1196,6 +1196,11 @@ class GraphAgentPlanner:
             end_time = action_end + 3.2
             stride_s = 0.4
             max_frames = 6
+        elif mode == "receptacle_outcome":
+            start_time = max(0.0, action_end - 0.12)
+            end_time = action_end + 2.8
+            stride_s = 0.35
+            max_frames = 7
         elif mode == "safety_or_spill_result":
             start_time = max(0.0, action_end - 0.08)
             end_time = action_end + 2.8
@@ -1232,6 +1237,8 @@ class GraphAgentPlanner:
             return "mixed_temporal_horizon"
         if needed_profile["prefer_hand_free_next_action"] or self._action_intent_has_hand_free_future_use_conflict(state=state, result=result):
             return "hand_free_next_action"
+        if needed_profile["prefer_receptacle_outcome"]:
+            return "receptacle_outcome"
         timeline_text = self._action_intent_timeline_review_text(state)
         support_text = self._action_intent_result_support_text(result)
         combined_text = f"{timeline_text} {support_text}".lower()
@@ -1514,6 +1521,7 @@ class GraphAgentPlanner:
             and (
                 needed_profile["prefer_mixed_horizon"]
                 or needed_profile["prefer_hand_free_next_action"]
+                or needed_profile["prefer_receptacle_outcome"]
             )
         ):
             return True
@@ -1901,6 +1909,7 @@ class GraphAgentPlanner:
                 "prefer_state_change_only": False,
                 "prefer_mixed_horizon": False,
                 "prefer_reveal_access": False,
+                "prefer_receptacle_outcome": False,
                 "prefer_future_use_outcome": False,
                 "prefer_final_placement": False,
                 "prefer_hand_free_next_action": False,
@@ -1994,6 +2003,33 @@ class GraphAgentPlanner:
             "placed back",
             "placed into",
         )
+        receptacle_terms = (
+            "sink",
+            "pan",
+            "pot",
+            "bowl",
+            "cup",
+            "jar",
+            "container",
+            "水槽",
+            "锅",
+            "碗",
+            "杯",
+            "容器",
+        )
+        residue_action_terms = (
+            "crumb",
+            "residue",
+            "drop",
+            "fall",
+            "release",
+            "drain",
+            "碎屑",
+            "残渣",
+            "掉",
+            "落",
+            "沥",
+        )
         immediate = any(term in text for term in immediate_terms)
         future_use = any(term in text for term in future_use_terms)
         reveal_access = any(term in text for term in reveal_terms)
@@ -2001,17 +2037,54 @@ class GraphAgentPlanner:
         safety_or_spill = any(term in text for term in safety_terms)
         state_change_only = any(term in text for term in state_change_terms)
         final_placement = any(term in text for term in final_placement_terms)
+        question_text = str(getattr(state, "question", "") or "").lower()
+        choices_text = " ".join(str(choice) for choice in getattr(state, "choices", []) or []).lower()
+        receptacle_outcome = any(term in text for term in receptacle_terms) and any(
+            term in text for term in residue_action_terms
+        )
+        if not receptacle_outcome and any(token in question_text for token in ("<flip ", "<turn ", "<shake ", "<tilt ", "<tip ", "<tap ", "<hit ", "<knock ")):
+            if any(
+                term in choices_text
+                for term in (
+                    "into the sink",
+                    "into the pan",
+                    "into the bowl",
+                    "into the pot",
+                    "into the container",
+                    "掉进水槽",
+                    "掉回锅",
+                    "掉回碗",
+                    "落回",
+                )
+            ) and any(
+                term in choices_text
+                for term in (
+                    "drop",
+                    "fall",
+                    "release",
+                    "crumb",
+                    "residue",
+                    "drain",
+                    "掉",
+                    "落",
+                    "碎屑",
+                    "残渣",
+                    "沥",
+                )
+            ):
+                receptacle_outcome = True
         contrastive = ("whether" in text or "是否" in text) and any(
             token in text for token in (" or ", " first ", " before ", " after ", " versus ", " vs ")
         )
         mixed_horizon = (immediate and future_use) or (contrastive and immediate and (future_use or final_placement))
-        dense_near = immediate or reveal_access or hand_free or safety_or_spill or state_change_only
+        dense_near = immediate or reveal_access or receptacle_outcome or hand_free or safety_or_spill or state_change_only
         return {
             "prefer_dense_near": dense_near,
             "prefer_result_driven": future_use or final_placement or mixed_horizon,
             "prefer_state_change_only": state_change_only and not (future_use or final_placement or reveal_access),
             "prefer_mixed_horizon": mixed_horizon,
             "prefer_reveal_access": reveal_access,
+            "prefer_receptacle_outcome": receptacle_outcome,
             "prefer_future_use_outcome": future_use and not final_placement,
             "prefer_final_placement": final_placement,
             "prefer_hand_free_next_action": hand_free and (immediate or future_use),
@@ -4311,6 +4384,13 @@ class GraphAgentPlanner:
                 peak_keep = min(len(followup_peak_frames), max(peak_keep, 2 if limit >= 7 else 1))
                 ext_keep = 0
                 followup_keep = max(1, limit - pre_keep - segment_keep - transition_keep - peak_keep - ext_keep)
+            elif needed_profile["prefer_receptacle_outcome"]:
+                pre_keep = 1 if needs_precontext and limit >= 6 else 0
+                segment_keep = min(segment_keep, 2)
+                transition_keep = min(len(followup_transition_frames), max(transition_keep, 2 if limit >= 6 else 1))
+                peak_keep = min(len(followup_peak_frames), max(peak_keep, 1 if limit >= 6 else 0))
+                ext_keep = 0
+                followup_keep = max(1, limit - pre_keep - segment_keep - transition_keep - peak_keep - ext_keep)
             elif needed_profile["prefer_mixed_horizon"]:
                 pre_keep = 1 if needs_precontext and limit >= 7 else 0
                 segment_keep = min(segment_keep, 2)
@@ -4351,6 +4431,8 @@ class GraphAgentPlanner:
                 priority = ["transition", "peaks", "followup", "ext", "segment", "precontext"]
             elif needed_profile["prefer_reveal_access"]:
                 priority = ["transition", "peaks", "segment", "followup", "precontext", "ext"]
+            elif needed_profile["prefer_receptacle_outcome"]:
+                priority = ["transition", "peaks", "followup", "segment", "precontext", "ext"]
             elif needed_profile["prefer_mixed_horizon"]:
                 priority = ["transition", "ext", "followup", "peaks", "segment", "precontext"]
             elif needed_profile["prefer_future_use_outcome"] or needed_profile["prefer_final_placement"]:
@@ -4413,7 +4495,7 @@ class GraphAgentPlanner:
                     or needed_profile["prefer_mixed_horizon"]
                 ):
                     remaining_anchor = action_end + 4.0
-                elif needed_profile["prefer_reveal_access"] or needed_profile["prefer_safety_or_spill"]:
+                elif needed_profile["prefer_reveal_access"] or needed_profile["prefer_receptacle_outcome"] or needed_profile["prefer_safety_or_spill"]:
                     remaining_anchor = action_end + 0.35
                 remaining_paths = self._sample_action_intent_stage_frames(
                     remaining,
