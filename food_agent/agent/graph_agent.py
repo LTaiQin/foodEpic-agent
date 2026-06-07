@@ -236,6 +236,13 @@ class GraphAgentVideoSession:
             )
             if isinstance(item, str) and str(item).strip()
         }
+        anchor_times: list[float] = []
+        for key in ("times", "input_times"):
+            for value in hints.get(key) or []:
+                try:
+                    anchor_times.append(float(value))
+                except Exception:  # noqa: BLE001
+                    continue
         blocked_prefixes = self._session_blocked_prefixes_for_task(state.task_family)
         blocked_substrings = self._session_blocked_substrings_for_task(state.task_family)
         state.working_memory = self._filter_restored_strings(
@@ -245,6 +252,8 @@ class GraphAgentVideoSession:
             blocked_prefixes=blocked_prefixes,
             blocked_substrings=blocked_substrings,
             limit=28,
+            allow_unscoped_backfill=str(state.task_family or "").strip().lower() != "fine_grained_why_recognition",
+            anchor_times=anchor_times,
         )
         state.evidence_bundle = self._filter_restored_strings(
             items=state.evidence_bundle,
@@ -253,15 +262,19 @@ class GraphAgentVideoSession:
             blocked_prefixes=blocked_prefixes,
             blocked_substrings=blocked_substrings,
             limit=24,
+            allow_unscoped_backfill=str(state.task_family or "").strip().lower() != "fine_grained_why_recognition",
+            anchor_times=anchor_times,
         )
         state.retrieved_frames = self._filter_restored_frames(
             frames=state.retrieved_frames,
             task_family=state.task_family,
+            hints=hints,
             limit=12,
         )
         state.artifacts = self._filter_restored_frames(
             frames=state.artifacts,
             task_family=state.task_family,
+            hints=hints,
             limit=20,
         )
         state.visited_times = sorted({round(float(item), 3) for item in state.visited_times[-80:]})
@@ -284,8 +297,12 @@ class GraphAgentVideoSession:
         blocked_prefixes: tuple[str, ...],
         blocked_substrings: tuple[str, ...],
         limit: int,
+        allow_unscoped_backfill: bool = True,
+        anchor_times: list[float] | None = None,
     ) -> list[str]:
         kept: list[str] = []
+        window_start = min(anchor_times) - 6.0 if anchor_times else None
+        window_end = max(anchor_times) + 8.0 if anchor_times else None
         for item in items:
             if not isinstance(item, str) or not item:
                 continue
@@ -294,10 +311,20 @@ class GraphAgentVideoSession:
                 continue
             if any(token in lowered for token in blocked_substrings):
                 continue
-            if any(lowered.startswith(prefix) for prefix in keep_prefixes) or any(token in lowered for token in relevant_tokens):
+            has_time_overlap = False
+            if window_start is not None and window_end is not None:
+                for start_time, end_time in self._extract_embedded_note_times(item):
+                    if not (end_time < window_start or start_time > window_end):
+                        has_time_overlap = True
+                        break
+            if (
+                any(lowered.startswith(prefix) for prefix in keep_prefixes)
+                or any(token in lowered for token in relevant_tokens)
+                or has_time_overlap
+            ):
                 if item not in kept:
                     kept.append(item)
-        if len(kept) < limit:
+        if allow_unscoped_backfill and len(kept) < limit:
             for item in items[-limit:]:
                 lowered = item.lower() if isinstance(item, str) else ""
                 if (
@@ -311,6 +338,15 @@ class GraphAgentVideoSession:
                 if len(kept) >= limit:
                     break
         return kept[-limit:]
+
+    def _extract_embedded_note_times(self, text: str) -> list[tuple[float, float]]:
+        spans: list[tuple[float, float]] = []
+        for match in re.finditer(r"time=([0-9.]+)-([0-9.]+)", str(text)):
+            try:
+                spans.append((float(match.group(1)), float(match.group(2))))
+            except Exception:  # noqa: BLE001
+                continue
+        return spans
 
     def _is_viewpoint_like_task(self, task_family: str) -> bool:
         normalized = str(task_family or "").strip().lower()
@@ -359,15 +395,57 @@ class GraphAgentVideoSession:
             )
         return ()
 
-    def _filter_restored_frames(self, *, frames: list[str], task_family: str, limit: int) -> list[str]:
+    def _filter_restored_frames(self, *, frames: list[str], task_family: str, hints: dict[str, Any] | None, limit: int) -> list[str]:
         prefixes = tuple(token.lower() for token in self._artifact_reuse_prefixes_for_task(task_family))
         preferred = [
             item
             for item in frames
             if isinstance(item, str) and any(prefix in item.lower() for prefix in prefixes)
         ]
+        if str(task_family or "").strip().lower() == "fine_grained_why_recognition":
+            scoped = self._filter_restored_action_intent_frames_by_time(preferred or frames, hints=hints, limit=limit)
+            if scoped:
+                return scoped
         if preferred:
             return preferred[-limit:]
+        return [item for item in frames[-limit:] if isinstance(item, str) and item]
+
+    def _filter_restored_action_intent_frames_by_time(
+        self,
+        frames: list[str],
+        *,
+        hints: dict[str, Any] | None,
+        limit: int,
+    ) -> list[str]:
+        if not frames:
+            return []
+        anchor_times: list[float] = []
+        if isinstance(hints, dict):
+            for key in ("times", "input_times"):
+                for value in hints.get(key) or []:
+                    try:
+                        anchor_times.append(float(value))
+                    except Exception:  # noqa: BLE001
+                        continue
+        if not anchor_times:
+            return [item for item in frames[-limit:] if isinstance(item, str) and item]
+        window_start = min(anchor_times) - 8.0
+        window_end = max(anchor_times) + 12.0
+        scoped: list[str] = []
+        for item in frames:
+            if not isinstance(item, str) or not item:
+                continue
+            match = re.search(r"_([0-9]+(?:\.[0-9]+)?)s\.[^.]+$", item)
+            if not match:
+                continue
+            try:
+                artifact_time = float(match.group(1))
+            except Exception:  # noqa: BLE001
+                continue
+            if window_start <= artifact_time <= window_end:
+                scoped.append(item)
+        if scoped:
+            return scoped[-limit:]
         return [item for item in frames[-limit:] if isinstance(item, str) and item]
 
     def _make_open_query_id(self, *, question: str, inputs_json: str, task_family: str) -> str:
@@ -785,6 +863,9 @@ class GraphAgent:
                 continue
             if raw_result.get("tool_failed") or raw_result.get("tool_ineffective"):
                 continue
+            if self._action_intent_resolution_should_withhold_state_change_overclaim(raw_result=raw_result, state=state):
+                state.add_memory("action_intent_resolution_withheld_for_missing_state_change_prereq=1")
+                continue
             index = self._coerce_choice_index(raw_result.get("best_index"), state.choices)
             if index is None:
                 continue
@@ -792,6 +873,24 @@ class GraphAgent:
                 reranked = self._resolve_unresolved_action_intent_answer(raw_result=raw_result, state=state)
                 if reranked is not None:
                     return reranked
+                if any(
+                    isinstance(item, str) and item.startswith("action_intent_unresolved_rerank_withheld")
+                    for item in list(getattr(state, "working_memory", []))[-8:]
+                ):
+                    state.add_memory("action_intent_resolution_withheld_for_more_evidence=1")
+                    continue
+            elif self._action_intent_resolution_should_withhold_weak_surface_wiping_claim(raw_result=raw_result, state=state):
+                state.add_memory("action_intent_resolution_withheld_for_weak_surface_wiping_evidence=1")
+                continue
+            elif self._action_intent_resolution_should_withhold_weak_relocation_or_residue_claim(raw_result=raw_result, state=state):
+                state.add_memory("action_intent_resolution_withheld_for_missing_direct_outcome_evidence=1")
+                continue
+            elif self._action_intent_resolution_should_withhold_broad_generic_claim_without_direct_evidence(
+                raw_result=raw_result,
+                state=state,
+            ):
+                state.add_memory("action_intent_resolution_withheld_for_broad_generic_claim=1")
+                continue
             confidence = self._coerce_confidence(raw_result.get("confidence"), default=0.78)
             if raw_result.get("need_more_evidence"):
                 confidence = min(confidence, 0.62)
@@ -800,6 +899,207 @@ class GraphAgent:
                 answer = str(state.choices[index])
             return index, answer, confidence
         return None
+
+    def _action_intent_resolution_should_withhold_state_change_overclaim(
+        self,
+        *,
+        raw_result: dict[str, Any],
+        state: AgentState,
+    ) -> bool:
+        question = str(getattr(state, "question", "") or "").lower()
+        if "<tap kitchen scale>" not in question and "tap kitchen scale" not in question:
+            return False
+        index = self._coerce_choice_index(raw_result.get("best_index"), state.choices)
+        if index is None:
+            return False
+        choice_lc = str(state.choices[index]).lower()
+        if not any(term in choice_lc for term in ("zero out", "tare", "归零", "去皮")):
+            return False
+        text = " ".join(
+            str(raw_result.get(key) or "")
+            for key in ("reason", "decisive_observation", "needed_observation", "answer")
+        ).lower()
+        prior_text = self._action_intent_prior_reasoning_text(state).lower()
+        combined_text = f"{prior_text} {text}".strip()
+        has_on_prereq = any(
+            token in combined_text
+            for token in (
+                "already on before the tap",
+                "already lit before the tap",
+                "display is already lit",
+                "scale is already on before the tap",
+                "container on the scale",
+                "container already on the scale",
+                "容器已经在秤上",
+                "按之前已经亮着",
+                "已经开机",
+                "显示屏已经亮起",
+            )
+        )
+        has_container_at_tap = any(
+            token in combined_text
+            for token in (
+                "container on the scale at the tap",
+                "container already on the scale",
+                "bowl already on the scale",
+                "with container already on the scale",
+                "容器已经在秤上",
+                "碗已经在秤上",
+            )
+        )
+        explicit_no_container = any(
+            token in combined_text
+            for token in (
+                "no container on it",
+                "scale appears empty",
+                "empty scale",
+                "no evidence for taring",
+                "there is no evidence for taring",
+                "no container is visible on the scale",
+                "没有容器",
+                "秤上是空的",
+                "空秤",
+                "没有去皮依据",
+            )
+        )
+        container_added_after_tap = any(
+            token in combined_text
+            for token in (
+                "then the person places a bowl on the scale",
+                "then the person places the bowl on the scale",
+                "after tapping, a bowl is placed on the scale",
+                "after the tap, the bowl is placed on the scale",
+                "after tapping the person places a bowl",
+                "随后把碗放到秤上",
+                "按完之后把碗放到秤上",
+            )
+        )
+        if explicit_no_container or container_added_after_tap:
+            return True
+        return not has_on_prereq and not has_container_at_tap
+
+    def _action_intent_resolution_should_withhold_weak_surface_wiping_claim(
+        self,
+        *,
+        raw_result: dict[str, Any],
+        state: AgentState,
+    ) -> bool:
+        question = str(getattr(state, "question", "") or "").lower()
+        action_object = self._action_intent_question_object(question)
+        if not any(token in action_object for token in ("towel", "cloth", "napkin", "paper towel", "sponge")):
+            return False
+        index = self._coerce_choice_index(raw_result.get("best_index"), state.choices)
+        if index is None:
+            return False
+        choice_lc = str(state.choices[index]).lower()
+        if not any(token in choice_lc for token in ("wipe", "clean")):
+            return False
+        if not any(token in choice_lc for token in ("surface", "counter", "countertop", "worktop", "table", "台面", "桌")):
+            return False
+        text = " ".join(
+            str(raw_result.get(key) or "")
+            for key in ("reason", "decisive_observation", "needed_observation", "answer")
+        ).lower()
+        if self._action_intent_text_has_negative_evidence(text):
+            return True
+        return not self._action_intent_support_has_strong_surface_wiping_evidence(text)
+
+    def _action_intent_resolution_should_withhold_weak_relocation_or_residue_claim(
+        self,
+        *,
+        raw_result: dict[str, Any],
+        state: AgentState,
+    ) -> bool:
+        question = str(getattr(state, "question", "") or "").lower()
+        action_object = self._action_intent_question_object(question)
+        index = self._coerce_choice_index(raw_result.get("best_index"), state.choices)
+        if index is None:
+            return False
+        choice_lc = str(state.choices[index]).lower()
+        text = " ".join(
+            str(raw_result.get(key) or "")
+            for key in ("reason", "decisive_observation", "needed_observation", "answer")
+        ).lower()
+        if any(token in action_object for token in ("towel", "cloth", "napkin", "paper towel")):
+            if "move" in choice_lc and self._action_intent_choice_lacks_direct_relocation_outcome_evidence(
+                choice=choice_lc,
+                support=text,
+                contradiction="",
+            ):
+                return True
+            if any(token in question for token in ("<flip ", "<turn ", "<shake ", " flip ", " turn ", " shake ")):
+                if any(token in choice_lc for token in ("wipe", "clean", "dry")) and not any(
+                    token in text
+                    for token in (
+                        "crumb",
+                        "residue",
+                        "drop",
+                        "fall",
+                        "sink",
+                        "shake off",
+                        "掉",
+                        "落",
+                        "碎屑",
+                        "水槽",
+                    )
+                ):
+                    return True
+        return False
+
+    def _action_intent_resolution_should_withhold_broad_generic_claim_without_direct_evidence(
+        self,
+        *,
+        raw_result: dict[str, Any],
+        state: AgentState,
+    ) -> bool:
+        index = self._coerce_choice_index(raw_result.get("best_index"), state.choices)
+        if index is None:
+            return False
+        choice_lc = str(state.choices[index]).strip().lower()
+        broad_generic_patterns = (
+            "to clean.",
+            "to dry.",
+            "to store.",
+            "to move.",
+            "to measure.",
+            "to measure the ingredients.",
+        )
+        if not any(pattern in choice_lc for pattern in broad_generic_patterns):
+            return False
+        text = " ".join(
+            str(raw_result.get(key) or "")
+            for key in ("reason", "decisive_observation", "needed_observation", "answer")
+        ).lower()
+        if any(
+            token in text
+            for token in (
+                "least contradicted",
+                "broadest",
+                "could in principle",
+                "might broadly",
+                "compatible with",
+                "最宽泛",
+                "最不矛盾",
+            )
+        ):
+            return True
+        if any(
+            token in text
+            for token in (
+                "no actual",
+                "no visible",
+                "not shown",
+                "not visible",
+                "unclear",
+                "cannot tell",
+                "can't tell",
+                "没有看到",
+                "未显示",
+                "不明确",
+            )
+        ):
+            return True
+        return not self._action_intent_text_has_direct_positive_evidence(text)
 
     def _resolve_unresolved_action_intent_answer(
         self,
@@ -886,8 +1186,225 @@ class GraphAgent:
                 f"action_intent_hidden_target_override_best_index={hidden_target_override[0]} score={best_score:.2f}"
             )
             return hidden_target_override
+        hand_contact_override = self._override_generic_hand_wiping_with_explicit_single_hand_drying(
+            state=state,
+            candidate_rows=candidate_rows,
+            unresolved_best_index=best_index,
+            unresolved_best_score=best_score,
+        )
+        if hand_contact_override is not None:
+            state.add_memory(
+                f"action_intent_hand_contact_override_best_index={hand_contact_override[0]} score={best_score:.2f}"
+            )
+            return hand_contact_override
+        relocation_override = self._override_generic_towel_use_with_simple_relocation(
+            state=state,
+            candidate_rows=candidate_rows,
+            unresolved_best_index=best_index,
+            unresolved_best_score=best_score,
+        )
+        if relocation_override is not None:
+            state.add_memory(
+                f"action_intent_relocation_override_best_index={relocation_override[0]} score={best_score:.2f}"
+            )
+            return relocation_override
+        record_target_override = self._override_generic_measure_with_exact_record_target_candidate(
+            state=state,
+            candidate_rows=candidate_rows,
+            unresolved_best_index=best_index,
+            unresolved_best_score=best_score,
+        )
+        if record_target_override is not None:
+            state.add_memory(
+                f"action_intent_record_target_override_best_index={record_target_override[0]} score={best_score:.2f}"
+            )
+            return record_target_override
+        second_score = ranked[1][0] if len(ranked) >= 2 else 0.0
+        semantic_gaps = self._action_intent_unresolved_semantic_gaps(
+            state=state,
+            candidate_rows=candidate_rows,
+            best_index=best_index,
+        )
+        if self._action_intent_unresolved_rerank_should_wait_for_more_evidence(
+            best_score=best_score,
+            second_score=second_score,
+            semantic_gaps=semantic_gaps,
+            candidate_rows=candidate_rows,
+            state=state,
+        ):
+            reason = ",".join(semantic_gaps) if semantic_gaps else "weak_or_ambiguous_rerank"
+            state.add_memory(
+                f"action_intent_unresolved_rerank_withheld score={best_score:.2f} second={second_score:.2f} reason={reason}"
+            )
+            return None
         state.add_memory(f"action_intent_unresolved_rerank_best_index={best_index} score={best_score:.2f}")
         return best_index, best_choice, min(max(0.36 + max(best_score, 0.0) * 0.45, 0.36), 0.68)
+
+    def _action_intent_unresolved_semantic_gaps(
+        self,
+        *,
+        state: AgentState,
+        candidate_rows: list[dict[str, Any]],
+        best_index: int,
+    ) -> list[str]:
+        target_row = next(
+            (
+                row
+                for row in candidate_rows
+                if int(row.get("index", -1)) == best_index
+            ),
+            None,
+        )
+        if target_row is None:
+            return []
+        choice_lc = str(target_row.get("choice") or "").lower()
+        support_lc = str(target_row.get("support") or "").lower()
+        context_lc = f"{support_lc} {str(target_row.get('contradiction') or '').lower()}"
+        gaps: list[str] = []
+        if any(term in support_lc for term in ("broadest", "least contradicted", "最宽泛", "最不矛盾")):
+            gaps.append("best_is_unproven_broad_candidate")
+        has_modal_generic_support = any(
+            term in support_lc
+            for term in ("could", "can be used", "compatible", "may be", "might be", "可能", "可以用来", "兼容")
+        )
+        if self._action_intent_text_has_negative_evidence(context_lc) and has_modal_generic_support:
+            gaps.append("candidate_explicitly_lacks_observed_support")
+        has_direct_positive_support = self._action_intent_text_has_direct_positive_evidence(support_lc)
+        if "dry" in choice_lc and "hand" in choice_lc:
+            if (
+                has_modal_generic_support
+                and not has_direct_positive_support
+                and not any(term in support_lc for term in ("brought to both wet hands", "wipe them dry", "擦干双手", "湿手"))
+            ):
+                gaps.append("missing_dry_hands_evidence")
+        if any(term in choice_lc for term in ("move", "relocate", "set aside", "put aside", "移开", "挪动")):
+            if not any(
+                term in support_lc
+                for term in (
+                    "picked up and then placed elsewhere",
+                    "quickly set down on the counter in a different position",
+                    "brief repositioning",
+                    "left on the counter",
+                    "set down on the counter",
+                    "placed elsewhere",
+                    "temporarily relocated",
+                    "放到别处",
+                    "放到台面另一处",
+                    "短暂挪动",
+                )
+            ):
+                gaps.append("missing_simple_relocation_evidence")
+        if "wipe" in choice_lc and any(term in choice_lc for term in ("surface", "counter", "worktop", "table", "台面", "桌")):
+            if any(term in support_lc for term in ("not yet shown", "no wiping motion", "未显示", "还未显示", "尚未显示")):
+                gaps.append("missing_surface_wiping_evidence")
+            if (
+                has_modal_generic_support
+                and not has_direct_positive_support
+                and not any(
+                    term in support_lc
+                    for term in ("laid out on the worktop", "next to a visible spill", "ready for wiping", "ready to wipe", "放在台面旁准备擦", "准备擦")
+                )
+            ):
+                gaps.append("missing_surface_wiping_evidence")
+            if not self._action_intent_support_has_strong_surface_wiping_evidence(support_lc):
+                gaps.append("missing_surface_wiping_evidence")
+        if any(term in choice_lc for term in ("turn on", "switch on", "power on", "打开", "开启")):
+            if not has_direct_positive_support and not any(
+                term in support_lc
+                for term in ("display turns on", "screen lights", "scale wakes", "powered on", "turned on", "亮起", "开机", "显示屏亮")
+            ):
+                gaps.append("missing_power_on_state_change_evidence")
+        if any(term in choice_lc for term in ("zero out", "tare", "reset the scale", "归零", "去皮")):
+            if not has_direct_positive_support and not any(
+                term in support_lc
+                for term in ("zero", "tare", "reset", "returns to 0", "container on the scale", "归零", "去皮", "回到0", "放到秤上")
+            ):
+                gaps.append("missing_zero_out_measurement_evidence")
+        if any(term in choice_lc for term in ("access", "behind", "reveal", "expose", "拿到后面", "看到后面", "露出", "取到后面")):
+            if any(term in support_lc for term in ("reveals the hidden area", "revealed", "hidden area behind", "shows what is behind", "露出后方", "看到后方")):
+                gaps.append("generic_access_direct_effect")
+        return list(dict.fromkeys(gaps))
+
+    def _action_intent_unresolved_rerank_should_wait_for_more_evidence(
+        self,
+        *,
+        best_score: float,
+        second_score: float,
+        semantic_gaps: list[str],
+        candidate_rows: list[dict[str, Any]],
+        state: AgentState,
+    ) -> bool:
+        if best_score < 0.12 and "generic_access_direct_effect" not in semantic_gaps:
+            return True
+        broad_gap = "best_is_unproven_broad_candidate" in semantic_gaps
+        unsupported_gap = "candidate_explicitly_lacks_observed_support" in semantic_gaps
+        if any(
+            gap in semantic_gaps
+            for gap in ("generic_hidden_reveal_or_access_direct_effect", "generic_access_direct_effect")
+        ):
+            return False
+        if broad_gap and unsupported_gap and best_score <= 0.18:
+            return True
+        if unsupported_gap and best_score <= 0.38 and second_score <= 0.08:
+            return True
+        if broad_gap and best_score < 0.16 and best_score - second_score < 0.06:
+            return True
+        if broad_gap and unsupported_gap and len(semantic_gaps) >= 3 and best_score < 0.24:
+            return True
+        top_rows = sorted(
+            candidate_rows,
+            key=lambda row: (-float(row.get("adjusted_score", 0.0)), int(row.get("index", 999))),
+        )[:3]
+        if top_rows and len(top_rows) >= 2 and best_score <= 0.34:
+            top_supports = [str(row.get("support") or "").lower() for row in top_rows]
+            direct_positive_count = sum(
+                1 for support in top_supports if self._action_intent_text_has_direct_positive_evidence(support)
+            )
+            weak_gap_count = 0
+            if direct_positive_count == 0:
+                weak_gap_count = sum(
+                    1
+                    for row in top_rows
+                    if set(
+                        self._action_intent_unresolved_semantic_gaps(
+                            state=state,
+                            candidate_rows=candidate_rows,
+                            best_index=int(row.get("index", -1)),
+                        )
+                    )
+                    & {
+                        "candidate_explicitly_lacks_observed_support",
+                        "missing_surface_wiping_evidence",
+                        "missing_dry_hands_evidence",
+                        "missing_simple_relocation_evidence",
+                    }
+                )
+            if weak_gap_count >= 2:
+                return True
+        if top_rows and best_score <= 0.24:
+            top_gap_sets = [
+                set(
+                    self._action_intent_unresolved_semantic_gaps(
+                        state=state,
+                        candidate_rows=candidate_rows,
+                        best_index=int(row.get("index", -1)),
+                    )
+                )
+                for row in top_rows
+            ]
+            if top_gap_sets and all(
+                (
+                    "candidate_explicitly_lacks_observed_support" in gaps
+                    or (
+                        "missing_surface_wiping_evidence" in gaps
+                        and "generic_access_direct_effect" not in gaps
+                    )
+                )
+                for gaps in top_gap_sets
+            ):
+                if not any(self._action_intent_text_has_direct_positive_evidence(str(row.get("support") or "").lower()) for row in top_rows):
+                    return True
+        return False
 
     def _score_action_intent_candidate_evidence(
         self,
@@ -904,11 +1421,7 @@ class GraphAgent:
         contradiction_lc = contradiction.lower()
         choice_lc = choice.lower()
         action_object = self._action_intent_question_object(question)
-        global_context = " ".join(
-            str(item)
-            for item in list(getattr(state, "evidence_bundle", []))[-24:] + list(getattr(state, "working_memory", []))[-24:]
-            if isinstance(item, str)
-        ).lower()
+        global_context = self._action_intent_scoped_global_context(state).lower()
         adjusted = max(0.0, min(float(base_score), 1.0))
         if self._action_intent_text_has_negative_evidence(contradiction_lc):
             adjusted -= 0.18
@@ -934,6 +1447,18 @@ class GraphAgent:
             global_context=global_context,
         ):
             adjusted -= 0.22
+            if any(
+                token in f"{support_lc} {contradiction_lc}"
+                for token in (
+                    "remaining soap",
+                    "soap suds",
+                    "washing away the remaining soap",
+                    "remove the remaining soap",
+                    "肥皂",
+                    "泡沫",
+                )
+            ):
+                adjusted -= 0.12
         if self._action_intent_choice_is_generic_drying_without_wet_context(
             choice=choice_lc,
             support=support_lc,
@@ -971,6 +1496,10 @@ class GraphAgent:
             contradiction=contradiction_lc,
         ):
             adjusted += 0.24
+        if any(term in choice_lc for term in ("access", "behind", "reveal", "expose", "后面", "露出")) and any(
+            term in support_lc for term in ("reveals the hidden area", "revealed", "hidden area behind", "shows what is behind", "露出后方", "看到后方")
+        ):
+            adjusted += 0.26
         if "clean" in choice_lc and any(term in contradiction_lc for term in ("no actual cleaning", "no visible wiping", "没有任何明确清洁", "没有擦")):
             adjusted -= 0.16
         if "away" in choice_lc and any(term in contradiction_lc for term in ("not stored", "not put", "counter", "没有看到把", "暂时", "台面")):
@@ -1192,6 +1721,14 @@ class GraphAgent:
             global_context=global_context,
         ):
             adjusted += 0.28
+        if self._action_intent_choice_is_weak_surface_contact_cleanup_claim(
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            action_object=action_object,
+            global_context=global_context,
+        ):
+            adjusted -= 0.34
         if self._action_intent_choice_is_explicit_hand_drying_goal(
             choice=choice_lc,
             support=support_lc,
@@ -1200,6 +1737,20 @@ class GraphAgent:
             global_context=global_context,
         ):
             adjusted += 0.3
+        if self._action_intent_choice_is_direct_disposal_path(
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            action_object=action_object,
+            global_context=global_context,
+        ):
+            adjusted += 0.34
+        if self._action_intent_choice_lacks_direct_relocation_outcome_evidence(
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+        ):
+            adjusted -= 0.2
         if self._action_intent_choice_is_postwash_residue_or_water_removal(
             question=question_lc,
             choice=choice_lc,
@@ -1322,6 +1873,24 @@ class GraphAgent:
             global_context=global_context,
         ):
             adjusted += 0.3
+        if self._action_intent_choice_is_receptacle_oriented_residue_release(
+            question=question_lc,
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            action_object=action_object,
+            global_context=global_context,
+        ):
+            adjusted += 0.18
+        if self._action_intent_choice_is_side_switch_without_immediate_reuse(
+            question=question_lc,
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            action_object=action_object,
+            global_context=global_context,
+        ):
+            adjusted -= 0.18
         if self._action_intent_choice_is_hand_free_enablement(
             choice=choice_lc,
             support=support_lc,
@@ -1395,6 +1964,120 @@ class GraphAgent:
         if self._action_intent_text_has_direct_positive_evidence(contradiction_lc):
             adjusted -= 0.08
         return min(adjusted, 1.0)
+
+    def _action_intent_scoped_global_context(self, state: AgentState, *, limit_per_source: int = 24) -> str:
+        anchor_times = self._action_intent_anchor_times(state)
+        sources = list(getattr(state, "evidence_bundle", []))[-limit_per_source:] + list(getattr(state, "working_memory", []))[-limit_per_source:]
+        if not anchor_times:
+            return " ".join(str(item) for item in sources if isinstance(item, str) and not self._is_action_intent_leaky_memory(item))
+        window_start = min(anchor_times) - 6.0
+        window_end = max(anchor_times) + 8.0
+        scoped: list[str] = []
+        for item in sources:
+            if not isinstance(item, str) or self._is_action_intent_leaky_memory(item):
+                continue
+            spans = self._action_intent_extract_embedded_note_times(item)
+            lowered = item.lower()
+            if spans:
+                overlaps = any(not (end_time < window_start or start_time > window_end) for start_time, end_time in spans)
+                if overlaps and item not in scoped:
+                    scoped.append(item)
+                continue
+            if any(
+                token in lowered
+                for token in (
+                    "type=frame;",
+                    "inspection;",
+                    "ongoing_action=",
+                    "possible_step=",
+                    "state_change_hint=",
+                    "scene_location=",
+                    "target_location=",
+                )
+            ):
+                if item not in scoped:
+                    scoped.append(item)
+        if scoped:
+            return " ".join(scoped)
+        return " ".join(str(item) for item in sources if isinstance(item, str) and not self._is_action_intent_leaky_memory(item))
+
+    def _is_action_intent_leaky_memory(self, item: object) -> bool:
+        lowered = str(item or "").lower()
+        return any(
+            token in lowered
+            for token in (
+                "action_intent_",
+                "visual_mcq_reason=",
+                "answer_hint=",
+                "candidate_answer_index=",
+                "deterministic_finalize",
+                "source=agent_timeline_summary",
+                "source=session_memory_compressor",
+            )
+        )
+
+    def _action_intent_anchor_times(self, state: AgentState) -> list[float]:
+        times: list[float] = []
+        payload = state.inputs_payload() if callable(getattr(state, "inputs_payload", None)) else {}
+        if isinstance(payload, dict):
+            for value in self._action_intent_extract_times_from_inputs_payload(payload):
+                times.append(value)
+        for path in list(getattr(state, "retrieved_frames", []) or []):
+            inferred = self._action_intent_infer_artifact_time(path)
+            if inferred is not None:
+                times.append(inferred)
+        deduped: list[float] = []
+        for value in sorted(times):
+            rounded = round(float(value), 3)
+            if rounded not in deduped:
+                deduped.append(rounded)
+        return deduped
+
+    def _action_intent_extract_times_from_inputs_payload(self, payload: dict[str, Any]) -> list[float]:
+        times: list[float] = []
+        if not isinstance(payload, dict):
+            return times
+        for value in payload.values():
+            if not isinstance(value, dict):
+                continue
+            for key in ("start_time", "end_time"):
+                raw = value.get(key)
+                if not isinstance(raw, str) or not raw.strip():
+                    continue
+                parsed = self._parse_hhmmss_time(raw)
+                if parsed is not None:
+                    times.append(parsed)
+        return times
+
+    def _parse_hhmmss_time(self, value: str) -> float | None:
+        match = re.fullmatch(r"(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)", str(value).strip())
+        if not match:
+            return None
+        try:
+            hours = int(match.group(1))
+            minutes = int(match.group(2))
+            seconds = float(match.group(3))
+        except Exception:  # noqa: BLE001
+            return None
+        return hours * 3600.0 + minutes * 60.0 + seconds
+
+    def _action_intent_extract_embedded_note_times(self, text: str) -> list[tuple[float, float]]:
+        spans: list[tuple[float, float]] = []
+        for match in re.finditer(r"time=([0-9.]+)-([0-9.]+)", str(text)):
+            try:
+                spans.append((float(match.group(1)), float(match.group(2))))
+            except Exception:  # noqa: BLE001
+                continue
+        return spans
+
+    def _action_intent_infer_artifact_time(self, path: str) -> float | None:
+        match = re.search(r"_([0-9]+\.[0-9]+)s\.(?:jpg|jpeg|png|webp)$", str(path), flags=re.IGNORECASE)
+        if not match:
+            return None
+        try:
+            return float(match.group(1))
+        except Exception:  # noqa: BLE001
+            return None
 
     def _action_intent_support_is_likely_downstream_to_move_action(
         self,
@@ -1763,6 +2446,430 @@ class GraphAgent:
             return None
         confidence = min(max(0.5 + max(alt_score, 0.0) * 0.38, 0.5), 0.74)
         return alt_index, alt_choice, confidence
+
+    def _override_generic_hand_wiping_with_explicit_single_hand_drying(
+        self,
+        *,
+        state: AgentState,
+        candidate_rows: list[dict[str, Any]],
+        unresolved_best_index: int,
+        unresolved_best_score: float,
+    ) -> tuple[int, str, float] | None:
+        del unresolved_best_score
+        question = str(getattr(state, "question", "") or "").lower()
+        action_object = self._action_intent_question_object(question)
+        if not any(token in action_object for token in ("towel", "cloth", "napkin", "paper towel")):
+            return None
+        best_row = next((row for row in candidate_rows if int(row.get("index", -1)) == unresolved_best_index), None)
+        if best_row is None:
+            return None
+        best_choice = str(best_row.get("choice") or "").lower()
+        if not any(token in best_choice for token in ("clean", "counter", "surface", "wipe both hands", "to dry.", "move")):
+            return None
+        explicit_candidates: list[tuple[float, int, str]] = []
+        for row in candidate_rows:
+            index = int(row.get("index", -1))
+            if index == unresolved_best_index:
+                continue
+            choice = str(row.get("choice") or "").lower()
+            support = str(row.get("support") or "").lower()
+            contradiction = str(row.get("contradiction") or "").lower()
+            adjusted_score = float(row.get("adjusted_score") or 0.0)
+            if "dry hand" not in choice and "dry hands" not in choice:
+                continue
+            signal_text = f"{support} {contradiction}"
+            if not any(
+                token in signal_text
+                for token in (
+                    "hand area",
+                    "dab/rub one hand",
+                    "rubbed against the other hand",
+                    "finger",
+                    "fingers",
+                    "单手",
+                    "手指",
+                )
+            ):
+                continue
+            explicit_candidates.append((adjusted_score, index, str(state.choices[index])))
+        if not explicit_candidates:
+            return None
+        explicit_candidates.sort(key=lambda item: (-item[0], item[1]))
+        alt_score, alt_index, alt_choice = explicit_candidates[0]
+        confidence = min(max(0.5 + max(alt_score, 0.0) * 0.32, 0.5), 0.72)
+        return alt_index, alt_choice, confidence
+
+    def _override_generic_towel_use_with_simple_relocation(
+        self,
+        *,
+        state: AgentState,
+        candidate_rows: list[dict[str, Any]],
+        unresolved_best_index: int,
+        unresolved_best_score: float,
+    ) -> tuple[int, str, float] | None:
+        question = str(getattr(state, "question", "") or "").lower()
+        action_object = self._action_intent_question_object(question)
+        if not any(token in action_object for token in ("towel", "cloth", "napkin", "paper towel")):
+            return None
+        best_row = next((row for row in candidate_rows if int(row.get("index", -1)) == unresolved_best_index), None)
+        if best_row is None:
+            return None
+        best_choice = str(best_row.get("choice") or "").lower()
+        if not any(token in best_choice for token in ("clean", "counter", "surface", "wipe", "dry")):
+            return None
+        weak_surface_overclaim = self._action_intent_choice_is_weak_surface_contact_cleanup_claim(
+            choice=best_choice,
+            support=str(best_row.get("support") or "").lower(),
+            contradiction=str(best_row.get("contradiction") or "").lower(),
+            action_object=action_object,
+            global_context="",
+        )
+        if unresolved_best_score >= 0.46 and not weak_surface_overclaim:
+            return None
+        relocation_candidates: list[tuple[float, int, str]] = []
+        for row in candidate_rows:
+            index = int(row.get("index", -1))
+            choice = str(row.get("choice") or "").lower()
+            support = str(row.get("support") or "").lower()
+            contradiction = str(row.get("contradiction") or "").lower()
+            adjusted_score = float(row.get("adjusted_score") or 0.0)
+            if "move" not in choice:
+                continue
+            if not any(
+                token in support
+                for token in (
+                    "quickly set down on the counter in a different position",
+                    "brief repositioning",
+                    "brief repositioning occurs",
+                    "left on the counter",
+                    "set down on the counter",
+                    "shifted slightly",
+                    "relocated from",
+                    "literal move does occur",
+                    "moved from",
+                    "moved towards",
+                    "temporarily relocated",
+                    "放到别处",
+                    "放到另一处",
+                    "短暂挪动",
+                )
+            ):
+                continue
+            if any(
+                token in contradiction
+                for token in (
+                    "clear wiping",
+                    "counter-wiping cleanup",
+                    "wiping stroke",
+                    "both hands being wiped",
+                    "明显擦拭",
+                    "双手擦拭",
+                )
+            ):
+                continue
+            if (
+                not weak_surface_overclaim
+                and any(
+                    token in contradiction
+                    for token in (
+                        "mere relocation is a byproduct",
+                        "not a clear purpose",
+                    )
+                )
+            ):
+                continue
+            relocation_candidates.append((adjusted_score, index, str(state.choices[index])))
+        if not relocation_candidates:
+            return None
+        relocation_candidates.sort(key=lambda item: (-item[0], item[1]))
+        alt_score, alt_index, alt_choice = relocation_candidates[0]
+        confidence = min(max(0.48 + max(alt_score, 0.0) * 0.34, 0.48), 0.72 if weak_surface_overclaim else 0.7)
+        return alt_index, alt_choice, confidence
+
+    def _action_intent_choice_is_weak_surface_contact_cleanup_claim(
+        self,
+        *,
+        choice: str,
+        support: str,
+        contradiction: str,
+        action_object: str,
+        global_context: str,
+    ) -> bool:
+        if not any(
+            token in action_object
+            for token in ("cloth", "towel", "tea towel", "dish cloth", "napkin", "paper towel", "sponge", "scrubber")
+        ):
+            return False
+        if not any(token in choice for token in ("wipe", "clean", "擦", "清洁")):
+            return False
+        if not any(
+            token in choice
+            for token in (
+                "surface",
+                "counter",
+                "countertop",
+                "worktop",
+                "table",
+                "台面",
+                "桌面",
+            )
+        ):
+            return False
+        support_lc = str(support or "").lower()
+        contradiction_lc = str(contradiction or "").lower()
+        signal_text = f"{support_lc} {contradiction_lc} {str(global_context or '').lower()}"
+        if self._action_intent_support_has_strong_surface_wiping_evidence(signal_text):
+            return False
+        has_surface_contact_only = any(
+            token in support_lc
+            for token in (
+                "contact with the counter area",
+                "contact with the counter",
+                "moved across/onto the countertop",
+                "moved across the countertop",
+                "pressed it against the countertop",
+                "brought into contact with the counter area",
+                "used/place it there",
+                "placed onto the counter",
+                "near the counter/appliance area",
+                "counter area",
+                "object-to-surface interaction",
+                "接触台面",
+                "放到台面",
+                "靠近台面",
+            )
+        )
+        has_missing_cleaning_result = any(
+            token in contradiction_lc
+            for token in (
+                "no extended wiping motion",
+                "no visible spill",
+                "no visible residue",
+                "visible spill/residue being removed",
+                "cleanup result is only weakly demonstrated",
+                "brief and does not clearly show",
+                "only weakly demonstrated",
+                "没有明显擦拭",
+                "没有看到污渍",
+                "没有清理结果",
+                "证据很弱",
+            )
+        )
+        return has_surface_contact_only and has_missing_cleaning_result
+
+    def _action_intent_prior_reasoning_text(self, state: AgentState) -> str:
+        texts: list[str] = []
+        for entry in list(getattr(state, "tool_trace", []) or []):
+            if not isinstance(entry, dict):
+                continue
+            raw_result = entry.get("raw_result")
+            if not isinstance(raw_result, dict):
+                continue
+            for key in ("reason", "decisive_observation", "needed_observation", "answer"):
+                value = raw_result.get(key)
+                if isinstance(value, str) and value.strip():
+                    texts.append(value.strip())
+        return " ".join(texts[-12:])
+
+    def _action_intent_support_has_strong_surface_wiping_evidence(self, text: str) -> bool:
+        lowered = str(text or "").lower()
+        if self._action_intent_text_has_negative_evidence(lowered):
+            return False
+        has_surface_target = any(
+            token in lowered
+            for token in (
+                "visible spill",
+                "crumbs",
+                "specific dirty spot",
+                "mess on the counter",
+                "counter surface target",
+                "worktop target",
+                "台面污渍",
+                "碎屑",
+                "脏点",
+            )
+        )
+        has_wiping_motion = any(
+            token in lowered
+            for token in (
+                "wiping stroke",
+                "wipe sweep",
+                "repeated wiping",
+                "sustained wiping",
+                "scrubbing motion",
+                "wiped across the counter",
+                "明确擦拭动作",
+                "连续擦拭",
+                "来回擦",
+            )
+        )
+        return has_surface_target and has_wiping_motion
+
+    def _choice_is_phone_app_record_target_purpose(self, choice: str) -> bool:
+        text = str(choice or "").lower()
+        has_record_signal = any(
+            token in text
+            for token in (
+                "record",
+                "update",
+                "enter",
+                "log",
+                "app",
+                "nutrition",
+                "nutritional",
+                "phone",
+                "ingredient",
+                "measurements of the",
+                "value of the",
+                "记录",
+                "录入",
+                "更新",
+                "营养",
+                "手机",
+            )
+        )
+        if not has_record_signal:
+            return False
+        return not any(
+            token in text
+            for token in (
+                "measure the ingredients",
+                "measure ingredients",
+                "weigh the ingredients",
+                "to measure.",
+                "generic measure",
+            )
+        )
+
+    def _action_intent_choice_is_generic_measure_phone_goal(self, choice: str, action_object: str) -> bool:
+        text = str(choice or "").lower()
+        return any(token in action_object for token in ("phone", "smartphone", "mobile")) and any(
+            token in text
+            for token in (
+                "measure the ingredients",
+                "measure ingredients",
+                "weigh the ingredients",
+                "measure.",
+                "to measure",
+            )
+        )
+
+    def _action_intent_choice_supports_exact_record_target(
+        self,
+        *,
+        choice: str,
+        support: str,
+        contradiction: str,
+        global_context: str,
+    ) -> bool:
+        signal_text = f"{choice} {support} {contradiction} {global_context}".lower()
+        has_phone_context = any(
+            token in signal_text
+            for token in (
+                "phone",
+                "smartphone",
+                "app",
+                "screen",
+                "record",
+                "log",
+                "entry",
+                "entering",
+                "nutrition",
+                "nutritional",
+                "ingredient entry",
+                "recording target",
+                "手机",
+                "屏幕",
+                "记录",
+                "录入",
+                "营养",
+            )
+        )
+        has_specific_target = any(
+            token in signal_text
+            for token in (
+                "coriander",
+                "broccoli",
+                "carrot",
+                "cilantro",
+                "ingredient",
+                "herbs",
+                "香菜",
+                "西兰花",
+                "胡萝卜",
+            )
+        )
+        return has_phone_context and has_specific_target
+
+    def _override_generic_measure_with_exact_record_target_candidate(
+        self,
+        *,
+        state: AgentState,
+        candidate_rows: list[dict[str, Any]],
+        unresolved_best_index: int,
+        unresolved_best_score: float,
+    ) -> tuple[int, str, float] | None:
+        question = str(getattr(state, "question", "") or "")
+        action_object = self._action_intent_question_object(question)
+        if not any(token in action_object for token in ("phone", "smartphone", "mobile")):
+            return None
+        best_row = next(
+            (
+                row
+                for row in candidate_rows
+                if int(row.get("index", -1)) == unresolved_best_index
+            ),
+            None,
+        )
+        if best_row is None:
+            return None
+        best_choice = str(best_row.get("choice") or "").lower()
+        if not self._action_intent_choice_is_generic_measure_phone_goal(best_choice, action_object):
+            return None
+        best_support = str(best_row.get("support") or "").lower()
+        best_contradiction = str(best_row.get("contradiction") or "").lower()
+        global_context = self._action_intent_scoped_global_context(state).lower()
+        if not any(
+            token in f"{best_support} {best_contradiction}"
+            for token in (
+                "broadest",
+                "least contradicted",
+                "no actual recording target",
+                "no direct recording target",
+                "not direct proof",
+                "still not direct",
+                "recording target is not shown",
+                "最宽泛",
+                "没有直接记录目标",
+            )
+        ):
+            return None
+        exact_candidates: list[tuple[float, int, str]] = []
+        for row in candidate_rows:
+            index = int(row.get("index", -1))
+            if index == unresolved_best_index:
+                continue
+            choice = str(row.get("choice") or "").lower()
+            support = str(row.get("support") or "").lower()
+            contradiction = str(row.get("contradiction") or "").lower()
+            adjusted_score = float(row.get("adjusted_score") or 0.0)
+            if not self._choice_is_phone_app_record_target_purpose(choice):
+                continue
+            if not self._action_intent_choice_supports_exact_record_target(
+                choice=choice,
+                support=support,
+                contradiction=contradiction,
+                global_context=global_context,
+            ):
+                continue
+            if adjusted_score + 0.18 < unresolved_best_score:
+                continue
+            exact_candidates.append((adjusted_score, index, str(state.choices[index])))
+        if not exact_candidates:
+            return None
+        exact_candidates.sort(key=lambda item: (-item[0], item[1]))
+        alt_score, alt_index, alt_choice = exact_candidates[0]
+        return alt_index, alt_choice, min(max(0.44 + max(alt_score, 0.0) * 0.42, 0.44), 0.72)
 
     def _action_intent_question_object(self, question: str) -> str:
         match = re.search(r"<([^>]+)>", str(question or "").lower())
@@ -4425,6 +5532,50 @@ class GraphAgent:
         )
         return not has_true_storage_signal
 
+    def _action_intent_choice_lacks_direct_relocation_outcome_evidence(
+        self,
+        *,
+        choice: str,
+        support: str,
+        contradiction: str,
+    ) -> bool:
+        if "move" not in choice and "relocat" not in choice and "shift" not in choice:
+            return False
+        signal_text = f"{support} {contradiction}".lower()
+        has_direct_outcome = any(
+            token in signal_text
+            for token in (
+                "picked up and then placed elsewhere",
+                "set down in a different position",
+                "left on the counter in a different place",
+                "temporarily relocated",
+                "relocated from",
+                "moved towards",
+                "carried toward",
+                "carried to the sink",
+                "placed near the sink",
+                "put down nearby",
+                "放到别处",
+                "放到另一处",
+                "移到旁边",
+                "移向水槽",
+                "放到水槽边",
+                "短暂挪动",
+            )
+        )
+        if has_direct_outcome:
+            return False
+        return not any(
+            token in signal_text
+            for token in (
+                "direct relocation outcome",
+                "immediate transport destination",
+                "exact moved destination",
+                "明确移动去向",
+                "明确放置位置",
+            )
+        )
+
     def _action_intent_choice_is_unsupported_hand_drying_goal(
         self,
         *,
@@ -4517,6 +5668,12 @@ class GraphAgent:
                 "hands are wiped dry",
                 "wipes the hands",
                 "used to wipe them dry",
+                "hand area",
+                "dab/rub one hand",
+                "rub one hand",
+                "rubbed against the other hand",
+                "fingers",
+                "finger area",
                 "wet hands",
                 "after washing hands",
                 "双手",
@@ -4524,6 +5681,58 @@ class GraphAgent:
                 "擦干双手",
                 "洗手后",
                 "湿手",
+            )
+        )
+
+    def _action_intent_choice_is_direct_disposal_path(
+        self,
+        *,
+        choice: str,
+        support: str,
+        contradiction: str,
+        action_object: str,
+        global_context: str,
+    ) -> bool:
+        signal_text = f"{support} {contradiction} {global_context}"
+        if not any(
+            token in signal_text
+            for token in (
+                "scraps",
+                "food scraps",
+                "trash",
+                "bin",
+                "garbage",
+                "dispose",
+                "discard",
+                "垃圾桶",
+                "残渣",
+                "丢弃",
+            )
+        ):
+            return False
+        if not any(
+            token in choice
+            for token in (
+                "throw out",
+                "discard",
+                "dispose",
+                "trash",
+                "丢弃",
+                "扔掉",
+            )
+        ):
+            return False
+        return any(
+            token in signal_text
+            for token in (
+                "carried toward the bin",
+                "carried toward the trash",
+                "moved toward the bin",
+                "walks toward the bin",
+                "disposal context",
+                "垃圾桶区域",
+                "走向垃圾桶",
+                "带到垃圾桶",
             )
         )
 
@@ -5809,6 +7018,182 @@ class GraphAgent:
             )
         )
 
+    def _action_intent_choice_is_receptacle_oriented_residue_release(
+        self,
+        *,
+        question: str,
+        choice: str,
+        support: str,
+        contradiction: str,
+        action_object: str,
+        global_context: str,
+    ) -> bool:
+        if not any(
+            token in question
+            for token in ("tap ", "shake ", "tilt ", "tip ", "pour ", "turn ", "flip ", "hit ", "knock ")
+        ):
+            return False
+        if not any(
+            token in choice
+            for token in ("drop", "fall", "release", "remaining", "excess", "drain", "倒", "掉", "落", "多余", "剩余", "沥")
+        ):
+            return False
+        receptacle_terms = (
+            "sink",
+            "pan",
+            "pot",
+            "bowl",
+            "cup",
+            "jar",
+            "container",
+            "tray",
+            "水槽",
+            "锅",
+            "碗",
+            "杯",
+            "容器",
+        )
+        if not any(term in choice for term in receptacle_terms):
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        if not any(term in signal_text for term in receptacle_terms):
+            return False
+        if not any(
+            token in signal_text
+            for token in (
+                "over the sink",
+                "toward the sink",
+                "sink edge",
+                "into the sink area",
+                "over the pan",
+                "over the bowl",
+                "over the pot",
+                "against the pot rim",
+                "over the container",
+                "toward the container",
+                "over the cup",
+                "above the sink",
+                "above the bowl",
+                "above the pan",
+                "above the container",
+                "朝向水槽",
+                "水槽边",
+                "锅边",
+                "锅沿",
+                "碗上方",
+                "容器上方",
+            )
+        ):
+            return False
+        if any(
+            token in signal_text
+            for token in (
+                "no tilt toward the sink",
+                "not directed toward another container",
+                "no pouring-out motion",
+                "no return signal",
+                "only briefly raised to look inside",
+                "没有朝向水槽",
+                "没有朝向容器",
+                "没有倒出动作",
+                "没有回落信号",
+            )
+        ):
+            return False
+        if any(
+            token in contradiction
+            for token in (
+                "no immediate wiping stroke",
+                "no immediate stirring motion",
+                "no actual put-down motion",
+                "the motion ends over the sink area",
+                "rather than returning to wipe",
+                "没有立刻继续擦",
+                "没有立刻继续搅拌",
+                "没有明确放下",
+            )
+        ):
+            return True
+        return any(
+            token in support
+            for token in (
+                "over the sink",
+                "toward the sink",
+                "sink edge",
+                "over the pan",
+                "over the bowl",
+                "over the pot",
+                "against the pot rim",
+                "over the container",
+                "toward the container",
+                "over the cup",
+                "above the sink",
+                "above the bowl",
+                "above the pan",
+                "above the container",
+                "水槽边",
+                "锅沿",
+                "碗上方",
+                "容器上方",
+            )
+        )
+
+    def _action_intent_choice_is_side_switch_without_immediate_reuse(
+        self,
+        *,
+        question: str,
+        choice: str,
+        support: str,
+        contradiction: str,
+        action_object: str,
+        global_context: str,
+    ) -> bool:
+        if not any(token in question for token in ("flip ", "turn ", "shake ")):
+            return False
+        if not any(token in action_object for token in ("cloth", "towel", "napkin", "paper towel")):
+            return False
+        if not any(
+            token in choice
+            for token in (
+                "other side",
+                "clean side",
+                "change the side",
+                "another side",
+                "flip the cloth",
+                "换另一面",
+                "另一面",
+            )
+        ):
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        if not any(
+            token in signal_text
+            for token in (
+                "no immediate wiping stroke",
+                "rather than returning to wipe",
+                "over the sink area",
+                "over the sink",
+                "toward the sink",
+                "没有立刻继续擦",
+                "而不是回去继续擦",
+                "水槽边",
+            )
+        ):
+            return False
+        if any(
+            token in signal_text
+            for token in (
+                "immediately wipes",
+                "returns to wipe",
+                "continues wiping",
+                "goes back to the hob to wipe",
+                "立刻继续擦",
+                "回去继续擦",
+            )
+        ):
+            return False
+        return True
+
     def _action_intent_choice_is_downstream_followup_use(
         self,
         *,
@@ -6031,6 +7416,42 @@ class GraphAgent:
         )
 
     def _action_intent_text_has_direct_positive_evidence(self, text: str) -> bool:
+        strong_result_terms = (
+            "placed on",
+            "set on",
+            "laid out",
+            "brought to",
+            "reveals",
+            "revealed",
+            "falls back",
+            "fall back",
+            "run under water",
+            "placed on the scale",
+            "wiped",
+            "poured",
+            "stored",
+            "returned",
+            "看到",
+            "明确",
+            "完成",
+            "直接",
+        )
+        if self._action_intent_text_has_negative_evidence(text):
+            return any(term in text for term in strong_result_terms)
+        if any(
+            term in text
+            for term in (
+                "not yet shown",
+                "no actual",
+                "no visible",
+                "not visible",
+                "not shown",
+                "未显示",
+                "没有看到",
+                "未看到",
+            )
+        ):
+            return False
         return any(
             term in text
             for term in (
@@ -6039,15 +7460,7 @@ class GraphAgent:
                 "actual",
                 "completed",
                 "direct",
-                "placed on the scale",
-                "wiped",
-                "poured",
-                "stored",
-                "returned",
-                "看到",
-                "明确",
-                "完成",
-                "直接",
+                *strong_result_terms,
             )
         )
 

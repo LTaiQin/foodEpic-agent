@@ -29,8 +29,8 @@
 ### 16.2.2 当前稳定基线
 
 - 专项回归命令：`pytest -q tests/test_graph_agent.py -k 'action_intent'`
-- 2026-06-07 当前结果：`227 passed, 344 deselected`
-- 相比本轮进入专项时的起点 `107 passed, 300 deselected`，当前阶段性增量为 `+120 passed`
+- 2026-06-07 当前结果：`229 passed, 344 deselected`
+- 相比本轮进入专项时的起点 `107 passed, 300 deselected`，当前阶段性增量为 `+122 passed`
 - 当前执行策略：why 逻辑不再追求“接近完美覆盖”，而是维持“足够可用、回归稳定、无明显结构性退化”的维护态；后续优先级切换到完整 agent 功能闭环与小样本真实验证。
 
 这说明 why 题已经不再是“直接把问题丢给模型猜答案”，而是已经存在完整骨架：
@@ -245,7 +245,14 @@
 - 本轮新增并通过 `2` 条保护测试，覆盖：
   - strict `residue_release` bucket 的 textual fallback 会继续阻断 finish
   - strict `residue_release` bucket 在 planner 中不会再直接 `finish`，而是继续补帧或转专用裁决
-- 本轮专项总回归更新为 `227 passed, 344 deselected`
+- 本轮提交：`graph_agent` 的 unresolved rerank 继续向 `residue_release` 桶收紧，不再只相信模型已经明确写出的“掉回锅/碗/水槽”结果词：
+  - 当选项本身明确是 `drop/fall/release ... into sink/pan/bowl/container`，且支持/上下文也能对上这个接纳位置时，会给 residue-release 一个较弱但结构化的加分；
+  - 同时，对于 `flip cloth / turn cloth` 这类题，如果证据明确说“翻完后没有立刻继续擦，而且动作结束在 sink 方向”，`change side / other side / clean side` 这类 side-switch 解释会被降权；
+  - 这一步不是让所有靠近 sink/bowl 的动作都变成 residue-release，而是专门补“结果词没被模型写全，但接纳位置结构已经足够明显”的残差。
+- 本轮新增并通过 `2` 条定向测试，覆盖：
+  - `flip orange cloth` 的 unresolved rerank 会从 `change side` 翻正到 `drop the crumb into the sink`
+  - 若选项里根本没有明确目标接纳位置，新的弱 residue-release 规则不会乱触发
+- 本轮专项总回归更新为 `229 passed, 344 deselected`
 - 本轮小规模真实 probe：
   - 旧 `towel-cluster` 摘要中 `flip orange cloth` 仍是残差，正是本轮语义救援要消除的典型失败；
   - 新 `state-change-cluster` probe 已完成 `1/2`，当前已完成样本准确率 `1.0`；剩余样本仍在跑，说明本轮修改至少已开始覆盖真实状态变化桶，而不只是单测
