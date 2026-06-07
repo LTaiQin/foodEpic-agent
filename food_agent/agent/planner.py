@@ -6947,6 +6947,42 @@ class GraphAgentPlanner:
             if token in fixture_targets
         ]
 
+    def _action_intent_choice_is_same_object_active_use(self, *, choice: str, action_object: str) -> bool:
+        action_object_lc = str(action_object or "").strip().lower()
+        if not action_object_lc:
+            return False
+        choice_lc = str(choice or "").strip().lower()
+        object_tokens = [token for token in re.split(r"[^a-z0-9]+", action_object_lc) if token]
+        if object_tokens and not all(token in choice_lc for token in object_tokens):
+            return False
+        return any(
+            token in choice_lc
+            for token in (
+                "rinse",
+                "wash",
+                "clean",
+                "wipe",
+                "dry",
+                "fill",
+                "open",
+                "uncap",
+                "cap",
+                "lid",
+                "unscrew",
+                "shake",
+                "hold",
+                "in hand",
+                "while holding",
+                "冲洗",
+                "清洗",
+                "擦",
+                "拿着",
+                "打开",
+                "拧开",
+                "摇",
+            )
+        )
+
     def _action_intent_unresolved_rerank_downstream_object_hint(self, state: AgentState) -> str:
         reason = self._action_intent_recent_unresolved_rerank_withheld_reason(state)
         if not reason or not any(
@@ -6984,6 +7020,54 @@ class GraphAgentPlanner:
         action_object = self._action_intent_question_object_hint(state)
         for token in self._action_intent_choice_fixture_target_candidates(choice=choice, action_object=action_object):
             return token
+        return ""
+
+    def _action_intent_unresolved_rerank_hand_free_object_hint(self, state: AgentState) -> str:
+        reason = self._action_intent_recent_unresolved_rerank_withheld_reason(state)
+        if not reason or "timeline_review_hand_free_or_fixture_gap" not in reason:
+            return ""
+        latest = self._latest_action_intent_resolution_payload(state)
+        if latest is None:
+            return ""
+        _tool_name, payload = latest
+        choices = [str(choice) for choice in getattr(state, "choices", [])]
+        best_index = self._coerce_choice_index(payload.get("best_index"), choices)
+        if best_index is None:
+            return ""
+        action_object = self._action_intent_question_object_hint(state)
+        best_choice = choices[best_index]
+        best_object_targets = [
+            token
+            for token in self._action_intent_choice_target_object_candidates(choice=best_choice, action_object=action_object)
+            if token not in set(self._action_intent_choice_fixture_target_candidates(choice=best_choice, action_object=action_object))
+        ]
+        if best_object_targets:
+            return best_object_targets[0]
+        if self._action_intent_choice_is_same_object_active_use(choice=best_choice, action_object=action_object):
+            return action_object
+        candidate_rows: list[tuple[float, int]] = []
+        for item in payload.get("candidate_evidence") or []:
+            if not isinstance(item, dict):
+                continue
+            index = self._coerce_choice_index(item.get("index"), choices)
+            if index is None or index == best_index:
+                continue
+            try:
+                score = float(item.get("score") or 0.0)
+            except Exception:  # noqa: BLE001
+                score = 0.0
+            candidate_rows.append((score, index))
+        for _score, index in sorted(candidate_rows, key=lambda pair: (-pair[0], pair[1])):
+            choice = choices[index]
+            if self._action_intent_choice_is_same_object_active_use(choice=choice, action_object=action_object):
+                return action_object
+            object_targets = [
+                token
+                for token in self._action_intent_choice_target_object_candidates(choice=choice, action_object=action_object)
+                if token not in set(self._action_intent_choice_fixture_target_candidates(choice=choice, action_object=action_object))
+            ]
+            if object_targets:
+                return object_targets[0]
         return ""
 
     def _build_action_intent_finalize_withheld_long_horizon_revisit_decision(
@@ -7160,6 +7244,58 @@ class GraphAgentPlanner:
         if selected is None:
             return PlannerDecision(
                 thought=f"{thought} 继续重新检索下游装置/fixture `{downstream_target}` 的更晚轨迹。",
+                tool="query_object",
+                args={"query": downstream_target, "limit": 24},
+            )
+        _node, start_time, end_time = selected
+        query_time = start_time if abs(end_time - start_time) < 0.25 else (start_time + min(end_time, start_time + 1.2)) / 2
+        return PlannerDecision(
+            thought=thought,
+            tool="query_spatial_context",
+            args={
+                "time_s": query_time,
+                "object_name": downstream_target,
+                "limit": 16,
+            },
+        )
+
+    def _build_action_intent_unresolved_rerank_hand_free_object_revisit_decision(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        thought: str,
+    ) -> PlannerDecision | None:
+        downstream_target = self._action_intent_unresolved_rerank_hand_free_object_hint(state)
+        if not downstream_target:
+            return None
+        nodes = self._latest_action_intent_long_horizon_nodes(state, object_hint=downstream_target)
+        if not nodes:
+            return PlannerDecision(
+                thought=f"{thought} 先定位 hand-free 背后的真实下游对象 `{downstream_target}` 在更晚时刻的轨迹。",
+                tool="query_object",
+                args={"query": downstream_target, "limit": 24},
+            )
+        anchor_time = self._latest_action_intent_target_spatial_anchor_time(state)
+        latest_followup_end = self._latest_action_intent_followup_end_time(state)
+        after_time: float | None = None
+        if anchor_time is not None and latest_followup_end is not None:
+            after_time = max(anchor_time, latest_followup_end)
+        elif latest_followup_end is not None:
+            after_time = latest_followup_end
+        else:
+            after_time = anchor_time
+        min_start_time = None if after_time is None else float(after_time) + 0.15
+        selected = self._action_intent_select_long_horizon_node(
+            state=state,
+            hints=hints,
+            nodes=nodes,
+            min_start_time=min_start_time,
+            object_hint=downstream_target,
+        )
+        if selected is None:
+            return PlannerDecision(
+                thought=f"{thought} 继续重新检索 hand-free 背后的真实下游对象 `{downstream_target}` 的更晚轨迹。",
                 tool="query_object",
                 args={"query": downstream_target, "limit": 24},
             )
@@ -8723,6 +8859,13 @@ class GraphAgentPlanner:
             )
             if unresolved_rerank_downstream_fixture_revisit is not None:
                 return unresolved_rerank_downstream_fixture_revisit
+            unresolved_rerank_hand_free_object_revisit = self._build_action_intent_unresolved_rerank_hand_free_object_revisit_decision(
+                state=state,
+                hints=hints,
+                thought="why 题 unresolved rerank 表明当前只是停留在泛化 hand-free 描述上；优先去追真正被拿起、被使用，或继续被操作的下游对象，而不是把“手空出来了”当成最终目的。",
+            )
+            if unresolved_rerank_hand_free_object_revisit is not None:
+                return unresolved_rerank_hand_free_object_revisit
             unresolved_rerank_downstream_target_revisit = self._build_action_intent_unresolved_rerank_downstream_target_revisit_decision(
                 state=state,
                 hints=hints,
@@ -8835,6 +8978,13 @@ class GraphAgentPlanner:
             )
             if unresolved_rerank_downstream_fixture_revisit is not None:
                 return unresolved_rerank_downstream_fixture_revisit
+            unresolved_rerank_hand_free_object_revisit = self._build_action_intent_unresolved_rerank_hand_free_object_revisit_decision(
+                state=state,
+                hints=hints,
+                thought="why 题 unresolved rerank 表明当前只看到“腾出一只手”这类中间态；优先去追 hand-free 之后真正要操作的对象或同一物体的后续用途。",
+            )
+            if unresolved_rerank_hand_free_object_revisit is not None:
+                return unresolved_rerank_hand_free_object_revisit
             unresolved_rerank_downstream_target_revisit = self._build_action_intent_unresolved_rerank_downstream_target_revisit_decision(
                 state=state,
                 hints=hints,
