@@ -67,6 +67,50 @@ RAW_REVISIT_TOOLS = {
 }
 
 
+def count_relation_reuse_from_result(result) -> int:
+    return sum(1 for item in result.working_memory if isinstance(item, str) and item.startswith("reuse_relation:"))
+
+
+def count_planner_overrides_from_result(result) -> int:
+    return sum(1 for item in result.working_memory if isinstance(item, str) and item.startswith("planner_override "))
+
+
+def count_verifier_blocked_finish_from_result(result) -> int:
+    return sum(
+        1
+        for item in result.working_memory
+        if isinstance(item, str) and item.startswith("planner_override verifier_blocked_finish=")
+    )
+
+
+def count_failed_tool_recoveries(tool_trace: list[dict[str, Any]]) -> int:
+    return count_recovery_events(tool_trace, failure_key="tool_failed")
+
+
+def count_ineffective_tool_avoidances(tool_trace: list[dict[str, Any]]) -> int:
+    return count_recovery_events(tool_trace, failure_key="tool_ineffective")
+
+
+def count_recovery_events(tool_trace: list[dict[str, Any]], *, failure_key: str) -> int:
+    recoveries = 0
+    pending_failed_tool = ""
+    for entry in tool_trace:
+        if not isinstance(entry, dict):
+            continue
+        tool_name = str(entry.get("tool") or "")
+        raw_result = entry.get("raw_result")
+        if isinstance(raw_result, dict) and raw_result.get(failure_key):
+            if tool_name:
+                pending_failed_tool = tool_name
+            continue
+        if pending_failed_tool:
+            if not tool_name or tool_name == pending_failed_tool:
+                continue
+            recoveries += 1
+            pending_failed_tool = ""
+    return recoveries
+
+
 def parse_args() -> argparse.Namespace:
     defaults = ProjectPaths.from_env()
     parser = argparse.ArgumentParser(description=__doc__)
@@ -79,6 +123,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-suffix", default=None)
     parser.add_argument("--max-steps", type=int, default=8)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--random-seed", type=int, default=None)
     parser.add_argument("--no-video-session-mode", action="store_false", dest="video_session_mode")
     parser.set_defaults(video_session_mode=True)
     return parser.parse_args()
@@ -94,6 +139,7 @@ def main() -> int:
         args.limit,
         args.task_family,
         args.task_family_group,
+        random_seed=args.random_seed,
         video_session_mode=args.video_session_mode,
     )
     run_name = build_run_name(args.task_family, args.task_family_group, args.limit, args.run_suffix)
@@ -179,6 +225,20 @@ def main() -> int:
                 raw_revisit_count=count_tools(tool_calls, RAW_REVISIT_TOOLS),
                 structured_query_count=count_tools(tool_calls, STRUCTURED_QUERY_TOOLS),
                 session_video_position=video_positions.get(sample.vqa_id, 0),
+                relation_reuse_count=count_relation_reuse_from_result(result),
+                planner_override_count=count_planner_overrides_from_result(result),
+                verifier_blocked_finish_count=count_verifier_blocked_finish_from_result(result),
+                tool_failure_count=len(result.tool_failures),
+                ineffective_tool_count=len(result.ineffective_tools),
+                failed_tool_recovery_count=count_failed_tool_recoveries(result.tool_trace),
+                ineffective_tool_avoidance_count=count_ineffective_tool_avoidances(result.tool_trace),
+                tool_call_count=len(tool_calls),
+                reasoning_step_count=len(result.tool_trace),
+                elapsed_seconds=float(result.elapsed_seconds),
+                prompt_tokens=float((result.usage or {}).get("prompt_tokens") or 0.0),
+                completion_tokens=float((result.usage or {}).get("completion_tokens") or 0.0),
+                total_tokens=float((result.usage or {}).get("total_tokens") or 0.0),
+                estimated_cost=float((result.usage or {}).get("estimated_cost") or 0.0),
             )
         except Exception as exc:  # noqa: BLE001
             pred = VQAPrediction(
@@ -199,6 +259,20 @@ def main() -> int:
                 raw_revisit_count=0,
                 structured_query_count=0,
                 session_video_position=video_positions.get(sample.vqa_id, 0),
+                relation_reuse_count=0,
+                planner_override_count=0,
+                verifier_blocked_finish_count=0,
+                tool_failure_count=0,
+                ineffective_tool_count=0,
+                failed_tool_recovery_count=0,
+                ineffective_tool_avoidance_count=0,
+                tool_call_count=0,
+                reasoning_step_count=0,
+                elapsed_seconds=None,
+                prompt_tokens=0.0,
+                completion_tokens=0.0,
+                total_tokens=0.0,
+                estimated_cost=0.0,
             )
         append_prediction_jsonl(pred_path, pred)
         running[pred.sample_id] = pred
@@ -279,16 +353,38 @@ def load_selected_samples(
     task_family: str | None,
     task_family_group: str | None,
     *,
+    random_seed: int | None = None,
     video_session_mode: bool = True,
 ):
     if task_family_group:
         samples = []
         for family in TASK_FAMILY_GROUPS[task_family_group]:
             samples.extend(load_vqa_samples(index_dir, limit=limit, task_family=family))
+        if random_seed is not None:
+            import random
+
+            rng = random.Random(random_seed)
+            rng.shuffle(samples)
+            samples = samples[:limit]
         if video_session_mode:
             return sorted(samples, key=lambda sample: (str(sample.primary_video_id or ""), sample.task_family, sample.vqa_id))
         return sorted(samples, key=lambda sample: (sample.task_family, sample.vqa_id))
-    samples = load_vqa_samples(index_dir, limit=limit, task_family=task_family)
+    if random_seed is None:
+        samples = load_vqa_samples(index_dir, limit=limit, task_family=task_family)
+    else:
+        import random
+        import pandas as pd
+
+        df = pd.read_parquet(index_dir / "vqa_samples.parquet")
+        if task_family:
+            df = df[df["task_family"] == task_family]
+        rows = df.to_dict("records")
+        rng = random.Random(random_seed)
+        rng.shuffle(rows)
+        rows = rows[:limit]
+        from food_agent.vqa import VQASample
+
+        samples = [VQASample.from_row(pd.Series(row)) for row in rows]
     if video_session_mode:
         return sorted(samples, key=lambda sample: (str(sample.primary_video_id or ""), sample.task_family, sample.vqa_id))
     return sorted(samples, key=lambda sample: (sample.task_family, sample.vqa_id))
@@ -314,6 +410,20 @@ def load_predictions_by_id(path: Path) -> dict[str, VQAPrediction]:
         payload.setdefault("raw_revisit_count", 0)
         payload.setdefault("structured_query_count", 0)
         payload.setdefault("session_video_position", 0)
+        payload.setdefault("relation_reuse_count", 0)
+        payload.setdefault("planner_override_count", 0)
+        payload.setdefault("verifier_blocked_finish_count", 0)
+        payload.setdefault("tool_failure_count", 0)
+        payload.setdefault("ineffective_tool_count", 0)
+        payload.setdefault("failed_tool_recovery_count", 0)
+        payload.setdefault("ineffective_tool_avoidance_count", 0)
+        payload.setdefault("tool_call_count", len(payload.get("tool_calls") or []))
+        payload.setdefault("reasoning_step_count", len(payload.get("tool_calls") or []))
+        payload.setdefault("elapsed_seconds", None)
+        payload.setdefault("prompt_tokens", 0.0)
+        payload.setdefault("completion_tokens", 0.0)
+        payload.setdefault("total_tokens", 0.0)
+        payload.setdefault("estimated_cost", 0.0)
         pred = VQAPrediction(**payload)
         latest[pred.sample_id] = pred
     return latest
@@ -338,6 +448,20 @@ def build_progress_payload(*, total: int, predictions: list[VQAPrediction]) -> d
     reuse_total = sum(pred.reuse_memory_count for pred in predictions)
     raw_total = sum(pred.raw_revisit_count for pred in predictions)
     structured_total = sum(pred.structured_query_count for pred in predictions)
+    relation_reuse_total = sum(pred.relation_reuse_count for pred in predictions)
+    planner_override_total = sum(pred.planner_override_count for pred in predictions)
+    verifier_block_total = sum(pred.verifier_blocked_finish_count for pred in predictions)
+    tool_failure_total = sum(pred.tool_failure_count for pred in predictions)
+    ineffective_tool_total = sum(pred.ineffective_tool_count for pred in predictions)
+    failed_tool_recovery_total = sum(pred.failed_tool_recovery_count for pred in predictions)
+    ineffective_tool_avoidance_total = sum(pred.ineffective_tool_avoidance_count for pred in predictions)
+    tool_call_total = sum(pred.tool_call_count for pred in predictions)
+    reasoning_step_total = sum(pred.reasoning_step_count for pred in predictions)
+    latency_values = [float(pred.elapsed_seconds) for pred in predictions if pred.elapsed_seconds is not None]
+    prompt_token_total = sum(float(pred.prompt_tokens) for pred in predictions)
+    completion_token_total = sum(float(pred.completion_tokens) for pred in predictions)
+    total_token_total = sum(float(pred.total_tokens) for pred in predictions)
+    estimated_cost_total = sum(float(pred.estimated_cost) for pred in predictions)
     return {
         "total": total,
         "completed": completed,
@@ -347,6 +471,20 @@ def build_progress_payload(*, total: int, predictions: list[VQAPrediction]) -> d
         "avg_reuse_memory_count": (reuse_total / completed) if completed else 0.0,
         "avg_raw_revisit_count": (raw_total / completed) if completed else 0.0,
         "avg_structured_query_count": (structured_total / completed) if completed else 0.0,
+        "avg_relation_reuse_count": (relation_reuse_total / completed) if completed else 0.0,
+        "avg_planner_override_count": (planner_override_total / completed) if completed else 0.0,
+        "avg_verifier_blocked_finish_count": (verifier_block_total / completed) if completed else 0.0,
+        "avg_tool_failure_count": (tool_failure_total / completed) if completed else 0.0,
+        "avg_ineffective_tool_count": (ineffective_tool_total / completed) if completed else 0.0,
+        "avg_failed_tool_recovery_count": (failed_tool_recovery_total / completed) if completed else 0.0,
+        "avg_ineffective_tool_avoidance_count": (ineffective_tool_avoidance_total / completed) if completed else 0.0,
+        "avg_tool_call_count": (tool_call_total / completed) if completed else 0.0,
+        "avg_reasoning_step_count": (reasoning_step_total / completed) if completed else 0.0,
+        "avg_elapsed_seconds": (sum(latency_values) / len(latency_values)) if latency_values else 0.0,
+        "avg_prompt_tokens": (prompt_token_total / completed) if completed else 0.0,
+        "avg_completion_tokens": (completion_token_total / completed) if completed else 0.0,
+        "avg_total_tokens": (total_token_total / completed) if completed else 0.0,
+        "avg_estimated_cost": (estimated_cost_total / completed) if completed else 0.0,
     }
 
 
@@ -368,6 +506,20 @@ def build_failure_cases(predictions: list[VQAPrediction]) -> list[dict[str, Any]
                 "raw_revisit_count": pred.raw_revisit_count,
                 "structured_query_count": pred.structured_query_count,
                 "session_video_position": pred.session_video_position,
+                "relation_reuse_count": pred.relation_reuse_count,
+                "planner_override_count": pred.planner_override_count,
+                "verifier_blocked_finish_count": pred.verifier_blocked_finish_count,
+                "tool_failure_count": pred.tool_failure_count,
+                "ineffective_tool_count": pred.ineffective_tool_count,
+                "failed_tool_recovery_count": pred.failed_tool_recovery_count,
+                "ineffective_tool_avoidance_count": pred.ineffective_tool_avoidance_count,
+                "tool_call_count": pred.tool_call_count,
+                "reasoning_step_count": pred.reasoning_step_count,
+                "elapsed_seconds": pred.elapsed_seconds,
+                "prompt_tokens": pred.prompt_tokens,
+                "completion_tokens": pred.completion_tokens,
+                "total_tokens": pred.total_tokens,
+                "estimated_cost": pred.estimated_cost,
             }
         )
     return cases
@@ -413,6 +565,23 @@ def build_video_session_summary(predictions: list[VQAPrediction]) -> dict[str, A
                 "avg_reuse_memory_count": sum(pred.reuse_memory_count for pred in preds) / count if count else 0.0,
                 "avg_raw_revisit_count": sum(pred.raw_revisit_count for pred in preds) / count if count else 0.0,
                 "avg_structured_query_count": sum(pred.structured_query_count for pred in preds) / count if count else 0.0,
+                "avg_relation_reuse_count": sum(pred.relation_reuse_count for pred in preds) / count if count else 0.0,
+                "avg_planner_override_count": sum(pred.planner_override_count for pred in preds) / count if count else 0.0,
+                "avg_verifier_blocked_finish_count": sum(pred.verifier_blocked_finish_count for pred in preds) / count if count else 0.0,
+                "avg_tool_failure_count": sum(pred.tool_failure_count for pred in preds) / count if count else 0.0,
+                "avg_ineffective_tool_count": sum(pred.ineffective_tool_count for pred in preds) / count if count else 0.0,
+                "avg_failed_tool_recovery_count": sum(pred.failed_tool_recovery_count for pred in preds) / count if count else 0.0,
+                "avg_ineffective_tool_avoidance_count": sum(pred.ineffective_tool_avoidance_count for pred in preds) / count if count else 0.0,
+                "avg_tool_call_count": sum(pred.tool_call_count for pred in preds) / count if count else 0.0,
+                "avg_reasoning_step_count": sum(pred.reasoning_step_count for pred in preds) / count if count else 0.0,
+                "avg_elapsed_seconds": (
+                    sum(float(pred.elapsed_seconds) for pred in preds if pred.elapsed_seconds is not None)
+                    / max(sum(1 for pred in preds if pred.elapsed_seconds is not None), 1)
+                ),
+                "avg_prompt_tokens": sum(float(pred.prompt_tokens) for pred in preds) / count if count else 0.0,
+                "avg_completion_tokens": sum(float(pred.completion_tokens) for pred in preds) / count if count else 0.0,
+                "avg_total_tokens": sum(float(pred.total_tokens) for pred in preds) / count if count else 0.0,
+                "avg_estimated_cost": sum(float(pred.estimated_cost) for pred in preds) / count if count else 0.0,
                 "task_family_counts": dict(task_counts),
                 "tool_counts": dict(tool_counts),
             }
@@ -420,6 +589,85 @@ def build_video_session_summary(predictions: list[VQAPrediction]) -> dict[str, A
     return {
         "video_count": len(video_summaries),
         "videos": video_summaries,
+    }
+
+
+def build_reuse_benefit_summary(predictions: list[VQAPrediction]) -> dict[str, Any]:
+    by_video: dict[str, list[VQAPrediction]] = {}
+    reuse_examples: list[dict[str, Any]] = []
+    cached_artifact_hits = 0
+    graph_seed_hits = 0
+    session_follow_up_hits = 0
+
+    for pred in predictions:
+        by_video.setdefault(str(pred.video_id or ""), []).append(pred)
+        if pred.reuse_memory_count > 0 or pred.session_video_position >= 2:
+            session_follow_up_hits += 1
+            if len(reuse_examples) < 10:
+                reuse_examples.append(
+                    {
+                        "sample_id": pred.sample_id,
+                        "video_id": pred.video_id,
+                        "task_family": pred.task_family,
+                        "session_video_position": pred.session_video_position,
+                        "reuse_memory_count": pred.reuse_memory_count,
+                        "raw_revisit_count": pred.raw_revisit_count,
+                        "structured_query_count": pred.structured_query_count,
+                        "tool_call_count": pred.tool_call_count,
+                        "reasoning_step_count": pred.reasoning_step_count,
+                        "elapsed_seconds": pred.elapsed_seconds,
+                    }
+                )
+        if pred.relation_reuse_count > 0:
+            graph_seed_hits += 1
+        if any(tool == "retrieve_cached_artifacts" for tool in pred.tool_calls):
+            cached_artifact_hits += 1
+
+    comparable_videos = 0
+    first_raw_total = 0.0
+    follow_raw_total = 0.0
+    first_structured_total = 0.0
+    follow_structured_total = 0.0
+    first_tool_total = 0.0
+    follow_tool_total = 0.0
+
+    for preds in by_video.values():
+        ordered = sorted(preds, key=lambda item: (item.session_video_position, item.sample_id))
+        first = [item for item in ordered if item.session_video_position == 1]
+        follow = [item for item in ordered if item.session_video_position >= 2]
+        if not first or not follow:
+            continue
+        comparable_videos += 1
+        first_row = first[0]
+        first_raw_total += first_row.raw_revisit_count
+        first_structured_total += first_row.structured_query_count
+        first_tool_total += len(first_row.tool_calls)
+        follow_raw_total += sum(item.raw_revisit_count for item in follow) / len(follow)
+        follow_structured_total += sum(item.structured_query_count for item in follow) / len(follow)
+        follow_tool_total += sum(item.tool_call_count for item in follow) / len(follow)
+
+    first_raw_avg = (first_raw_total / comparable_videos) if comparable_videos else 0.0
+    follow_raw_avg = (follow_raw_total / comparable_videos) if comparable_videos else 0.0
+    first_structured_avg = (first_structured_total / comparable_videos) if comparable_videos else 0.0
+    follow_structured_avg = (follow_structured_total / comparable_videos) if comparable_videos else 0.0
+    first_tool_avg = (first_tool_total / comparable_videos) if comparable_videos else 0.0
+    follow_tool_avg = (follow_tool_total / comparable_videos) if comparable_videos else 0.0
+
+    return {
+        "session_follow_up_hits": session_follow_up_hits,
+        "graph_seed_hits": graph_seed_hits,
+        "cached_artifact_hits": cached_artifact_hits,
+        "comparable_video_count": comparable_videos,
+        "first_question_avg_raw_revisit_count": first_raw_avg,
+        "follow_up_avg_raw_revisit_count": follow_raw_avg,
+        "first_question_avg_structured_query_count": first_structured_avg,
+        "follow_up_avg_structured_query_count": follow_structured_avg,
+        "first_question_avg_tool_calls": first_tool_avg,
+        "follow_up_avg_tool_calls": follow_tool_avg,
+        "follow_up_minus_first_raw_revisit_count": follow_raw_avg - first_raw_avg,
+        "follow_up_minus_first_structured_query_count": follow_structured_avg - first_structured_avg,
+        "follow_up_minus_first_tool_calls": follow_tool_avg - first_tool_avg,
+        "reuse_examples": reuse_examples,
     }
 
 
@@ -443,6 +691,7 @@ def update_run_artifacts(
     progress = build_progress_payload(total=len(samples), predictions=predictions)
     failure_cases = build_failure_cases(predictions)
     video_session_summary = build_video_session_summary(predictions)
+    reuse_benefit_summary = build_reuse_benefit_summary(predictions)
     summary = {
         "run_name": run_name,
         "sample_count": len(samples),
@@ -458,6 +707,7 @@ def update_run_artifacts(
         "failure_summary": failure_summary,
         "progress": progress,
         "video_session_summary": video_session_summary,
+        "reuse_benefit_summary": reuse_benefit_summary,
     }
     metrics_path.write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
     failures_path.write_text(json.dumps(failure_summary, ensure_ascii=False, indent=2), encoding="utf-8")

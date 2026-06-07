@@ -39,6 +39,22 @@ class ProjectPaths:
     def output_root(self) -> Path:
         return self.config.output_root
 
+    @property
+    def graph_memory_root(self) -> Path:
+        return self.config.graph_memory_root
+
+    @property
+    def graph_agent_artifacts_root(self) -> Path:
+        return self.config.graph_agent_artifacts_root
+
+    @property
+    def graph_agent_sessions_root(self) -> Path:
+        return self.config.graph_agent_sessions_root
+
+    @property
+    def graph_agent_runs_root(self) -> Path:
+        return self.config.graph_agent_runs_root
+
     def ensure_output_root(self) -> Path:
         self.output_root.mkdir(parents=True, exist_ok=True)
         return self.output_root
@@ -84,4 +100,3 @@ def infer_domain(path: str | Path) -> str:
         if part in known:
             return part
     return "other"
-

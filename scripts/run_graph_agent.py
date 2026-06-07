@@ -23,7 +23,9 @@ def parse_args() -> argparse.Namespace:
     defaults = ProjectPaths.from_env()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--env-file", default=(defaults.project_root / ".secrets" / "model.env").as_posix())
+    parser.add_argument("--index-file", default=(defaults.output_root / "event_index" / "vqa_samples.parquet").as_posix())
     parser.add_argument("--video-id", required=True)
+    parser.add_argument("--vqa-id", default="")
     parser.add_argument("--task-family", default="")
     parser.add_argument("--limit", type=int, default=1)
     parser.add_argument("--max-steps", type=int, default=6)
@@ -37,8 +39,14 @@ def main() -> int:
     args = parse_args()
     load_env_file(Path(args.env_file))
     paths = ProjectPaths.from_env()
-    df = pd.read_parquet(paths.output_root / "event_index" / "vqa_samples.parquet")
+    df = pd.read_parquet(Path(args.index_file))
     video_df = df[df["primary_video_id"] == args.video_id].copy()
+    if args.vqa_id:
+        requested = str(args.vqa_id)
+        video_df = video_df[
+            (video_df["vqa_id"] == requested)
+            | (video_df["vqa_id"].astype(str).str.split(":").str[-1] == requested)
+        ].copy()
     if args.task_family:
         video_df = video_df[video_df["task_family"] == args.task_family].copy()
     rows = video_df.sort_values(["task_family", "vqa_id"]).head(args.limit).to_dict("records")

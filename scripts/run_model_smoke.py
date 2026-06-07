@@ -12,9 +12,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if PROJECT_ROOT.as_posix() not in sys.path:
     sys.path.insert(0, PROJECT_ROOT.as_posix())
 
-from openai import OpenAI
-
 from food_agent.config import ModelConfig, load_env_file
+from food_agent.model_client import OpenAICompatibleModelClient
 
 
 def parse_args() -> argparse.Namespace:
@@ -34,15 +33,13 @@ def main() -> int:
     cfg = ModelConfig.from_env()
     if not cfg.api_key:
         raise RuntimeError("OPENAI_API_KEY is not configured.")
-    client = OpenAI(api_key=cfg.api_key, base_url=cfg.base_url)
-    response = client.chat.completions.create(
-        model=cfg.model,
-        messages=[{"role": "user", "content": args.prompt}],
-        temperature=0,
-    )
+    client = OpenAICompatibleModelClient(config=cfg, use_env_proxy=args.use_env_proxy)
+    response = client.complete([{"role": "user", "content": args.prompt}], temperature=0)
     print("model:", cfg.model)
     print("base_url:", cfg.base_url)
-    print("answer:", response.choices[0].message.content)
+    print("answer:", response.content)
+    if response.usage:
+        print("usage:", response.usage)
     return 0
 
 

@@ -109,7 +109,7 @@ class GraphToolbox:
     ) -> list[dict[str, Any]]:
         return self.store.query_nodes(
             video_id=video_id,
-            node_types=["ocr_reading", "observation", "ingredient_event", "audio_event"],
+            node_types=["ocr_reading", "observation", "ingredient_event", "audio_event", "segment", "recipe_step", "object_track", "timeline_event", "frame"],
             keyword=keyword,
             time_start=start_time,
             time_end=end_time,
@@ -130,7 +130,14 @@ class GraphToolbox:
         keywords: list[str] | None = None,
         edge_type: str = "supports",
         edge_attributes: dict[str, Any] | None = None,
+        source_tool: str | None = None,
+        confidence: float | None = None,
     ) -> dict[str, Any]:
+        payload_attributes = dict(attributes or {})
+        if "source_tool" not in payload_attributes:
+            payload_attributes["source_tool"] = str(source_tool or "agent_writeback")
+        if "confidence" not in payload_attributes:
+            payload_attributes["confidence"] = float(confidence) if confidence is not None else 0.0
         node = GraphNodeRecord(
             node_id=node_id,
             node_type=node_type,
@@ -138,7 +145,7 @@ class GraphToolbox:
             video_id=video_id,
             start_time=start_time,
             end_time=end_time,
-            attributes=attributes or {},
+            attributes=payload_attributes,
             evidence_paths=evidence_paths or [],
             keywords=keywords or [],
         )
@@ -160,7 +167,7 @@ class GraphToolbox:
             "video_id": video_id,
             "start_time": start_time,
             "end_time": end_time,
-            "attributes": attributes or {},
+            "attributes": payload_attributes,
             "evidence_paths": evidence_paths or [],
             "keywords": keywords or [],
         }

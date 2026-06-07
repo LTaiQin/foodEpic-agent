@@ -54,6 +54,20 @@ class VQAPrediction:
     raw_revisit_count: int = 0
     structured_query_count: int = 0
     session_video_position: int = 0
+    relation_reuse_count: int = 0
+    planner_override_count: int = 0
+    verifier_blocked_finish_count: int = 0
+    tool_failure_count: int = 0
+    ineffective_tool_count: int = 0
+    failed_tool_recovery_count: int = 0
+    ineffective_tool_avoidance_count: int = 0
+    tool_call_count: int = 0
+    reasoning_step_count: int = 0
+    elapsed_seconds: float | None = None
+    prompt_tokens: float = 0.0
+    completion_tokens: float = 0.0
+    total_tokens: float = 0.0
+    estimated_cost: float = 0.0
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False)

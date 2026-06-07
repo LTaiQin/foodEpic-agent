@@ -28,7 +28,7 @@ class VideoGraphBuilder:
         self.paths = paths or ProjectPaths.from_env()
         self.index_dir = self.paths.output_root / "event_index"
         self.probe_root = self.paths.output_root / "single_video_agent_probe"
-        self.graph_root = self.paths.output_root / "graph_memory"
+        self.graph_root = self.paths.graph_memory_root
 
     def build(self, video_id: str) -> GraphMemoryStore:
         store = GraphMemoryStore(self.graph_root / video_id)
@@ -40,6 +40,7 @@ class VideoGraphBuilder:
         frame_nodes, frame_edges = self._frame_memory_nodes(video_id)
         nodes.extend(frame_nodes)
         edges.extend(frame_edges)
+        edges.extend(self._relation_edges(nodes, video_id))
         store.replace_graph(nodes, edges)
         return store
 
@@ -190,6 +191,178 @@ class VideoGraphBuilder:
             )
             for index, node in enumerate(nodes)
         ]
+
+    def _relation_edges(self, nodes: list[GraphNodeRecord], video_id: str) -> list[GraphEdgeRecord]:
+        edges: dict[str, GraphEdgeRecord] = {}
+        temporal_nodes = [
+            node
+            for node in nodes
+            if node.node_type != "video" and node.start_time is not None
+        ]
+        temporal_nodes.sort(key=lambda item: (float(item.start_time or 0.0), float(item.end_time or item.start_time or 0.0), item.node_id))
+        for index, node in enumerate(temporal_nodes):
+            if index > 0:
+                previous = temporal_nodes[index - 1]
+                self._add_temporal_pair(edges, previous=previous, current=node, video_id=video_id)
+            overlap_budget = 0
+            for next_index in range(index + 1, min(len(temporal_nodes), index + 7)):
+                candidate = temporal_nodes[next_index]
+                if self._temporal_gap(node, candidate) > 4.0:
+                    break
+                if self._overlaps(node, candidate):
+                    self._add_bidirectional_edge(
+                        edges,
+                        edge_type="co_occurs",
+                        source_id=node.node_id,
+                        target_id=candidate.node_id,
+                        video_id=video_id,
+                        attributes={"source": "builder", "reason": "time_overlap"},
+                    )
+                    overlap_budget += 1
+                if overlap_budget >= 4:
+                    break
+
+        step_like_nodes = [node for node in temporal_nodes if node.node_type in {"segment", "recipe_step", "timeline_event"}]
+        step_like_nodes.sort(key=lambda item: (float(item.start_time or 0.0), float(item.end_time or item.start_time or 0.0), item.node_id))
+        step_groups: dict[str, list[GraphNodeRecord]] = {}
+        for node in step_like_nodes:
+            step_groups.setdefault(str(node.label), []).append(node)
+        for siblings in step_groups.values():
+            if len(siblings) < 2:
+                continue
+            for left_index, left in enumerate(siblings):
+                for right in siblings[left_index + 1 : left_index + 3]:
+                    self._add_bidirectional_edge(
+                        edges,
+                        edge_type="same_step",
+                        source_id=left.node_id,
+                        target_id=right.node_id,
+                        video_id=video_id,
+                        attributes={"source": "builder", "reason": "shared_step_label"},
+                    )
+        for node in temporal_nodes:
+            if node.node_type in {"segment", "recipe_step", "timeline_event"}:
+                continue
+            linked = 0
+            nearest_candidates: list[tuple[float, GraphNodeRecord]] = []
+            for candidate in step_like_nodes:
+                if self._overlaps(node, candidate, tolerance=2.5):
+                    self._add_bidirectional_edge(
+                        edges,
+                        edge_type="same_step",
+                        source_id=node.node_id,
+                        target_id=candidate.node_id,
+                        video_id=video_id,
+                        attributes={"source": "builder", "reason": "shared_window"},
+                    )
+                    linked += 1
+                    if linked >= 3:
+                        break
+                else:
+                    distance = self._center_distance(node, candidate)
+                    if distance <= 5.0:
+                        nearest_candidates.append((distance, candidate))
+            if linked == 0 and nearest_candidates:
+                nearest_candidates.sort(key=lambda item: (item[0], item[1].node_id))
+                for distance, candidate in nearest_candidates[:2]:
+                    self._add_bidirectional_edge(
+                        edges,
+                        edge_type="same_step",
+                        source_id=node.node_id,
+                        target_id=candidate.node_id,
+                        video_id=video_id,
+                        attributes={"source": "builder", "reason": "nearest_step_fallback", "distance_s": round(distance, 3)},
+                    )
+        return list(edges.values())
+
+    def _add_temporal_pair(
+        self,
+        edges: dict[str, GraphEdgeRecord],
+        *,
+        previous: GraphNodeRecord,
+        current: GraphNodeRecord,
+        video_id: str,
+    ) -> None:
+        self._add_edge(
+            edges,
+            GraphEdgeRecord(
+                edge_id=f"before:{previous.node_id}:{current.node_id}",
+                source_id=previous.node_id,
+                target_id=current.node_id,
+                edge_type="before",
+                video_id=video_id,
+                attributes={"source": "builder", "reason": "adjacent_temporal_order"},
+            ),
+        )
+        self._add_edge(
+            edges,
+            GraphEdgeRecord(
+                edge_id=f"after:{current.node_id}:{previous.node_id}",
+                source_id=current.node_id,
+                target_id=previous.node_id,
+                edge_type="after",
+                video_id=video_id,
+                attributes={"source": "builder", "reason": "adjacent_temporal_order"},
+            ),
+        )
+
+    def _add_bidirectional_edge(
+        self,
+        edges: dict[str, GraphEdgeRecord],
+        *,
+        edge_type: str,
+        source_id: str,
+        target_id: str,
+        video_id: str,
+        attributes: dict[str, Any],
+    ) -> None:
+        self._add_edge(
+            edges,
+            GraphEdgeRecord(
+                edge_id=f"{edge_type}:{source_id}:{target_id}",
+                source_id=source_id,
+                target_id=target_id,
+                edge_type=edge_type,
+                video_id=video_id,
+                attributes=attributes,
+            ),
+        )
+        self._add_edge(
+            edges,
+            GraphEdgeRecord(
+                edge_id=f"{edge_type}:{target_id}:{source_id}",
+                source_id=target_id,
+                target_id=source_id,
+                edge_type=edge_type,
+                video_id=video_id,
+                attributes=attributes,
+            ),
+        )
+
+    def _add_edge(self, edges: dict[str, GraphEdgeRecord], edge: GraphEdgeRecord) -> None:
+        edges.setdefault(edge.edge_id, edge)
+
+    def _overlaps(self, left: GraphNodeRecord, right: GraphNodeRecord, tolerance: float = 0.0) -> bool:
+        left_start = float(left.start_time or 0.0)
+        left_end = float(left.end_time if left.end_time is not None else left_start)
+        right_start = float(right.start_time or 0.0)
+        right_end = float(right.end_time if right.end_time is not None else right_start)
+        return max(left_start, right_start) <= min(left_end, right_end) + tolerance
+
+    def _temporal_gap(self, left: GraphNodeRecord, right: GraphNodeRecord) -> float:
+        left_end = float(left.end_time if left.end_time is not None else left.start_time or 0.0)
+        right_start = float(right.start_time or 0.0)
+        return max(0.0, right_start - left_end)
+
+    def _center_distance(self, left: GraphNodeRecord, right: GraphNodeRecord) -> float:
+        left_center = self._center_time(left)
+        right_center = self._center_time(right)
+        return abs(left_center - right_center)
+
+    def _center_time(self, node: GraphNodeRecord) -> float:
+        start = float(node.start_time or 0.0)
+        end = float(node.end_time if node.end_time is not None else start)
+        return (start + end) / 2.0
 
     def _safe_value(self, value: Any) -> Any:
         if isinstance(value, dict):

@@ -118,6 +118,72 @@ def count_reuse_memory(payload: dict[str, Any]) -> int:
     return sum(1 for item in working_memory if isinstance(item, str) and item.startswith("reuse:"))
 
 
+def count_relation_reuse(payload: dict[str, Any]) -> int:
+    working_memory = payload.get("working_memory") or []
+    if not isinstance(working_memory, list):
+        return 0
+    return sum(1 for item in working_memory if isinstance(item, str) and item.startswith("reuse_relation:"))
+
+
+def count_planner_overrides(payload: dict[str, Any]) -> int:
+    working_memory = payload.get("working_memory") or []
+    if not isinstance(working_memory, list):
+        return 0
+    return sum(1 for item in working_memory if isinstance(item, str) and item.startswith("planner_override "))
+
+
+def count_verifier_blocked_finish(payload: dict[str, Any]) -> int:
+    working_memory = payload.get("working_memory") or []
+    if not isinstance(working_memory, list):
+        return 0
+    return sum(
+        1
+        for item in working_memory
+        if isinstance(item, str) and item.startswith("planner_override verifier_blocked_finish=")
+    )
+
+
+def count_tool_failures(payload: dict[str, Any]) -> int:
+    failures = payload.get("tool_failures") or []
+    return len(failures) if isinstance(failures, list) else 0
+
+
+def count_ineffective_tools(payload: dict[str, Any]) -> int:
+    items = payload.get("ineffective_tools") or []
+    return len(items) if isinstance(items, list) else 0
+
+
+def count_failed_tool_recoveries(payload: dict[str, Any]) -> int:
+    return count_recovery_events(payload, failure_key="tool_failed")
+
+
+def count_ineffective_tool_avoidances(payload: dict[str, Any]) -> int:
+    return count_recovery_events(payload, failure_key="tool_ineffective")
+
+
+def count_recovery_events(payload: dict[str, Any], *, failure_key: str) -> int:
+    trace = payload.get("tool_trace") or []
+    if not isinstance(trace, list):
+        return 0
+    recoveries = 0
+    pending_failed_tool = ""
+    for entry in trace:
+        if not isinstance(entry, dict):
+            continue
+        tool_name = str(entry.get("tool") or "")
+        raw_result = entry.get("raw_result")
+        if isinstance(raw_result, dict) and raw_result.get(failure_key):
+            if tool_name:
+                pending_failed_tool = tool_name
+            continue
+        if pending_failed_tool:
+            if not tool_name or tool_name == pending_failed_tool:
+                continue
+            recoveries += 1
+            pending_failed_tool = ""
+    return recoveries
+
+
 def load_completed_ids(path: Path) -> set[str]:
     return {str(item.get("vqa_id")) for item in load_jsonl_records(path) if item.get("vqa_id")}
 
@@ -150,15 +216,36 @@ def build_session_summary(video_id: str, records: list[dict[str, Any]], session_
     task_counts = Counter(str(item.get("task_family")) for item in records if item.get("task_family"))
     tool_counts = Counter()
     reuse_total = 0
+    relation_reuse_total = 0
+    planner_override_total = 0
+    verifier_block_total = 0
+    tool_failure_total = 0
+    ineffective_tool_total = 0
+    failed_tool_recovery_total = 0
+    ineffective_tool_avoidance_total = 0
     for item in records:
         tool_counts.update(extract_tool_calls(item))
         reuse_total += count_reuse_memory(item)
+        relation_reuse_total += count_relation_reuse(item)
+        planner_override_total += count_planner_overrides(item)
+        verifier_block_total += count_verifier_blocked_finish(item)
+        tool_failure_total += count_tool_failures(item)
+        ineffective_tool_total += count_ineffective_tools(item)
+        failed_tool_recovery_total += count_failed_tool_recoveries(item)
+        ineffective_tool_avoidance_total += count_ineffective_tool_avoidances(item)
     return {
         "video_id": video_id,
         "count": len(records),
         "correct": correct,
         "accuracy": (correct / len(records)) if records else None,
         "avg_reuse_memory_items": (reuse_total / len(records)) if records else 0.0,
+        "avg_relation_reuse_items": (relation_reuse_total / len(records)) if records else 0.0,
+        "avg_planner_override_count": (planner_override_total / len(records)) if records else 0.0,
+        "avg_verifier_blocked_finish_count": (verifier_block_total / len(records)) if records else 0.0,
+        "avg_tool_failure_count": (tool_failure_total / len(records)) if records else 0.0,
+        "avg_ineffective_tool_count": (ineffective_tool_total / len(records)) if records else 0.0,
+        "avg_failed_tool_recovery_count": (failed_tool_recovery_total / len(records)) if records else 0.0,
+        "avg_ineffective_tool_avoidance_count": (ineffective_tool_avoidance_total / len(records)) if records else 0.0,
         "task_family_counts": dict(task_counts),
         "tool_counts": dict(tool_counts),
         "session_trace_path": session_trace_path.as_posix(),
