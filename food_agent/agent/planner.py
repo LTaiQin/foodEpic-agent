@@ -287,6 +287,9 @@ class GraphAgentPlanner:
         state: AgentState,
         candidate_indices: list[int] | None = None,
     ) -> str:
+        bias_profile = self._action_intent_timeline_review_bias_profile(state)
+        if bias_profile["resolver_hint"]:
+            return str(bias_profile["resolver_hint"])
         timeline_text = self._action_intent_timeline_review_text(state)
         if not timeline_text:
             return ""
@@ -1076,8 +1079,19 @@ class GraphAgentPlanner:
             start_time = action_end
         window_s = max(4.0, min(10.0, float(window_s)))
         needed_profile = self._action_intent_needed_observation_profile(state=state)
+        bias_profile = self._action_intent_timeline_review_bias_profile(state)
         dense_near_followup = self._action_intent_prefers_dense_near_followup(state)
         result_driven_followup = self._action_intent_prefers_result_driven_followup(state)
+        review_transition_focus = (
+            bias_profile["revealed_target_retrieval"]
+            or bias_profile["revealed_slot_placement"]
+            or bias_profile["revealed_fixture_enablement"]
+            or (
+                bias_profile["hand_free_next_action"]
+                and not (bias_profile["next_use_unclear"] or bias_profile["final_location_unclear"])
+            )
+        )
+        review_late_focus = bias_profile["next_use_unclear"] or bias_profile["final_location_unclear"]
         if needed_profile["prefer_mixed_horizon"]:
             start_time = max(0.0, max(action_end - 0.15, start_time - 0.75))
             window_s = max(window_s, 7.0)
@@ -1094,8 +1108,17 @@ class GraphAgentPlanner:
             window_s = min(window_s, 5.5)
         if result_driven_followup:
             window_s = max(window_s, 8.5)
+        if review_transition_focus and not review_late_focus:
+            start_time = max(0.0, max(action_end - 0.12, start_time - 0.9))
+            window_s = min(max(window_s, 4.4 if not bias_profile["revealed_slot_placement"] else 4.2), 5.4)
+        if review_late_focus:
+            window_s = max(window_s, 8.8 if not bias_profile["final_location_unclear"] else 9.0)
         sample_count = 6 if dense_near_followup and attempt_count <= 1 else 4
         if result_driven_followup:
+            sample_count = max(sample_count, 5 if attempt_count <= 1 else 4)
+        if review_transition_focus:
+            sample_count = max(sample_count, 6)
+        if review_late_focus:
             sample_count = max(sample_count, 5 if attempt_count <= 1 else 4)
         if (
             needed_profile["prefer_state_change_only"]
@@ -1246,12 +1269,19 @@ class GraphAgentPlanner:
         profile: dict[str, Any],
     ) -> str:
         needed_profile = self._action_intent_needed_observation_profile(state=state, result=result)
+        bias_profile = self._action_intent_timeline_review_bias_profile(state)
         reveal_subtype = (
             self._action_intent_reveal_conflict_subtype(state=state, result=result)
             if bool(profile["has_hidden_access_exact_use_conflict"])
             else self._action_intent_reveal_conflict_subtype(state=state, result=result)
         )
         has_explicit_hand_free_conflict = self._action_intent_has_hand_free_future_use_conflict(state=state, result=result)
+        if bias_profile["revealed_target_retrieval"]:
+            return "revealed_target_retrieval"
+        if bias_profile["revealed_slot_placement"]:
+            return "revealed_slot_placement"
+        if bias_profile["revealed_fixture_enablement"] and not has_explicit_hand_free_conflict:
+            return "revealed_fixture_enablement"
         if self._action_intent_prefers_followup_state_change_only(state):
             return "state_change"
         if reveal_subtype == "revealed_fixture_enablement" and not has_explicit_hand_free_conflict:
@@ -1262,12 +1292,18 @@ class GraphAgentPlanner:
             or (result is None and self._action_intent_initial_pair_spans_immediate_and_later_outcomes(state))
         ):
             return "mixed_temporal_horizon"
+        if bias_profile["hand_free_next_action"]:
+            return "hand_free_next_action"
         if (needed_profile["prefer_hand_free_next_action"] or has_explicit_hand_free_conflict) and not (
             reveal_subtype == "revealed_fixture_enablement" and not has_explicit_hand_free_conflict
         ):
             return "hand_free_next_action"
         if needed_profile["prefer_receptacle_outcome"]:
             return "receptacle_outcome"
+        if bias_profile["final_location_unclear"]:
+            return "final_placement_result"
+        if bias_profile["next_use_unclear"]:
+            return "future_use_outcome"
         timeline_text = self._action_intent_timeline_review_text(state)
         support_text = self._action_intent_result_support_text(result)
         combined_text = f"{timeline_text} {support_text}".lower()
@@ -1696,6 +1732,7 @@ class GraphAgentPlanner:
         if self._action_intent_transition_probe_window(state=state, hints=hints, result=result) is None:
             return False
         needed_profile = self._action_intent_needed_observation_profile(state=state, result=result)
+        bias_profile = self._action_intent_timeline_review_bias_profile(state)
         candidate_indices = self._latest_action_intent_candidate_indices(state, result=result)
         profile = action_intent_conflict_profile(
             question=str(getattr(state, "question", "") or ""),
@@ -1707,6 +1744,14 @@ class GraphAgentPlanner:
             state=state,
             result=result,
         )
+        if bias_profile["needs_more_evidence"] and (
+            bias_profile["revealed_target_retrieval"]
+            or bias_profile["revealed_slot_placement"]
+            or bias_profile["revealed_fixture_enablement"]
+            or bias_profile["hand_free_next_action"]
+            or bias_profile["final_location_unclear"]
+        ):
+            return True
         support_text = self._action_intent_result_support_text(result)
         uncertainty_markers = (
             "still unclear",
@@ -1749,6 +1794,8 @@ class GraphAgentPlanner:
         if bool(profile["has_hidden_access_exact_use_conflict"]) and not hand_free_future_use:
             return False
         if self._action_intent_needs_future_use_evidence(state=state, result=result) and not hand_free_future_use:
+            if bias_profile["final_location_unclear"]:
+                return True
             if isinstance(result, dict) and "decisive_observation" in result:
                 decisive_observation = str(result.get("decisive_observation") or "").strip()
                 if not decisive_observation:
@@ -2101,6 +2148,216 @@ class GraphAgentPlanner:
             )
         ).strip().lower()
 
+    def _action_intent_timeline_review_bias_profile(self, state: AgentState) -> dict[str, Any]:
+        payload = self._latest_action_intent_timeline_review(state)
+        empty = {
+            "has_review": False,
+            "needs_more_evidence": False,
+            "resolver_hint": "",
+            "revealed_target_retrieval": False,
+            "revealed_slot_placement": False,
+            "revealed_fixture_enablement": False,
+            "hand_free_next_action": False,
+            "next_use_unclear": False,
+            "final_location_unclear": False,
+            "state_change_focus": False,
+            "immediate_transition_focus": False,
+        }
+        if not payload:
+            return empty
+
+        def merged_text(*keys: str) -> str:
+            return " ".join(str(payload.get(key) or "") for key in keys).strip().lower()
+
+        def has_any(text: str, markers: tuple[str, ...]) -> bool:
+            return any(marker in text for marker in markers)
+
+        timeline_summary = merged_text("timeline_summary")
+        immediate_result = merged_text("immediate_result")
+        next_action = merged_text("next_action_hint")
+        direct_purpose = merged_text("direct_purpose_hint")
+        reveal_evidence = merged_text("access_or_reveal_evidence")
+        hand_free_evidence = merged_text("hand_free_enablement_evidence")
+        next_use_evidence = merged_text("next_use_evidence")
+        state_change_hint = merged_text("state_change_hint")
+        target_location = merged_text("target_location")
+        ambiguity_note = merged_text("ambiguity_note")
+        review_text = self._action_intent_timeline_review_text(state)
+        combined_reveal = " ".join((reveal_evidence, next_action, ambiguity_note, timeline_summary, review_text))
+        combined_hand_free = " ".join((hand_free_evidence, next_action, direct_purpose, timeline_summary, review_text))
+        combined_next_use = " ".join((next_use_evidence, direct_purpose, ambiguity_note, review_text))
+        combined_final_location = " ".join((target_location, next_use_evidence, ambiguity_note, direct_purpose, review_text))
+        combined_state_change = " ".join((state_change_hint, immediate_result, timeline_summary, review_text))
+        needs_more_evidence = self._action_intent_timeline_review_needs_more_evidence(payload)
+
+        reveal_markers = (
+            "behind",
+            "hidden",
+            "reveal",
+            "revealed",
+            "reachable",
+            "freed slot",
+            "available spot",
+            "slot",
+            "behind it",
+            "behind the",
+            "后面",
+            "露出",
+            "空位",
+            "槽位",
+        )
+        hidden_target_markers = (
+            "hidden jar",
+            "hidden item",
+            "retrieval is not yet visible",
+            "retrieve",
+            "pick up the hidden",
+            "take the hidden",
+            "take from behind",
+            "pick up from behind",
+            "取后面的",
+            "拿后面的",
+            "后面的目标",
+        )
+        slot_markers = (
+            "freed slot",
+            "available spot",
+            "slot placement",
+            "placement into the slot",
+            "put into the slot",
+            "place into the slot",
+            "put back into the slot",
+            "空位",
+            "槽位",
+            "放进",
+            "归位",
+        )
+        fixture_markers = (
+            "scale behind",
+            "revealed appliance",
+            "revealed fixture",
+            "turn on",
+            "switch on",
+            "tap area",
+            "sink area",
+            "open the",
+            "露出的装置",
+            "后面的秤",
+            "龙头",
+        )
+        hand_free_markers = (
+            "free hand",
+            "freed hand",
+            "other hand",
+            "right hand",
+            "left hand",
+            "reach toward",
+            "reaches toward",
+            "moves toward",
+            "tap area",
+            "sink area",
+            "turn on",
+            "turn off",
+            "open",
+            "close",
+            "另一只手",
+            "龙头",
+            "水槽",
+        )
+        next_use_uncertain_markers = (
+            "later use is still unclear",
+            "next use is still unclear",
+            "not yet visible whether",
+            "not visible whether",
+            "might be poured",
+            "might be weighed",
+            "might be put back",
+            "multiple later-use explanations remain plausible",
+            "后续用途",
+            "仍不清楚",
+            "看不出之后",
+        )
+        final_location_markers = (
+            "final location remains unclear",
+            "not visible where",
+            "put back or only moved temporarily",
+            "returned or only moved temporarily",
+            "whether it is put back",
+            "whether it is returned",
+            "where it ends up",
+            "最终位置",
+            "归位",
+            "放回原处",
+            "暂时移动",
+        )
+        state_change_markers = (
+            "display",
+            "changes to",
+            "turned on",
+            "turned off",
+            "opened",
+            "closed",
+            "fills up",
+            "starts running",
+            "stops running",
+            "显示",
+            "打开",
+            "关闭",
+            "变成",
+        )
+        immediate_transition_markers = (
+            "reaches toward",
+            "moves toward",
+            "goes to",
+            "pick up",
+            "turn on",
+            "open",
+            "close",
+            "retrieve",
+            "put into the slot",
+            "拿起",
+            "去拿",
+            "去开",
+        )
+
+        reveal_focus = has_any(combined_reveal, reveal_markers)
+        revealed_target_retrieval = reveal_focus and has_any(combined_reveal, hidden_target_markers)
+        revealed_slot_placement = reveal_focus and has_any(combined_reveal, slot_markers)
+        revealed_fixture_enablement = reveal_focus and has_any(
+            " ".join((combined_reveal, combined_hand_free)),
+            fixture_markers,
+        )
+        hand_free_next_action = has_any(combined_hand_free, hand_free_markers)
+        next_use_unclear = has_any(combined_next_use, next_use_uncertain_markers) or (
+            needs_more_evidence and "later use" in review_text
+        )
+        final_location_unclear = has_any(combined_final_location, final_location_markers)
+        state_change_focus = has_any(combined_state_change, state_change_markers)
+        immediate_transition_focus = has_any(
+            " ".join((next_action, reveal_evidence, hand_free_evidence, direct_purpose)),
+            immediate_transition_markers,
+        )
+
+        resolver_hint = ""
+        if next_use_unclear or final_location_unclear:
+            resolver_hint = "future_use"
+        elif revealed_target_retrieval or revealed_slot_placement or revealed_fixture_enablement or hand_free_next_action:
+            resolver_hint = "pairwise"
+
+        return {
+            "has_review": True,
+            "needs_more_evidence": needs_more_evidence,
+            "resolver_hint": resolver_hint,
+            "revealed_target_retrieval": revealed_target_retrieval,
+            "revealed_slot_placement": revealed_slot_placement,
+            "revealed_fixture_enablement": revealed_fixture_enablement,
+            "hand_free_next_action": hand_free_next_action,
+            "next_use_unclear": next_use_unclear,
+            "final_location_unclear": final_location_unclear,
+            "state_change_focus": state_change_focus,
+            "immediate_transition_focus": immediate_transition_focus,
+        }
+
     def _action_intent_needed_observation_text(
         self,
         *,
@@ -2424,6 +2681,15 @@ class GraphAgentPlanner:
         if not self._is_action_intent_task(state):
             return False
         needed_profile = self._action_intent_needed_observation_profile(state=state)
+        bias_profile = self._action_intent_timeline_review_bias_profile(state)
+        if (
+            bias_profile["revealed_target_retrieval"]
+            or bias_profile["revealed_slot_placement"]
+            or bias_profile["revealed_fixture_enablement"]
+            or bias_profile["hand_free_next_action"]
+            or bias_profile["immediate_transition_focus"]
+        ):
+            return True
         if (
             needed_profile["prefer_dense_near"]
             or needed_profile["prefer_mixed_horizon"]
@@ -2476,6 +2742,9 @@ class GraphAgentPlanner:
         if not self._is_action_intent_task(state):
             return False
         needed_profile = self._action_intent_needed_observation_profile(state=state)
+        bias_profile = self._action_intent_timeline_review_bias_profile(state)
+        if bias_profile["next_use_unclear"] or bias_profile["final_location_unclear"]:
+            return True
         if needed_profile["prefer_future_use_outcome"] or needed_profile["prefer_final_placement"]:
             return True
         question_text = str(getattr(state, "question", "") or "").lower()
@@ -2518,6 +2787,11 @@ class GraphAgentPlanner:
     def _action_intent_prefers_followup_state_change_only(self, state: AgentState) -> bool:
         if not self._is_action_intent_task(state):
             return False
+        bias_profile = self._action_intent_timeline_review_bias_profile(state)
+        if bias_profile["state_change_focus"] and not (
+            bias_profile["next_use_unclear"] or bias_profile["final_location_unclear"]
+        ):
+            return True
         question_text = str(getattr(state, "question", "") or "").lower()
         timeline_text = self._action_intent_timeline_review_text(state)
         if any(
@@ -4900,10 +5174,23 @@ class GraphAgentPlanner:
         stage_target_counts: list[tuple[str, list[str], int, float]]
         followup_only_state_change = False
         needed_profile = self._action_intent_needed_observation_profile(state=state)
+        bias_profile = self._action_intent_timeline_review_bias_profile(state) if include_followup else {}
         if include_followup:
             needs_precontext = self._action_intent_needs_precondition_context(state=state, result=None)
             dense_near_followup = self._action_intent_prefers_dense_near_followup(state)
             followup_only_state_change = self._action_intent_prefers_followup_state_change_only(state)
+            review_transition_focus = bool(
+                bias_profile.get("revealed_target_retrieval")
+                or bias_profile.get("revealed_slot_placement")
+                or bias_profile.get("revealed_fixture_enablement")
+                or (
+                    bias_profile.get("hand_free_next_action")
+                    and not (bias_profile.get("next_use_unclear") or bias_profile.get("final_location_unclear"))
+                )
+            )
+            review_late_focus = bool(
+                bias_profile.get("next_use_unclear") or bias_profile.get("final_location_unclear")
+            )
             pre_keep = 2 if needs_precontext else 1
             segment_keep = 3
             transition_keep = 2 if followup_transition_frames and limit >= 6 else 0
@@ -4982,6 +5269,24 @@ class GraphAgentPlanner:
                 peak_keep = min(len(followup_peak_frames), max(peak_keep, 1 if followup_peak_frames and limit >= 7 else 0))
                 ext_keep = min(len(followup_ext_frames), max(ext_keep, 2 if limit >= 6 else 1))
                 followup_keep = max(2 if limit >= 6 else 1, limit - pre_keep - segment_keep - transition_keep - peak_keep - ext_keep)
+            if review_transition_focus and not review_late_focus:
+                pre_keep = 1 if needs_precontext and limit >= 6 else 0
+                segment_keep = min(segment_keep, 2)
+                transition_keep = min(len(followup_transition_frames), max(transition_keep, 3 if limit >= 7 else 2))
+                peak_keep = min(len(followup_peak_frames), max(peak_keep, 1 if limit >= 6 else 0))
+                if bias_profile.get("revealed_slot_placement"):
+                    ext_keep = 0
+                    followup_keep = max(1, limit - pre_keep - segment_keep - transition_keep - peak_keep)
+                else:
+                    ext_keep = min(len(followup_ext_frames), 1 if followup_ext_frames and limit >= 8 else 0)
+                    followup_keep = max(1, limit - pre_keep - segment_keep - transition_keep - peak_keep - ext_keep)
+            if review_late_focus:
+                pre_keep = 1 if needs_precontext and limit >= 7 else 0
+                segment_keep = 0 if not needs_precontext and followup_ext_frames else min(segment_keep, 1 if limit >= 6 else segment_keep)
+                transition_keep = min(len(followup_transition_frames), max(transition_keep, 1 if followup_transition_frames and limit >= 7 else 0))
+                peak_keep = min(len(followup_peak_frames), max(peak_keep, 1 if followup_peak_frames and limit >= 8 else peak_keep))
+                ext_keep = min(len(followup_ext_frames), max(ext_keep, 3 if limit >= 6 else 1))
+                followup_keep = max(2 if limit >= 6 else 1, limit - pre_keep - segment_keep - transition_keep - peak_keep - ext_keep)
             stage_target_counts = [
                 ("precontext", precontext_frames, pre_keep, action_start - 0.15),
                 ("segment", segment_frames, segment_keep, action_end if dense_near_followup or needed_profile["prefer_reveal_access"] else action_mid),
@@ -5006,6 +5311,21 @@ class GraphAgentPlanner:
         if include_followup:
             if followup_only_state_change:
                 priority = ["transition", "peaks", "followup", "ext", "segment", "precontext"]
+            elif bias_profile.get("revealed_slot_placement"):
+                priority = ["transition", "followup", "peaks", "segment", "precontext", "ext"]
+            elif (
+                bias_profile.get("revealed_target_retrieval")
+                or bias_profile.get("revealed_fixture_enablement")
+                or (
+                    bias_profile.get("hand_free_next_action")
+                    and not (bias_profile.get("next_use_unclear") or bias_profile.get("final_location_unclear"))
+                )
+            ):
+                priority = ["transition", "peaks", "followup", "segment", "precontext", "ext"]
+            elif bias_profile.get("final_location_unclear"):
+                priority = ["ext", "followup", "transition", "segment", "peaks", "precontext"]
+            elif bias_profile.get("next_use_unclear"):
+                priority = ["ext", "followup", "transition", "peaks", "segment", "precontext"]
             elif needed_profile["prefer_reveal_access"]:
                 priority = ["transition", "peaks", "segment", "followup", "precontext", "ext"]
             elif needed_profile["prefer_receptacle_outcome"]:
@@ -5064,9 +5384,22 @@ class GraphAgentPlanner:
                 or needed_profile["prefer_mixed_horizon"]
                 or needed_profile["prefer_reveal_access"]
                 or needed_profile["prefer_safety_or_spill"]
+                or bool(bias_profile.get("next_use_unclear"))
+                or bool(bias_profile.get("final_location_unclear"))
+                or bool(bias_profile.get("revealed_target_retrieval"))
+                or bool(bias_profile.get("revealed_slot_placement"))
+                or bool(bias_profile.get("revealed_fixture_enablement"))
             ):
                 remaining_anchor = action_end + 1.0
-                if (
+                if bool(bias_profile.get("next_use_unclear")) or bool(bias_profile.get("final_location_unclear")):
+                    remaining_anchor = action_end + 4.0
+                elif (
+                    bool(bias_profile.get("revealed_target_retrieval"))
+                    or bool(bias_profile.get("revealed_slot_placement"))
+                    or bool(bias_profile.get("revealed_fixture_enablement"))
+                ):
+                    remaining_anchor = action_end + 0.35
+                elif (
                     needed_profile["prefer_future_use_outcome"]
                     or needed_profile["prefer_final_placement"]
                     or needed_profile["prefer_mixed_horizon"]
