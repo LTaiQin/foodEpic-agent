@@ -488,6 +488,30 @@ why 题专用裁决工具入口：
 
 - [ ] 如果动作后帧不足，必须先补，不要直接 pairwise resolve
 
+进展补充：
+
+- [x] 已把 `hidden access vs exact reveal-use` 从普通 future-use 不确定性里分离出来，纳入更明确的 pairwise 冲突识别：
+  - 现在 `action_intent_conflict_profile(...)` 会显式识别 `generic hidden access` 与 `exact reveal-then-take/place` 的冲突簇
+  - 避免这类题被泛化为普通 future-use 或直接 finish
+- [x] 已在 `planner` 中加入更硬的后果帧门控：
+  - 对 `hidden access vs exact reveal-use`，若只有一轮短 followup 且还没有明确 reveal 后真实后果，就先补 `followup_ext2`
+  - 只有当 evidence 已经明确写出 “revealed target 被立刻取走 / revealed slot 被立刻使用” 时，才允许直接进入 pairwise resolution
+  - 已补过 `followup_ext2` 后，不再无限补帧，而是回到 pairwise 二选一裁决
+- [x] 已新增并通过 `3` 条 planner 定向测试：
+  - `hidden access` 在首轮短 followup 后仍不明确时，会先补 `followup_ext2`
+  - evidence 已明确 reveal 后 exact target use 时，允许直接 pairwise resolve
+  - 已有 `followup_ext2` 时，允许进入 pairwise 而不是继续无限补帧
+- [x] 保持普通 `access vs make space` 旧路径不回退：
+  - 新门控只作用于 `hidden access vs exact reveal-use`
+  - 其它普通 `access/space` pair 仍按原有 followup 后直接 pairwise 的路径走
+
+本轮验证补充：
+
+- [x] 定向回归：`pytest -q tests/test_graph_agent.py -k 'planner_action_intent_hidden_access_pairwise or planner_action_intent_generic_access_space_pair_routes_to_pairwise or planner_action_intent_candidate_pairwise_route_ignores_fullset_future_use_distractors or planner_action_intent_high_confidence_outcome_pair_forces_pairwise_after_followup'`
+  - 结果：`6 passed, 434 deselected`
+- [x] 专项总回归：`pytest -q tests/test_graph_agent.py -k 'action_intent'`
+  - 结果：`120 passed, 320 deselected`
+
 完成标准：
 
 - planner 不再在缺后续帧时强行让 pairwise 裁决

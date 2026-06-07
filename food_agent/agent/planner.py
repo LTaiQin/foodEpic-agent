@@ -853,6 +853,20 @@ class GraphAgentPlanner:
         )
         if missing_followup is not None:
             return missing_followup
+        if self._action_intent_pairwise_requires_extended_followup(
+            state=state,
+            hints=hints,
+            result=result,
+            candidate_indices=candidate_indices,
+        ):
+            extra_followup = self._build_action_intent_extra_followup_sampling_decision(
+                state=state,
+                hints=hints,
+                focus="hidden_access_pairwise_outcome_resolution",
+                window_s=8.0,
+            )
+            if extra_followup is not None:
+                return extra_followup
         context_notes = self._action_intent_context_notes(state, limit=12)
         return PlannerDecision(
             thought=thought,
@@ -865,6 +879,100 @@ class GraphAgentPlanner:
                 "context_notes": context_notes,
             },
         )
+
+    def _action_intent_pairwise_requires_extended_followup(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        result: dict[str, Any] | None = None,
+        candidate_indices: list[int] | None = None,
+    ) -> bool:
+        if not self._is_action_intent_task(state):
+            return False
+        indices = candidate_indices or self._latest_action_intent_candidate_indices(state, result=result)
+        if len(indices) < 2:
+            return False
+        profile = action_intent_conflict_profile(
+            question=str(getattr(state, "question", "") or ""),
+            choices=[str(choice) for choice in getattr(state, "choices", [])],
+            indices=indices,
+        )
+        if not bool(profile["has_hidden_access_exact_use_conflict"]):
+            return False
+        attempt_count = self._action_intent_followup_attempt_count(state)
+        if attempt_count < 1 or attempt_count >= 2:
+            return False
+        if self._action_intent_pairwise_text_has_explicit_hidden_outcome(result=result):
+            return False
+        combined_times: list[float] = []
+        for key in ("times", "input_times"):
+            for value in hints.get(key) or []:
+                try:
+                    combined_times.append(float(value))
+                except Exception:  # noqa: BLE001
+                    continue
+        action_end = max(combined_times) if combined_times else None
+        latest_end = self._latest_action_intent_followup_end_time(state)
+        if latest_end is None or action_end is None:
+            return True
+        return latest_end < action_end + 7.5
+
+    def _action_intent_pairwise_text_has_explicit_hidden_outcome(
+        self,
+        *,
+        result: dict[str, Any] | None = None,
+    ) -> bool:
+        text = " ".join(
+            str((result or {}).get(key) or "")
+            for key in ("reason", "direct_effect", "downstream_action", "needed_observation", "answer")
+        ).lower()
+        if not text.strip():
+            return False
+        explicit_target_use = any(
+            token in text
+            for token in (
+                "picked up from behind",
+                "taken from behind",
+                "retrieved from behind",
+                "hidden item is then picked up",
+                "specific hidden target is reached",
+                "small jar is taken from behind",
+                "revealed target is immediately used",
+                "revealed slot is immediately used",
+                "placed into the freed slot",
+                "put into the freed slot",
+                "placed into the revealed slot",
+                "right after the reveal",
+                "immediately after the reveal",
+                "revealed area is immediately used",
+                "拿到后面的",
+                "取到后面的",
+                "露出的卡槽立刻被使用",
+                "立刻放进腾出的空位",
+            )
+        )
+        if not explicit_target_use:
+            return False
+        unresolved_or_negative = any(
+            token in text
+            for token in (
+                "unclear",
+                "cannot tell",
+                "can't tell",
+                "no hidden item",
+                "no item behind",
+                "no object is placed",
+                "not visible",
+                "not shown",
+                "later target is unclear",
+                "没有后方物体被取走",
+                "没有物体被放进",
+                "看不清",
+                "不明确",
+            )
+        )
+        return not unresolved_or_negative
 
     def _build_action_intent_future_use_resolution_decision(
         self,

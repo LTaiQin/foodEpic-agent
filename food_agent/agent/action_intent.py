@@ -241,6 +241,70 @@ def selected_choice_categories(choices: list[str], indices: Iterable[int] | None
     return {index: choice_categories(str(choices[index])) for index in normalized_indices}
 
 
+def _choice_is_generic_hidden_access(choice: str) -> bool:
+    text = normalize_action_intent_text(choice)
+    if "behind" not in text and "access" not in text:
+        return False
+    if any(
+        token in text
+        for token in (
+            "take the",
+            "retrieve the",
+            "pick up the",
+            "look for the",
+            "find the",
+            "put the",
+            "place the",
+            "right place",
+            "proper place",
+            "freed slot",
+        )
+    ):
+        return False
+    return any(
+        token in text
+        for token in (
+            "access what's behind",
+            "access what is behind",
+            "access behind",
+            "access the slot behind",
+            "access the area behind",
+            "see what is behind",
+            "see what's behind",
+            "look what's behind",
+            "look behind",
+            "what is behind",
+            "what's behind",
+            "behind the",
+        )
+    )
+
+
+def _choice_is_exact_reveal_target_use(choice: str) -> bool:
+    text = normalize_action_intent_text(choice)
+    if any(
+        token in text
+        for token in (
+            "take the",
+            "retrieve the",
+            "pick up the",
+            "look for the",
+            "find the",
+            "grab the",
+            "take the hidden",
+            "missing",
+            "put the",
+            "place the",
+            "right place",
+            "proper place",
+            "freed slot",
+            "slot",
+        )
+    ):
+        return True
+    return False
+
+
 def action_intent_conflict_profile(
     *,
     question: str,
@@ -255,6 +319,14 @@ def action_intent_conflict_profile(
     has_access_space_conflict = "access_retrieve" in active_categories and "space_clear" in active_categories
     has_space_place_conflict = "space_clear" in active_categories and "final_place_return" in active_categories
     has_access_place_conflict = "access_retrieve" in active_categories and "final_place_return" in active_categories
+    selected_texts = {index: normalize_action_intent_text(str(choices[index])) for index in by_index}
+    has_hidden_access_exact_use_conflict = any(
+        _choice_is_generic_hidden_access(text)
+        for text in selected_texts.values()
+    ) and any(
+        _choice_is_exact_reveal_target_use(text)
+        for text in selected_texts.values()
+    )
     return {
         "post_action_sensitive": question_is_post_action_sensitive(question),
         "categories_by_index": by_index,
@@ -262,10 +334,12 @@ def action_intent_conflict_profile(
         "active_categories": active_categories,
         "future_categories": future_categories,
         "pairwise_categories": pairwise_categories,
+        "has_hidden_access_exact_use_conflict": has_hidden_access_exact_use_conflict,
         "has_pairwise_outcome_conflict": (
             has_access_space_conflict
             or has_space_place_conflict
             or has_access_place_conflict
+            or has_hidden_access_exact_use_conflict
             or len(pairwise_categories) >= 2
         ),
         "has_future_use_conflict": len(future_categories) >= 2,
@@ -291,8 +365,11 @@ def action_intent_followup_decision(
     candidate_count = len(profile["categories_by_index"])
     has_pairwise_outcome_conflict = bool(profile["has_pairwise_outcome_conflict"])
     has_future_use_conflict = bool(profile["has_future_use_conflict"])
+    has_hidden_access_exact_use_conflict = bool(profile["has_hidden_access_exact_use_conflict"])
     if has_pairwise_outcome_conflict and candidate_count <= 2:
         return True, "outcome_dependent_pairwise_needed", 4.0, "pairwise"
+    if has_hidden_access_exact_use_conflict:
+        return True, "hidden_access_exact_use_pairwise_needed", 4.0, "pairwise"
     if has_future_use_conflict and (non_pairwise_future_categories or not has_pairwise_outcome_conflict):
         return True, "future_use_evidence_needed", 8.0, "future_use"
     if has_pairwise_outcome_conflict:
