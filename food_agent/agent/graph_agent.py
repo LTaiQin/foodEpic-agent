@@ -1197,6 +1197,22 @@ class GraphAgent:
             global_context=global_context,
         ):
             adjusted += 0.28
+        if self._action_intent_choice_is_immediate_reuse_staging(
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            action_object=action_object,
+            global_context=global_context,
+        ):
+            adjusted += 0.26
+        if self._action_intent_choice_is_unfinished_cleanup_context_for_finished_or_storage(
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            action_object=action_object,
+            global_context=global_context,
+        ):
+            adjusted -= 0.24
         finished_goal = self._action_intent_choice_is_finished_with_object_goal(
             question=question_lc,
             choice=choice_lc,
@@ -1217,6 +1233,14 @@ class GraphAgent:
                 for token in ("no further", "no more", "no further spoon-use", "no further use", "no washing-followup")
             ):
                 adjusted += 0.18
+        if self._action_intent_choice_is_temporary_set_aside_not_finished(
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            action_object=action_object,
+            global_context=global_context,
+        ):
+            adjusted -= 0.22
         if self._action_intent_choice_is_glove_removal_enablement(
             question=question_lc,
             choice=choice_lc,
@@ -4511,6 +4535,215 @@ class GraphAgent:
             )
         )
 
+    def _action_intent_choice_is_immediate_reuse_staging(
+        self,
+        *,
+        choice: str,
+        support: str,
+        contradiction: str,
+        action_object: str,
+        global_context: str,
+    ) -> bool:
+        del action_object
+        if not any(
+            token in choice
+            for token in (
+                "keep",
+                "nearby",
+                "within reach",
+                "ready for the next",
+                "ready for next use",
+                "next step",
+                "next stir",
+                "later immediate use",
+                "放在旁边",
+                "方便下一步",
+                "随手可拿",
+            )
+        ):
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        has_reuse_signal = any(
+            token in signal_text
+            for token in (
+                "within reach",
+                "ready for the next",
+                "ready for next use",
+                "kept nearby",
+                "later reused",
+                "immediate reuse",
+                "used again moments later",
+                "used again shortly after",
+                "next stir",
+                "next step",
+                "placed beside the bowl",
+                "beside the hob",
+                "by the hob",
+                "temporary reuse setup",
+                "就在旁边",
+                "稍后继续使用",
+                "下一步还要用",
+                "放在旁边",
+                "方便下一步",
+            )
+        )
+        if not has_reuse_signal:
+            return False
+        return not any(
+            token in signal_text
+            for token in (
+                "no further use",
+                "no more use",
+                "truly finished",
+                "not reused",
+                "不再使用",
+                "确实用完",
+            )
+        )
+
+    def _action_intent_choice_is_temporary_set_aside_not_finished(
+        self,
+        *,
+        choice: str,
+        support: str,
+        contradiction: str,
+        action_object: str,
+        global_context: str,
+    ) -> bool:
+        del action_object
+        if not any(
+            token in choice
+            for token in (
+                "finished with",
+                "finished chopping",
+                "no longer needed",
+                "store",
+                "put away",
+                "put back",
+                "用完",
+                "收起来",
+                "收纳",
+            )
+        ):
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        has_temporary_reuse_signal = any(
+            token in signal_text
+            for token in (
+                "within reach",
+                "ready for the next",
+                "ready for next use",
+                "kept nearby",
+                "later reused",
+                "immediate reuse",
+                "used again moments later",
+                "used again shortly after",
+                "next stir",
+                "next step",
+                "beside the hob",
+                "by the hob",
+                "placed on the tray for reuse",
+                "temporarily placed",
+                "not final placement",
+                "not stored",
+                "台面旁边待会继续用",
+                "就在旁边",
+                "稍后继续使用",
+                "下一步还要用",
+                "暂时放在",
+                "没有收纳",
+            )
+        )
+        if not has_temporary_reuse_signal:
+            return False
+        return not any(
+            token in signal_text
+            for token in (
+                "no further use",
+                "no further",
+                "no more use",
+                "left there for the rest",
+                "truly finished",
+                "不再使用",
+                "确实用完",
+            )
+        )
+
+    def _action_intent_choice_is_unfinished_cleanup_context_for_finished_or_storage(
+        self,
+        *,
+        choice: str,
+        support: str,
+        contradiction: str,
+        action_object: str,
+        global_context: str,
+    ) -> bool:
+        del action_object
+        if not any(
+            token in choice
+            for token in (
+                "finished with",
+                "finished chopping",
+                "store",
+                "put away",
+                "put back",
+                "dry",
+                "allow",
+                "air dry",
+                "用完",
+                "收起来",
+                "收纳",
+                "晾干",
+            )
+        ):
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        has_cleanup_continuation_signal = any(
+            token in signal_text
+            for token in (
+                "soap residue",
+                "remaining soap",
+                "soap suds",
+                "still has soap",
+                "still dirty",
+                "not rinsed clean",
+                "to be cleaned next",
+                "washed next",
+                "clean off the soap",
+                "remove the remaining soap",
+                "sink placement",
+                "wash area",
+                "placed into the sink",
+                "placed in the sink",
+                "under running water",
+                "washing it clean first",
+                "current direct purpose is washing",
+                "current direct purpose is removing soap",
+                "肥皂残留",
+                "还有肥皂",
+                "还没洗干净",
+                "接下来要洗",
+                "放进水槽",
+                "当前直接目的是清洗",
+                "当前直接目的是去除肥皂",
+            )
+        )
+        if not has_cleanup_continuation_signal:
+            return False
+        return not any(
+            token in signal_text
+            for token in (
+                "facing up",
+                "not touching",
+                "drain and dry",
+                "allow it to dry",
+                "face up",
+                "朝上",
+                "不接触",
+                "晾干",
+            )
+        )
+
     def _action_intent_choice_is_generic_drying_without_wet_context(
         self,
         *,
@@ -4597,14 +4830,23 @@ class GraphAgent:
                 "remaining soap",
                 "soap suds",
                 "still has soap",
+                "still dirty",
+                "not rinsed clean",
                 "wash it clean first",
                 "washing it clean first",
                 "remove soap",
                 "removing soap",
                 "clean off the soap",
                 "rinse it clean first",
+                "washed next",
+                "to be cleaned next",
+                "sink placement",
+                "wash area",
                 "还有肥皂",
                 "肥皂残留",
+                "还没洗干净",
+                "接下来要洗",
+                "放进水槽",
                 "先冲洗干净",
                 "先洗净",
             )
@@ -4621,11 +4863,15 @@ class GraphAgent:
                 "later consequence",
                 "current direct purpose is removing soap",
                 "current direct purpose is washing",
+                "current direct purpose is rinsing",
+                "placed for rinsing",
+                "placed to be cleaned next",
                 "first, not for drying",
                 "不是为了晾干",
                 "晾干是后续结果",
                 "当前直接目的是去除肥皂",
                 "当前直接目的是清洗",
+                "当前直接目的是冲洗",
             )
         )
 
