@@ -11,7 +11,11 @@ from pathlib import Path
 from hashlib import md5
 from typing import Any
 
-from food_agent.agent.action_intent import selected_choice_categories
+from food_agent.agent.action_intent import (
+    action_intent_needs_future_use_resolution,
+    action_intent_needs_pairwise_resolution,
+    selected_choice_categories,
+)
 from food_agent.agent.artifact_policy import artifact_reuse_prefixes_for_task
 from food_agent.agent.executor import GraphAgentExecutor
 from food_agent.agent.planner import GraphAgentPlanner
@@ -892,6 +896,12 @@ class GraphAgent:
             ):
                 state.add_memory("action_intent_resolution_withheld_for_broad_generic_claim=1")
                 continue
+            elif self._action_intent_resolution_should_withhold_timeline_review_bias_gap(
+                raw_result=raw_result,
+                state=state,
+            ):
+                state.add_memory("action_intent_resolution_withheld_for_timeline_review_bias_gap=1")
+                continue
             elif self._action_intent_resolution_should_withhold_mixed_horizon_overclaim(
                 raw_result=raw_result,
                 state=state,
@@ -1279,6 +1289,345 @@ class GraphAgent:
             )
         if best_is_final_placement:
             return not self._action_intent_choice_has_explicit_final_placement_evidence(best_choice, text)
+        return False
+
+    def _latest_action_intent_timeline_review_entry(
+        self,
+        state: AgentState,
+    ) -> tuple[int, dict[str, Any]] | None:
+        trace = list(getattr(state, "tool_trace", []) or [])
+        for index in range(len(trace) - 1, -1, -1):
+            call = trace[index]
+            if not isinstance(call, dict) or str(call.get("tool") or "") != "inspect_visual_evidence":
+                continue
+            raw_result = call.get("raw_result")
+            if isinstance(raw_result, dict) and self._action_intent_is_timeline_review_payload(raw_result):
+                return index, raw_result
+        return None
+
+    def _action_intent_is_timeline_review_payload(self, payload: dict[str, Any] | None) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        return any(
+            payload.get(key)
+            for key in (
+                "timeline_summary",
+                "immediate_result",
+                "next_action_hint",
+                "direct_purpose_hint",
+                "access_or_reveal_evidence",
+                "hand_free_enablement_evidence",
+                "next_use_evidence",
+                "ambiguity_note",
+            )
+        ) or bool(payload.get("needs_more_evidence"))
+
+    def _action_intent_timeline_review_requests_more_evidence(self, payload: dict[str, Any] | None) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        if payload.get("needs_more_evidence"):
+            return True
+        ambiguity = str(payload.get("ambiguity_note") or "").strip().lower()
+        if ambiguity:
+            return True
+        combined = " ".join(
+            str(payload.get(key) or "").strip().lower()
+            for key in ("direct_purpose_hint", "next_use_evidence", "next_action_hint")
+        )
+        weak_markers = (
+            "unclear",
+            "ambiguous",
+            "not enough",
+            "insufficient",
+            "cannot tell",
+            "can't tell",
+            "不明确",
+            "看不清",
+            "证据不足",
+        )
+        return any(marker in combined for marker in weak_markers)
+
+    def _action_intent_has_unresolved_timeline_review_gap(self, state: AgentState) -> bool:
+        if str(getattr(state, "task_family", "") or "") != "fine_grained_why_recognition":
+            return False
+        trace = list(getattr(state, "tool_trace", []) or [])
+        last_review_index: int | None = None
+        for index, call in enumerate(trace):
+            if not isinstance(call, dict) or str(call.get("tool") or "") != "inspect_visual_evidence":
+                continue
+            raw_result = call.get("raw_result")
+            if not isinstance(raw_result, dict) or not self._action_intent_is_timeline_review_payload(raw_result):
+                continue
+            if self._action_intent_timeline_review_requests_more_evidence(raw_result):
+                last_review_index = index
+        if last_review_index is None:
+            return False
+        saw_new_sampling = False
+        for call in trace[last_review_index + 1 :]:
+            if not isinstance(call, dict):
+                continue
+            tool = str(call.get("tool") or "")
+            raw_result = call.get("raw_result")
+            if tool in {"sample_sparse_frames", "extract_frames_for_range", "sample_frames_around_peaks", "retrieve_cached_artifacts"}:
+                saw_new_sampling = True
+                continue
+            if tool == "inspect_visual_evidence" and isinstance(raw_result, dict) and self._action_intent_is_timeline_review_payload(raw_result):
+                if not self._action_intent_timeline_review_requests_more_evidence(raw_result):
+                    return False
+                saw_new_sampling = False
+                continue
+            if tool in {"resolve_action_intent_pairwise", "resolve_action_intent_future_use"}:
+                if (
+                    saw_new_sampling
+                    and isinstance(raw_result, dict)
+                    and not raw_result.get("tool_failed")
+                    and raw_result.get("best_index") is not None
+                    and not raw_result.get("need_more_evidence")
+                ):
+                    return False
+            if tool == "infer_action_intent":
+                if isinstance(raw_result, dict) and not raw_result.get("tool_failed") and raw_result.get("best_index") is not None and not raw_result.get("need_future_evidence") and saw_new_sampling:
+                    return False
+        return True
+
+    def _action_intent_timeline_review_bias_profile(self, state: AgentState) -> dict[str, bool]:
+        review = self._latest_action_intent_timeline_review_entry(state)
+        empty = {
+            "has_review": False,
+            "needs_more_evidence": False,
+            "revealed_target_retrieval": False,
+            "revealed_slot_placement": False,
+            "revealed_fixture_enablement": False,
+            "hand_free_next_action": False,
+            "next_use_unclear": False,
+            "final_location_unclear": False,
+        }
+        if review is None:
+            return empty
+        _index, payload = review
+        text = " ".join(
+            str(payload.get(key) or "").strip().lower()
+            for key in (
+                "timeline_summary",
+                "immediate_result",
+                "next_action_hint",
+                "direct_purpose_hint",
+                "access_or_reveal_evidence",
+                "hand_free_enablement_evidence",
+                "next_use_evidence",
+                "target_location",
+                "ambiguity_note",
+            )
+        )
+
+        def has_any(markers: tuple[str, ...]) -> bool:
+            return any(marker in text for marker in markers)
+
+        reveal_focus = has_any(
+            (
+                "behind",
+                "hidden",
+                "reveal",
+                "revealed",
+                "freed slot",
+                "available spot",
+                "slot",
+                "后面",
+                "露出",
+                "空位",
+                "槽位",
+            )
+        )
+        return {
+            "has_review": True,
+            "needs_more_evidence": self._action_intent_timeline_review_requests_more_evidence(payload),
+            "revealed_target_retrieval": reveal_focus and has_any(
+                (
+                    "hidden jar",
+                    "hidden item",
+                    "retrieval is not yet visible",
+                    "retrieve",
+                    "pick up from behind",
+                    "take from behind",
+                    "取后面的",
+                    "拿后面的",
+                )
+            ),
+            "revealed_slot_placement": reveal_focus and has_any(
+                (
+                    "freed slot is the main ambiguity",
+                    "placement into the slot is not yet visible",
+                    "put into the slot",
+                    "place into the slot",
+                    "slot placement",
+                    "空位",
+                    "槽位",
+                    "放进",
+                    "归位",
+                )
+            ),
+            "revealed_fixture_enablement": reveal_focus and has_any(
+                (
+                    "scale behind",
+                    "revealed appliance",
+                    "revealed fixture",
+                    "turn on",
+                    "switch on",
+                    "tap area",
+                    "sink area",
+                    "露出的装置",
+                    "后面的秤",
+                    "龙头",
+                )
+            ),
+            "hand_free_next_action": has_any(
+                (
+                    "free hand",
+                    "freed hand",
+                    "other hand",
+                    "right hand",
+                    "left hand",
+                    "reach toward",
+                    "reaches toward",
+                    "moves toward",
+                    "tap area",
+                    "sink area",
+                    "turn on",
+                    "turn off",
+                    "open",
+                    "close",
+                    "另一只手",
+                    "龙头",
+                    "水槽",
+                )
+            ),
+            "next_use_unclear": has_any(
+                (
+                    "later use is still unclear",
+                    "next use is still unclear",
+                    "not yet visible whether",
+                    "not visible whether",
+                    "multiple later-use explanations remain plausible",
+                    "后续用途",
+                    "仍不清楚",
+                    "看不出之后",
+                )
+            ),
+            "final_location_unclear": has_any(
+                (
+                    "final location remains unclear",
+                    "not visible where",
+                    "whether it is put back",
+                    "whether it is returned",
+                    "where it ends up",
+                    "最终位置",
+                    "放回原处",
+                    "暂时移动",
+                )
+            ),
+        }
+
+    def _action_intent_resolution_should_withhold_timeline_review_bias_gap(
+        self,
+        *,
+        raw_result: dict[str, Any],
+        state: AgentState,
+    ) -> bool:
+        if not self._action_intent_has_unresolved_timeline_review_gap(state):
+            return False
+        bias = self._action_intent_timeline_review_bias_profile(state)
+        if not bias["has_review"] or not bias["needs_more_evidence"]:
+            return False
+        pair = self._action_intent_resolution_competing_pair(raw_result=raw_result, state=state)
+        if pair is None:
+            return False
+        best_index, competitor_index = pair
+        choices = [str(choice) for choice in getattr(state, "choices", [])]
+        question = str(getattr(state, "question", "") or "")
+        pair_indices = [best_index, competitor_index]
+        needs_future_use = action_intent_needs_future_use_resolution(
+            question=question,
+            choices=choices,
+            indices=pair_indices,
+        )
+        needs_pairwise = action_intent_needs_pairwise_resolution(
+            question=question,
+            choices=choices,
+            indices=pair_indices,
+        )
+        best_choice = choices[best_index].lower()
+        competitor_choice = choices[competitor_index].lower()
+        text = " ".join(
+            str(raw_result.get(key) or "")
+            for key in (
+                "reason",
+                "decisive_observation",
+                "needed_observation",
+                "direct_effect",
+                "downstream_action",
+            )
+        ).lower()
+        if self._action_intent_text_has_negative_evidence(text):
+            return True
+        if any(
+            token in text
+            for token in (
+                "whether",
+                "still unclear",
+                "unclear",
+                "not visible",
+                "not shown",
+                "cannot tell",
+                "can't tell",
+                "ambiguous",
+                "multiple explanations",
+                "是否",
+                "不明确",
+                "仍不清楚",
+                "有歧义",
+            )
+        ):
+            return True
+        if bias["final_location_unclear"] and (
+            needs_future_use
+            or self._action_intent_choice_is_final_placement_candidate(best_choice)
+            or self._action_intent_choice_is_final_placement_candidate(competitor_choice)
+        ):
+            return not self._action_intent_choice_has_explicit_final_placement_evidence(best_choice, text)
+        if bias["next_use_unclear"] and needs_future_use:
+            categories = selected_choice_categories(choices, [best_index])
+            best_categories = set(categories.get(best_index) or set())
+            return not self._action_intent_choice_has_explicit_later_outcome_evidence(best_choice, best_categories, text)
+        if bias["revealed_slot_placement"] and needs_pairwise:
+            return not any(
+                token in text
+                for token in (
+                    "placed into the freed slot",
+                    "put into the freed slot",
+                    "freed slot is used",
+                    "slot becomes the destination",
+                    "放进腾出的槽位",
+                    "归位到空位",
+                )
+            )
+        if bias["revealed_target_retrieval"] and needs_pairwise:
+            return not any(
+                token in text
+                for token in (
+                    "retrieved from behind",
+                    "picked up from behind",
+                    "taken from behind",
+                    "hidden item is picked up",
+                    "取出后面的",
+                    "拿到后面的",
+                )
+            )
+        if (bias["revealed_fixture_enablement"] or bias["hand_free_next_action"]) and needs_pairwise:
+            direct_effect = str(raw_result.get("direct_effect") or "").strip().lower()
+            downstream_action = str(raw_result.get("downstream_action") or "").strip().lower()
+            if not direct_effect or not downstream_action:
+                return True
+            return not self._action_intent_text_has_direct_positive_evidence(f"{direct_effect} {downstream_action}")
         return False
 
     def _action_intent_text_explicitly_rules_out_exact_downstream_chain(self, text: str) -> bool:
