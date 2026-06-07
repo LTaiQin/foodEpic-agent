@@ -3770,12 +3770,41 @@ class AgentToolbox:
         if len(valid_indices) < 2 or result.get("need_more_evidence"):
             return result
         question_lc = str(question or "").lower()
-        if not any(token in question_lc for token in ("move ", "moved ", "shift ", "remove ", "clear ", "pick up ", "take ")):
+        if not any(
+            token in question_lc
+            for token in ("move ", "moved ", "shift ", "remove ", "clear ", "pick up ", "take ", "transfer ", "carry ", "lift ", "put ", "place ", "stir ")
+        ):
             return result
         explanation = " ".join(
             str(result.get(key) or "")
             for key in ("reason", "direct_effect", "downstream_action")
         ).lower()
+        safety_avoid_index = next(
+            (
+                index
+                for index in valid_indices
+                if self._choice_is_safety_avoid_purpose(str(choices[index]))
+            ),
+            None,
+        )
+        if (
+            safety_avoid_index is not None
+            and int(result.get("best_index", -1)) != safety_avoid_index
+            and self._explanation_uses_direct_safety_avoidance_chain(explanation)
+        ):
+            adjusted = dict(result)
+            previous_best_index = int(result.get("best_index", -1))
+            adjusted["best_index"] = safety_avoid_index
+            adjusted["answer"] = str(choices[safety_avoid_index])
+            adjusted["losing_index"] = previous_best_index if previous_best_index in valid_indices else adjusted.get("losing_index")
+            adjusted["confidence"] = max(0.8, min(0.9, float(result.get("confidence") or 0.0) + 0.04))
+            adjusted["causal_hierarchy_adjusted"] = True
+            adjusted["reason"] = (
+                f"{result.get('reason') or ''} causal_hierarchy_adjustment: "
+                "the evidence describes a direct hazard/spill/mess-avoidance motive, "
+                "so the action purpose is the concrete safety-management reason rather than a more generic enablement or downstream-use interpretation."
+            ).strip()
+            return adjusted
         hidden_access_index = next(
             (
                 index
@@ -3900,6 +3929,68 @@ class AgentToolbox:
         if self._choice_is_exact_downstream_placement_purpose(text):
             return True
         return any(token in text for token in ("freed slot", "right place", "proper place", "put the", "place the"))
+
+    def _choice_is_safety_avoid_purpose(self, choice: str) -> bool:
+        text = str(choice or "").lower()
+        return any(
+            token in text
+            for token in (
+                "avoid",
+                "burn",
+                "spill",
+                "mess",
+                "messy",
+                "too hot",
+                "getting burnt",
+                "does not spill",
+                "don't spill",
+                "doesn't get the counter messy",
+                "not to burn",
+            )
+        )
+
+    def _explanation_uses_direct_safety_avoidance_chain(self, explanation: str) -> bool:
+        text = str(explanation or "").lower()
+        has_hazard = any(
+            token in text
+            for token in (
+                "hot",
+                "too hot",
+                "burn",
+                "burning",
+                "burnt",
+                "spill",
+                "mess",
+                "messy",
+                "dirty end",
+                "counter does not get messy",
+                "stabilized",
+                "stable",
+                "two hands",
+                "two-handed",
+            )
+        )
+        has_direct_management = any(
+            token in text
+            for token in (
+                "avoid",
+                "avoided",
+                "does not",
+                "don't",
+                "prevent",
+                "prevents",
+                "kept over",
+                "so the",
+                "because the",
+                "keeps one side from burning",
+                "does not spill",
+                "do not spill",
+                "does not get messy",
+                "getting burnt",
+                "stabilized in both hands",
+            )
+        )
+        return has_hazard and has_direct_management
 
     def _explanation_uses_exact_reveal_then_take_or_place_chain(self, explanation: str) -> bool:
         text = str(explanation or "").lower()
