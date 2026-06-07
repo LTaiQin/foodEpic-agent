@@ -29,8 +29,8 @@
 ### 16.2.2 当前稳定基线
 
 - 专项回归命令：`pytest -q tests/test_graph_agent.py -k 'action_intent'`
-- 2026-06-07 当前结果：`127 passed, 334 deselected`
-- 相比本轮进入专项时的起点 `107 passed, 300 deselected`，当前阶段性增量为 `+20 passed`
+- 2026-06-07 当前结果：`201 passed, 337 deselected`
+- 相比本轮进入专项时的起点 `107 passed, 300 deselected`，当前阶段性增量为 `+94 passed`
 - 当前执行策略：why 逻辑不再追求“接近完美覆盖”，而是维持“足够可用、回归稳定、无明显结构性退化”的维护态；后续优先级切换到完整 agent 功能闭环与小样本真实验证。
 
 这说明 why 题已经不再是“直接把问题丢给模型猜答案”，而是已经存在完整骨架：
@@ -100,6 +100,47 @@
 - 本轮提交：why 题 textual fallback 的输入证据改为当前题/当前时窗 scoped evidence，不再把无关 session summary、旧时窗观测、planner/verifier 噪声直接喂给 `rank_choices_from_state`
 - 本轮提交：why 题 repeated visual failure 的恢复顺序改为 `specialized resolution > textual fallback`，当前题已有足够原始帧时先走 `future_use/pairwise` 专用裁决
 - 本轮提交：`future_use` toolbox hierarchy 补上 same-object residue-release，高频 `tap/shake/tilt/hit` 动作在专用裁决层优先翻正到“残余内容物掉回原容器/锅/碗/水槽”
+- 本轮提交：why 题在 `followup_transition / followup_peaks` 之后新增“短时序证据复核”分支，先让 agent 总结动作后立刻结果、下一步手部动作和 `hand-free / access / next-use` 证据，再回到 `infer_action_intent`
+- 本轮提交：`inspect_visual_evidence` 的写回字段扩到 `timeline_summary / immediate_result / next_action_hint / direct_purpose_hint / ambiguity_note`，并在 `needs_more_evidence=true` 时显式保留 `need_disambiguating_evidence`
+- 本轮提交：why 题 `inspect_visual_evidence -> infer_action_intent` 的回跳逻辑已改为识别 timeline review；若复核仍判定证据不足，则继续 `followup_ext2` 或转入 `future_use / pairwise` 专用裁决，而不是重新退回只看 `segment` 的早收口路径
+- 本轮提交：verifier 现已识别“最近一次 why timeline review 明确要求更多证据，但之后没有新的专用裁决/新证据重推”的未决状态；此时即使存在 `action_intent_best_index` 也会阻止 finish，避免 agent 因局部高置信再次早收口
+- 本轮提交：timeline review 的结构化线索现在会反向指导下一轮补帧；`hand-free / access / reveal` 类歧义会触发更近、更密的尾部补帧，`next-use` 类歧义会自动拉长后续窗口，避免补帧仍然是统一模板
+- 本轮提交：`future_use` 专用裁决现在只在存在 timeline review 线索时收缩候选集；它会优先保留当前冲突候选与 review 指向的类别，减少无关选项污染，同时在没有 review 时保持原来的全候选保守行为
+- 本轮提交：`pairwise` 专用裁决也已接入 timeline review 候选收缩；只有在 review 已明确暴露 `hand-free / access / space / return` 类冲突时，才把候选缩成真正的对决项，否则保持原有候选顺序不动
+- 本轮提交：timeline review 现在已前推到 specialized resolver 级别；`followup_route` 会直接利用 review 线索在 `future_use` 与 `pairwise` 之间做偏置分流，而不再完全依赖旧的静态启发式
+- 本轮提交：`infer_action_intent / resolve_action_intent_pairwise / resolve_action_intent_future_use` 已不再把 timeline review 混成一串普通 notes；现在会把 `timeline_summary / immediate_result / next_action_hint / direct_purpose_hint / next_use_evidence / ambiguity_note` 组织成结构化证据块喂给模型，优先约束 why 判题
+- 本轮提交：executor 写回的 `inspection; ...` 摘要已显式包含 `needs_more_evidence=1/0`，toolbox 新增 review guard；当 timeline review 已明确提示“证据不足/仍有歧义”，而当前 why 推理又缺少更强 post-action 结果时，会强制继续补帧而不是过早收口
+- 本轮提交：why 题关键帧选择器已从静态模板升级为“按歧义类型选帧”；`future_use` 类歧义会优先保留更晚的 `followup_ext2/ext3/ext4`，`access / reveal / hand-free` 类歧义会优先保留更近的 `followup_transition`，`final placement / return / store` 类歧义会更偏后期结果帧
+- 本轮提交：why 题最终送给视觉模型的图片序列现在会按推断时间强制排序，不再只是按类别拼接；这保证了 prompt 中“图片按时间顺序排列”的前提真实成立，减少模型对动作链条的误读
+- 本轮提交：结合已有 why 真实残差，`towel / cloth / tea towel` 这类“拿起后是去擦具体目标、擦手，还是只是收起/放回”的题，followup 路由已从泛化 clean/dry 冲突升级为 `transport-vs-use` 专用 future-use 路由；当 top-2 候选里暂时没包含 relocation/store 候选，但全局选项里存在这类冲突时，也会主动补更长结果帧，而不是停在局部 clean/dry 猜测
+- 本轮提交：verifier 现已不再把 `action_intent_unresolved_rerank_best_index` 当成 specialized resolution 成功信号；凡是被判定为 `future_use / pairwise` 型 why 题，没有真正跑出专用裁决成功时，默认不能结束。只有连续视觉失败触发的文本兜底路径，才允许在满足当前题 artifact grounding、前后置证据和无二级冲突时保守收口
+- 本轮提交：针对 `workspace vs safety` 的 why 冲突，`planner` 的 pairwise 候选重排已不再只看上一轮 `reason`；现在会同时读取 timeline review 中的 `hot stove / burner / heat / spill risk` 等危险线索。当当前 top 候选仍只是“腾空间/开始备菜”这类安全无关解释时，会主动把 `safety_avoid` 选项拉入 pairwise 专用裁决，而不是让两个近义 workspace 候选彼此对决
+- 本轮提交：新增正反两条保护测试，分别覆盖“timeline 已出现热源危险时主动拉入安全候选”和“缺少 workspace / hazard 线索时不乱注入 safety 候选”；专项回归已更新到 `194 passed`
+- 本轮提交：修复了 `planner` 中 `inspect_visual_evidence -> why` 分支的缩进错误。此前 why 题在拿到 timeline review 后，本应进入 `transition probe / specialized resolution / reinfer` 的链路，实际却可能直接跌回兜底路径；这会显著削弱“主动补关键帧”和“延迟定答”的真实效果。该结构性问题已修复
+- 本轮提交：why 题在 timeline review 已明确指出“当前仍有多个解释成立”时，不再一律先走泛化 `followup_ext2`。现在会优先尝试 `transition probe`：围绕动作尾部和紧随其后的短窗口做更密的关键帧搜索，先找能立刻排除竞争目的的决定性瞬间；只有这种近窗密采样不适用时，才退回更长窗口的额外 followup
+- 本轮提交：新增测试分别覆盖“timeline review 的 hand-free / immediate-next-action 歧义优先触发 transition probe”和“later-use 类歧义仍保持较长 followup，而不是误触发近窗密采样”；专项回归已更新到 `195 passed`
+- 本轮提交：`transition probe` 的时间窗不再是统一模板。现在会按 why 冲突类型选择短窗落点：
+  - `hand_free / next manipulation`：更靠近动作尾部，优先看另一只手立刻去做什么；
+  - `hidden access / reveal`：看动作后紧接着是否真的取到、碰到或露出目标；
+  - `safety / spill`：优先看是否立刻远离热源、边缘或风险位置；
+  - `final placement / return`：窗口后移，优先看物体最终是否真的被放回、归位或收起；
+  - `future use`：窗口后移，优先看是否真的出现称重、倒空、检查、清洗等后续用途
+- 本轮提交：新增测试直接保护“final placement 型冲突的 transition probe 会后移”和“future-use 型冲突的 transition probe 会后移”，而原有 `hand_free` 与 `access` 类近窗行为保持不退化；专项回归已更新到 `197 passed`
+- 本轮提交：`verifier` 新增了 close-call finish gate。现在 why 题不会只因为“最近一次 specialized tool 跑出了 best_index”就自动视为可结束；如果最新 `infer_action_intent / resolve_action_intent_pairwise / resolve_action_intent_future_use` 结果仍然显示：
+  - top-2 候选语义上仍然不同；
+  - specialized confidence 还不够高；
+  - `future_use` 的决定性观察为空，或 top-2 分差仍然很近；
+  - `pairwise` 缺少明确 `direct_effect / downstream_action`
+  那么 verifier 会继续要求 `need_disambiguating_evidence`，阻止过早 finish
+- 本轮提交：新增两条 verifier 测试，分别覆盖“future-use close call 必须继续找证据”和“future-use 已有决定性后续观察时允许 finish”；专项回归已更新到 `199 passed`
+- 本轮提交：修复 `planner` 中 why close-call 恢复链路的两个结构性缺口：
+  - `_recover_action_intent_after_verifier_blocked_finish(...)` 现在已具备完整的候选索引规整能力，不再因为 helper 缺失而使 close-call 恢复逻辑脆弱；
+  - `state-driven candidate` 与 `heuristic fallback` 都已接入同一条“verifier blocked -> targeted recovery”主线。也就是说，当 why 题已经被 verifier 明确判为 `need_disambiguating_evidence` 时，不管 planner 当前走的是模型规划还是启发式规划，都会优先回到 `extract_frames_for_range / resolve_action_intent_*` 这类专用补证路径，而不是被泛化的 `detect_audio_peaks` 或其他廉价候选截走
+- 本轮提交：`transition probe` 对 `future_use` close-call 的触发条件已放宽到真正需要的范围。当 `resolve_action_intent_future_use` 仍没有 `decisive_observation`，且 top-2 分差很小或理由文本显式承认“仍不清楚/多个解释仍可能”时，planner 会优先在动作尾部后的短窗口做密采样，主动寻找“是否真的去称重/倒空/检查/放回”的决定性瞬间，而不是直接退回普通长窗 followup
+- 本轮提交：新增两条 planner 测试，分别保护：
+  - “why 题在 verifier 拦下 close-call finish 后，优先进入 targeted transition probe”
+  - “已经存在决定性 future-use 证据时，不会误触发 close-call recovery”
+- 本轮提交：专项回归已更新到 `201 passed`
 
 ### 16.2.4 当前真正的瓶颈
 
@@ -147,7 +188,7 @@
 
 只有下面七条同时满足，才能认为 why 逻辑专项阶段性完成：
 
-- [ ] `pytest -q tests/test_graph_agent.py -k 'action_intent'` 持续全绿
+- [x] `pytest -q tests/test_graph_agent.py -k 'action_intent'` 持续全绿
 - [ ] 高频语义残差簇完成至少一轮系统压缩，而不是继续靠单样例补丁
 - [ ] planner 已形成“按冲突类型补前置帧/当前帧/结果帧”的稳定路由
 - [ ] verifier 明确阻止 `future evidence pending` 和 `direct-purpose insufficient` 的过早 finish
