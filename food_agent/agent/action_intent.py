@@ -498,6 +498,30 @@ def action_intent_needs_pairwise_resolution(
     return bool(needs and resolver == "pairwise")
 
 
+def action_intent_requires_strict_visual_disambiguation(
+    *,
+    question: str,
+    choices: list[str],
+    indices: Iterable[int] | None = None,
+) -> bool:
+    profile = action_intent_conflict_profile(question=question, choices=choices, indices=indices)
+    active_categories = set(profile["active_categories"])
+    if _question_requires_state_change_evidence(question) and {
+        "open_close",
+        "measure_weigh",
+    }.issubset(active_categories):
+        return True
+    if _question_requires_residue_release_evidence(question) and {
+        "clean_dry",
+        "transfer_contents",
+    }.issubset(active_categories):
+        return True
+    if _question_requires_transport_vs_use_evidence(question) and "clean_dry" in active_categories:
+        if {"generic_relocation", "final_place_return"} & active_categories:
+            return True
+    return False
+
+
 def action_intent_needs_precondition_context(
     *,
     question: str,

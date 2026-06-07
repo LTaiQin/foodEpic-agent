@@ -11,6 +11,7 @@ from food_agent.agent.action_intent import (
     action_intent_needs_future_use_resolution,
     action_intent_needs_pairwise_resolution,
     action_intent_needs_precondition_context,
+    action_intent_requires_strict_visual_disambiguation,
     selected_choice_categories,
 )
 from food_agent.agent.state import AgentState
@@ -330,6 +331,12 @@ class GraphAgentVerifier:
             return False
         choices = [str(choice) for choice in getattr(state, "choices", [])]
         question = str(getattr(state, "question", "") or "")
+        if action_intent_requires_strict_visual_disambiguation(
+            question=question,
+            choices=choices,
+            indices=None,
+        ):
+            return False
         if action_intent_needs_precondition_context(question=question, choices=choices, indices=None):
             if not self._action_intent_has_precondition_grounding(state):
                 return False

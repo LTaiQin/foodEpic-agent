@@ -29,8 +29,8 @@
 ### 16.2.2 当前稳定基线
 
 - 专项回归命令：`pytest -q tests/test_graph_agent.py -k 'action_intent'`
-- 2026-06-07 当前结果：`225 passed, 344 deselected`
-- 相比本轮进入专项时的起点 `107 passed, 300 deselected`，当前阶段性增量为 `+118 passed`
+- 2026-06-07 当前结果：`227 passed, 344 deselected`
+- 相比本轮进入专项时的起点 `107 passed, 300 deselected`，当前阶段性增量为 `+120 passed`
 - 当前执行策略：why 逻辑不再追求“接近完美覆盖”，而是维持“足够可用、回归稳定、无明显结构性退化”的维护态；后续优先级切换到完整 agent 功能闭环与小样本真实验证。
 
 这说明 why 题已经不再是“直接把问题丢给模型猜答案”，而是已经存在完整骨架：
@@ -234,7 +234,18 @@
 - 本轮新增并通过 `2` 条定向测试，覆盖：
   - `flip orange cloth` 会把缺失的 `residue_release` 候选重新拉回 top pair
   - `tap kitchen scale` 会把缺失的 `measure_weigh` 候选重新拉回 top pair
-- 本轮专项总回归更新为 `225 passed, 344 deselected`
+- 本轮提交：高歧义 why 桶的 repeated-failure 路径继续收紧。对于 `residue_release / state_change / transport-vs-use` 这三类必须看动作后证据的题：
+  - `infer_action_intent` 连续失败后，不再允许直接降级成 `rank_choices_from_state -> finish`；
+  - planner 会优先继续补 `followup` / 回到 `pairwise` 专用裁决 / 补空间证据，而不是让文本 fallback 直接收口；
+  - verifier 也同步收紧：即使已经有当前题 artifact grounding，这三类题只要落入 repeated-failure textual fallback，也仍然默认视为 `need_disambiguating_evidence`，不允许当成稳定答案。
+- 本轮提交：`_fallback_action_intent_pairwise_candidate_indices(...)` 已补齐高歧义桶的专用对决候选，不再只会回退到 `access / make space / put back` 这一类老 pair：
+  - `flip / shake / tilt / tip` 会优先比较 `clean_dry` vs `transfer_contents`
+  - `tap / press / push + scale/button/switch/knob` 会优先比较 `open_close` vs `measure_weigh`
+  - `towel / cloth + pick up/move/take` 会优先比较 `clean_dry` vs `generic_relocation/final_place_return`
+- 本轮新增并通过 `2` 条保护测试，覆盖：
+  - strict `residue_release` bucket 的 textual fallback 会继续阻断 finish
+  - strict `residue_release` bucket 在 planner 中不会再直接 `finish`，而是继续补帧或转专用裁决
+- 本轮专项总回归更新为 `227 passed, 344 deselected`
 - 本轮小规模真实 probe：
   - 旧 `towel-cluster` 摘要中 `flip orange cloth` 仍是残差，正是本轮语义救援要消除的典型失败；
   - 新 `state-change-cluster` probe 已完成 `1/2`，当前已完成样本准确率 `1.0`；剩余样本仍在跑，说明本轮修改至少已开始覆盖真实状态变化桶，而不只是单测

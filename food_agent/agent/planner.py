@@ -14,6 +14,7 @@ from food_agent.agent.action_intent import (
     action_intent_needs_future_use_resolution,
     action_intent_needs_pairwise_resolution,
     action_intent_needs_precondition_context,
+    action_intent_requires_strict_visual_disambiguation,
     selected_choice_categories,
 )
 from food_agent.agent.artifact_policy import artifact_reuse_prefixes_for_task
@@ -3279,14 +3280,26 @@ class GraphAgentPlanner:
 
     def _fallback_action_intent_pairwise_candidate_indices(self, state: AgentState) -> list[int]:
         choices = [str(choice) for choice in getattr(state, "choices", [])]
+        question = str(getattr(state, "question", "") or "").lower()
         categories_by_index = selected_choice_categories(choices)
-        preferred_pairs = (
+        preferred_pairs: tuple[tuple[str, str], ...] = (
             ("access_retrieve", "space_clear"),
             ("access_retrieve", "final_place_return"),
             ("space_clear", "final_place_return"),
             ("safety_avoid", "space_clear"),
             ("safety_avoid", "access_retrieve"),
         )
+        if any(token in question for token in ("<flip ", "<turn ", "<shake ", "<tilt ", "<tip ", "<tap ", "<hit ", "<knock ")):
+            preferred_pairs = (
+                ("clean_dry", "transfer_contents"),
+                ("open_close", "measure_weigh"),
+            ) + preferred_pairs
+        if any(token in question for token in ("towel", "cloth", "napkin", "paper towel", "tea towel", "dish cloth", "hand towel")):
+            if any(token in question for token in ("<pick up ", "<grab ", "<lift ", "<take ", "<move ", "<shift ")):
+                preferred_pairs = (
+                    ("clean_dry", "generic_relocation"),
+                    ("clean_dry", "final_place_return"),
+                ) + preferred_pairs
         for left_category, right_category in preferred_pairs:
             left_index = next((index for index, cats in categories_by_index.items() if left_category in cats), None)
             right_index = next((index for index, cats in categories_by_index.items() if right_category in cats and index != left_index), None)
@@ -3757,6 +3770,47 @@ class GraphAgentPlanner:
                 "evidence": deduped_evidence[:30],
                 "working_memory": working_memory[:30],
             },
+        )
+
+    def _build_action_intent_strict_text_fallback_recovery_decision(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+    ) -> PlannerDecision | None:
+        action_frames = self._select_action_intent_frames(
+            state,
+            hints,
+            limit=8,
+            require_current_scope=True,
+        )
+        if action_frames:
+            missing_followup = self._build_action_intent_missing_post_action_followup_decision(
+                state=state,
+                hints=hints,
+                action_frames=action_frames,
+                focus="strict_visual_disambiguation_after_text_fallback",
+            )
+            if missing_followup is not None:
+                return missing_followup
+        specialized_resolution = self._build_action_intent_specialized_resolution_before_text_fallback(
+            state=state,
+            hints=hints,
+        )
+        if specialized_resolution is not None:
+            return specialized_resolution
+        spatial_probe = self._build_action_intent_spatial_probe_decision(
+            state=state,
+            hints=hints,
+            result=None,
+            thought="why 题属于高歧义动作理解桶，文本 fallback 不能直接收口；先继续补空间/后续证据再裁决。",
+        )
+        if spatial_probe is not None:
+            return spatial_probe
+        return self._build_action_intent_specialized_recovery_decision(
+            state=state,
+            hints=hints,
+            thought="why 题属于高歧义动作理解桶，文本 fallback 不能直接收口；回到当前题专用动作目的判断继续找证据。",
         )
 
     def _can_use_visual_inspection(self, state: AgentState) -> bool:
@@ -5557,6 +5611,17 @@ class GraphAgentPlanner:
                 )
                 if specialized_resolution is not None:
                     return specialized_resolution
+                if action_intent_requires_strict_visual_disambiguation(
+                    question=str(getattr(state, "question", "") or ""),
+                    choices=[str(choice) for choice in getattr(state, "choices", [])],
+                    indices=None,
+                ):
+                    strict_recovery = self._build_action_intent_strict_text_fallback_recovery_decision(
+                        state=state,
+                        hints=hints,
+                    )
+                    if strict_recovery is not None:
+                        return strict_recovery
                 return self._build_action_intent_text_fallback_rank_decision(
                     state,
                     thought="why 题专用视觉判断连续失败，改用结构化文本因果裁决，避免继续空转 query_time。",
@@ -6285,6 +6350,17 @@ class GraphAgentPlanner:
             )
         if isinstance(last_result, dict) and last_tool.get("tool") == "rank_choices_from_state" and last_result.get("best_index") is not None:
             if self._action_intent_text_fallback_ready(state):
+                if action_intent_requires_strict_visual_disambiguation(
+                    question=str(getattr(state, "question", "") or ""),
+                    choices=[str(choice) for choice in getattr(state, "choices", [])],
+                    indices=None,
+                ):
+                    strict_recovery = self._build_action_intent_strict_text_fallback_recovery_decision(
+                        state=state,
+                        hints=hints,
+                    )
+                    if strict_recovery is not None:
+                        return strict_recovery
                 best_index = int(last_result["best_index"])
                 return PlannerDecision(
                     thought="why 题专用视觉判断连续失败后，结构化文本因果裁决已完成，直接结束。",
@@ -6737,6 +6813,18 @@ class GraphAgentPlanner:
             return decision
         if decision.tool == "rank_choices_from_state":
             if self._action_intent_text_fallback_ready(state):
+                if action_intent_requires_strict_visual_disambiguation(
+                    question=str(getattr(state, "question", "") or ""),
+                    choices=[str(choice) for choice in getattr(state, "choices", [])],
+                    indices=None,
+                ):
+                    recovered = self._build_action_intent_strict_text_fallback_recovery_decision(
+                        state=state,
+                        hints=hints,
+                    )
+                    if recovered is not None and recovered.tool != decision.tool:
+                        self._state_add_memory(state, f"planner_override strict_text_fallback_rank={decision.tool} -> {recovered.tool}")
+                        return recovered
                 return decision
             if isinstance(last_result, dict) and last_tool.get("tool") == "rank_choices_from_state":
                 if float(last_result.get("confidence") or 0.0) < 0.8:
