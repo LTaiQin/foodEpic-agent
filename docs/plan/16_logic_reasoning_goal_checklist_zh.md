@@ -368,6 +368,34 @@ why 题专用裁决工具入口：
   - 真正 store away
   - 真正 postwash dry
 
+进展补充：
+
+- [x] 已把这组语义从少数 utensil 名称继续扩展到更通用的放置后果 bucket，并接入 `agent_toolbox._apply_action_intent_future_use_causal_hierarchy(...)`：
+  - `generic store / finished / dry -> hygiene surface protection staging`
+  - `generic store / finished / dry -> unfinished cleanup in sink/wash area`
+  - `generic store / finished -> postwash drying`
+  - `generic dry -> finished with object`（当没有 wet-after-wash context 且也不存在 immediate reuse 时）
+- [x] 这轮不再只依赖 spoon/spatula/ladle：
+  - 已扩到 `tongs / plate / cup / whisk` 等更多普通厨房对象
+  - 规则核心改为“放置语境 + 后续证据”，而不是对象名字本身
+- [x] 已新增并通过 `4` 条定向测试：
+  - `finished -> hygiene placement`
+  - `finished -> postwash drying`
+  - `store -> unfinished cleanup`
+  - `generic dry -> finished with object`
+- [x] 已补跑局部回归：
+  - `pytest -q tests/test_graph_agent.py -k 'future_use_causal_hierarchy or future_use_sufficiency'`
+  - 结果：`23 passed, 424 deselected`
+- [x] 已补跑专项总回归：
+  - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+  - 结果：`120 passed, 327 deselected`
+
+当前剩余缺口：
+
+- [ ] 真实 replay 上还未统计这组泛化规则对不同 object family 的翻正收益
+- [ ] `final placement / unfinished cleanup / postwash drying` 三者在更复杂多阶段洗涤链中的边界还可以继续压
+- [ ] `hygiene placement` 仍可继续扩到更多 dirty/oily/surface-protection 措辞变体
+
 完成标准：
 
 - 这类题不再依赖个别工具名字触发

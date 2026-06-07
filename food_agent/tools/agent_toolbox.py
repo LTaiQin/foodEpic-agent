@@ -3260,6 +3260,30 @@ class AgentToolbox:
                 "so the direct purpose is checking the contents/doneness rather than emptying, pouring out, or serving."
             ).strip()
             return adjusted
+        hygiene_index = next(
+            (
+                index
+                for index in valid_indices
+                if self._choice_is_hygiene_surface_protection_future_use_purpose(str(choices[index]).lower())
+            ),
+            None,
+        )
+        drying_index = next(
+            (
+                index
+                for index in valid_indices
+                if self._choice_is_postwash_drying_future_use_purpose(str(choices[index]).lower())
+            ),
+            None,
+        )
+        unfinished_cleanup_index = next(
+            (
+                index
+                for index in valid_indices
+                if self._choice_is_unfinished_cleanup_future_use_purpose(str(choices[index]).lower())
+            ),
+            None,
+        )
         immediate_reuse_index = next(
             (
                 index
@@ -3334,6 +3358,99 @@ class AgentToolbox:
                 f"{result.get('reason') or ''} causal_hierarchy_adjustment: "
                 "the evidence shows a concrete return location such as a drawer, cupboard, hook, rack, or other precise home position, "
                 "so exact final placement is stronger than a generic store-away or finished-with interpretation."
+            ).strip()
+            return adjusted
+        if (
+            hygiene_index is not None
+            and best_index in {
+                index
+                for index in (
+                    generic_store_index,
+                    finished_with_object_index,
+                    drying_index,
+                )
+                if index is not None
+            }
+            and best_index != hygiene_index
+            and self._explanation_uses_hygiene_surface_protection_chain(explanation)
+        ):
+            adjusted = dict(result)
+            adjusted["best_index"] = hygiene_index
+            adjusted["answer"] = str(choices[hygiene_index])
+            adjusted["confidence"] = max(0.8, min(0.89, float(result.get("confidence") or 0.0) + 0.04))
+            adjusted["causal_hierarchy_adjusted"] = True
+            adjusted["reason"] = (
+                f"{result.get('reason') or ''} causal_hierarchy_adjustment: "
+                "the evidence shows placement hygiene such as a dirty/oily end being kept over a tray/board or off the countertop, "
+                "so surface-protection staging is more direct than generic drying, storage, or simply being finished with the object."
+            ).strip()
+            return adjusted
+        if (
+            unfinished_cleanup_index is not None
+            and best_index in {
+                index
+                for index in (
+                    generic_store_index,
+                    finished_with_object_index,
+                    drying_index,
+                    exact_final_placement_index,
+                )
+                if index is not None
+            }
+            and best_index != unfinished_cleanup_index
+            and self._explanation_uses_unfinished_cleanup_chain(explanation)
+            and not self._explanation_uses_postwash_drying_chain(explanation)
+        ):
+            adjusted = dict(result)
+            adjusted["best_index"] = unfinished_cleanup_index
+            adjusted["answer"] = str(choices[unfinished_cleanup_index])
+            adjusted["confidence"] = max(0.8, min(0.89, float(result.get("confidence") or 0.0) + 0.04))
+            adjusted["causal_hierarchy_adjusted"] = True
+            adjusted["reason"] = (
+                f"{result.get('reason') or ''} causal_hierarchy_adjustment: "
+                "the evidence shows the object is being placed into an active wash area or has remaining soap/residue, "
+                "so unfinished cleanup is a more direct explanation than drying, storage, or being finished."
+            ).strip()
+            return adjusted
+        if (
+            drying_index is not None
+            and best_index in {
+                index
+                for index in (
+                    generic_store_index,
+                    finished_with_object_index,
+                )
+                if index is not None
+            }
+            and best_index != drying_index
+            and self._explanation_uses_postwash_drying_chain(explanation)
+        ):
+            adjusted = dict(result)
+            adjusted["best_index"] = drying_index
+            adjusted["answer"] = str(choices[drying_index])
+            adjusted["confidence"] = max(0.8, min(0.89, float(result.get("confidence") or 0.0) + 0.04))
+            adjusted["causal_hierarchy_adjusted"] = True
+            adjusted["reason"] = (
+                f"{result.get('reason') or ''} causal_hierarchy_adjustment: "
+                "the evidence shows a wet-after-wash placement intended to let the object drain or dry, "
+                "so postwash drying is more direct than generic storage or being finished with the object."
+            ).strip()
+            return adjusted
+        if (
+            finished_with_object_index is not None
+            and drying_index is not None
+            and best_index == drying_index
+            and self._explanation_uses_finished_with_object_not_drying_chain(explanation)
+        ):
+            adjusted = dict(result)
+            adjusted["best_index"] = finished_with_object_index
+            adjusted["answer"] = str(choices[finished_with_object_index])
+            adjusted["confidence"] = max(0.79, min(0.88, float(result.get("confidence") or 0.0) + 0.03))
+            adjusted["causal_hierarchy_adjusted"] = True
+            adjusted["reason"] = (
+                f"{result.get('reason') or ''} causal_hierarchy_adjustment: "
+                "the evidence shows the object is simply set aside with no wet-after-wash context and no immediate reuse, "
+                "so being finished with the object is more direct than a generic drying interpretation."
             ).strip()
             return adjusted
         return result
@@ -4670,6 +4787,66 @@ class AgentToolbox:
             )
         )
 
+    def _choice_is_hygiene_surface_protection_future_use_purpose(self, choice: str) -> bool:
+        text = str(choice or "").lower()
+        return any(
+            token in text
+            for token in (
+                "dirty end",
+                "dirty side",
+                "oily part",
+                "messy",
+                "not dirty",
+                "avoid mess",
+                "avoid dirtying",
+                "counter messy",
+                "keep the dirty end",
+                "弄脏",
+                "不弄脏",
+                "脏的一端",
+            )
+        )
+
+    def _choice_is_postwash_drying_future_use_purpose(self, choice: str) -> bool:
+        text = str(choice or "").lower()
+        return any(
+            token in text
+            for token in (
+                "to dry",
+                "allow",
+                "air dry",
+                "dry after washing",
+                "no spots",
+                "facing up",
+                "晾干",
+                "风干",
+                "水渍",
+            )
+        )
+
+    def _choice_is_unfinished_cleanup_future_use_purpose(self, choice: str) -> bool:
+        text = str(choice or "").lower()
+        return any(
+            token in text
+            for token in (
+                "wash next",
+                "to be washed",
+                "clean off the soap",
+                "remove the remaining soap",
+                "remove soap",
+                "rinse clean",
+                "wash it next",
+                "clean it next",
+                "placed in the sink",
+                "sink so it can be washed",
+                "清洗",
+                "洗掉肥皂",
+                "去除肥皂",
+                "放进水槽",
+                "接下来清洗",
+            )
+        )
+
     def _choice_is_immediate_reuse_future_use_purpose(self, choice: str) -> bool:
         text = str(choice or "").lower()
         return any(
@@ -4829,6 +5006,186 @@ class AgentToolbox:
             )
         )
         return has_reuse_signal and (has_nonstorage_signal or not has_true_storage_signal)
+
+    def _explanation_uses_hygiene_surface_protection_chain(self, explanation: str) -> bool:
+        text = str(explanation or "").lower()
+        has_hygiene_signal = any(
+            token in text
+            for token in (
+                "dirty end",
+                "dirty side",
+                "oily part",
+                "not touching the kitchen top",
+                "not touching the counter",
+                "over the tray",
+                "over the board",
+                "kept over the tray",
+                "kept over the board",
+                "counter does not get messy",
+                "avoid dirtying the counter",
+                "placement hygiene",
+                "脏的一端",
+                "不接触台面",
+                "放在托盘上方",
+                "放在砧板上方",
+                "避免弄脏台面",
+            )
+        )
+        return has_hygiene_signal
+
+    def _explanation_uses_unfinished_cleanup_chain(self, explanation: str) -> bool:
+        text = str(explanation or "").lower()
+        has_cleanup_signal = any(
+            token in text
+            for token in (
+                "soap residue",
+                "remaining soap",
+                "soap suds",
+                "still has soap",
+                "still dirty",
+                "not rinsed clean",
+                "to be cleaned next",
+                "washed next",
+                "clean off the soap",
+                "remove the remaining soap",
+                "sink placement",
+                "wash area",
+                "placed into the sink",
+                "placed in the sink",
+                "under running water",
+                "washing it clean first",
+                "remove soap",
+                "rinsed clean first",
+                "肥皂残留",
+                "还有肥皂",
+                "还没洗干净",
+                "接下来要洗",
+                "放进水槽",
+                "去除肥皂",
+            )
+        )
+        has_nonfinal_signal = any(
+            token in text
+            for token in (
+                "not storage",
+                "not stored",
+                "not drying yet",
+                "current direct purpose is washing",
+                "current direct purpose is removing soap",
+                "not storage or drying",
+                "不是收纳",
+                "不是晾干",
+                "当前直接目的是清洗",
+                "当前直接目的是去除肥皂",
+            )
+        )
+        return has_cleanup_signal or (has_cleanup_signal and has_nonfinal_signal)
+
+    def _explanation_uses_postwash_drying_chain(self, explanation: str) -> bool:
+        text = str(explanation or "").lower()
+        has_wet_context = any(
+            token in text
+            for token in (
+                "washed",
+                "rinsed",
+                "wet",
+                "water",
+                "soap",
+                "droplets",
+                "after washing",
+                "流水",
+                "冲洗",
+                "洗过",
+                "肥皂",
+                "水滴",
+            )
+        )
+        has_drying_placement = any(
+            token in text
+            for token in (
+                "facing up",
+                "not touching",
+                "placed aside",
+                "set down",
+                "to dry",
+                "allow it to dry",
+                "drain and dry",
+                "face up",
+                "air dry",
+                "朝上",
+                "不接触",
+                "晾干",
+                "风干",
+            )
+        )
+        return has_wet_context and has_drying_placement
+
+    def _explanation_uses_finished_with_object_not_drying_chain(self, explanation: str) -> bool:
+        text = str(explanation or "").lower()
+        has_finished_signal = any(
+            token in text
+            for token in (
+                "no longer needed",
+                "simply placed",
+                "placed aside",
+                "set aside",
+                "put down",
+                "rests on",
+                "no further use",
+                "no more use",
+                "not reused",
+                "finished with",
+                "放在一边",
+                "放下",
+                "不再需要",
+                "不再使用",
+            )
+        )
+        has_wet_context = any(
+            token in text
+            for token in (
+                "washed",
+                "rinsed",
+                "wet",
+                "water",
+                "soap",
+                "droplets",
+                "after washing",
+                "流水",
+                "冲洗",
+                "洗过",
+                "肥皂",
+                "水滴",
+            )
+        )
+        denies_wet_context = any(
+            token in text
+            for token in (
+                "no wet-after-wash context",
+                "no wet drying context",
+                "no washed or wet context",
+                "not drying after washing",
+                "there is no washed or wet context",
+                "没有潮湿语境",
+                "没有洗后语境",
+                "不是洗后晾干",
+            )
+        )
+        has_immediate_reuse_signal = any(
+            token in text
+            for token in (
+                "used again",
+                "next step",
+                "kept nearby",
+                "within reach",
+                "immediate reuse",
+                "again shortly after",
+                "再次使用",
+                "下一步",
+                "就在旁边",
+            )
+        )
+        return has_finished_signal and (not has_wet_context or denies_wet_context) and not has_immediate_reuse_signal
 
     def _explanation_uses_brief_cooking_inspection_chain(self, explanation: str, *, action_object: str) -> bool:
         text = str(explanation or "").lower()
