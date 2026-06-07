@@ -3271,6 +3271,50 @@ class AgentToolbox:
                 "so the direct purpose is checking the contents/doneness rather than emptying, pouring out, or serving."
             ).strip()
             return adjusted
+        direct_residue_release_index = top_matching_index(
+            lambda choice: self._choice_is_direct_residue_release_future_use_purpose(
+                choice,
+                question=question,
+                action_object=action_object,
+            )
+        )
+        if (
+            direct_residue_release_index is not None
+            and best_index != direct_residue_release_index
+            and best_index in (
+                {
+                    index
+                    for index in valid_indices
+                    if choice_categories(str(choices[index]).lower())
+                    & {"food_prep", "hand_free_enablement", "final_place_return", "clean_dry", "serve_consume"}
+                }
+                | disposal_or_serving_indices
+            )
+            and self._explanation_uses_direct_residue_release_chain(explanation, action_object=action_object)
+        ):
+            adjusted = dict(result)
+            adjusted["best_index"] = direct_residue_release_index
+            adjusted["answer"] = str(choices[direct_residue_release_index])
+            adjusted["confidence"] = max(0.8, min(0.9, float(result.get("confidence") or 0.0) + 0.04))
+            adjusted["causal_hierarchy_adjusted"] = True
+            adjusted["reason"] = (
+                f"{result.get('reason') or ''} causal_hierarchy_adjustment: "
+                "the evidence shows a same-object residue-release chain where the tapped/shaken/tilted tool or container directly returns remaining contents back into the original pot/bowl/pan/sink, "
+                "so that immediate residue-release purpose is stronger than a generic stir, put-down, hand-free, serving, or broad drying interpretation."
+            ).strip()
+            candidate_evidence = adjusted.get("candidate_evidence")
+            if isinstance(candidate_evidence, list):
+                for item in candidate_evidence:
+                    if not isinstance(item, dict):
+                        continue
+                    try:
+                        index = int(item.get("index"))
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if index == direct_residue_release_index:
+                        item["score"] = max(0.72, float(item.get("score") or 0.0))
+                        break
+            return adjusted
         exact_measurement_index = top_matching_index(self._choice_is_exact_measurement_future_use_purpose)
         generic_measurement_meta_index = top_matching_index(self._choice_is_generic_measurement_meta_future_use_purpose)
         exact_same_object_open_index = next(
@@ -4928,6 +4972,72 @@ class AgentToolbox:
             )
         )
 
+    def _choice_is_direct_residue_release_future_use_purpose(self, choice: str, *, question: str, action_object: str) -> bool:
+        question_lc = str(question or "").lower()
+        if not any(
+            token in question_lc
+            for token in ("tap ", "shake ", "tilt ", "tip ", "pour ", "turn ", "flip ", "hit ", "knock ")
+        ):
+            return False
+        text = str(choice or "").lower()
+        if not any(
+            token in text
+            for token in (
+                "excess",
+                "drop",
+                "fall",
+                "falls",
+                "remaining",
+                "stuck",
+                "shake off",
+                "remove any",
+                "remove more",
+                "drain",
+                "掉回",
+                "落回",
+                "多余",
+                "剩余",
+                "沥",
+            )
+        ):
+            return False
+        if action_object and not any(
+            token in action_object
+            for token in ("spoon", "spatula", "cup", "glass", "bowl", "pan", "pot", "jar", "ladle", "lid")
+        ):
+            return False
+        return any(
+            token in text
+            for token in (
+                "into the pan",
+                "into the bowl",
+                "into the pot",
+                "into the sink",
+                "back to the pot",
+                "back into the",
+                "falls from the",
+                "fall from the",
+                "drops from the",
+                "掉进",
+                "落进",
+                "水槽",
+            )
+        ) or any(
+            token in text
+            for token in (
+                "remove excess liquid",
+                "remove excess oil",
+                "remove any excess liquid",
+                "remove any worcestershire sauce",
+                "get rid of excess",
+                "drop any pieces",
+                "drop the mushroom stock",
+                "drop the paste",
+                "shake off excess cheese",
+                "drain excess water",
+            )
+        )
+
     def _choice_is_exact_measurement_future_use_purpose(self, choice: str) -> bool:
         text = str(choice or "").lower()
         categories = choice_categories(text)
@@ -5764,6 +5874,81 @@ class AgentToolbox:
             )
         )
         return has_open_signal and has_hand_role_signal and not has_later_downstream_open_denial
+
+    def _explanation_uses_direct_residue_release_chain(self, explanation: str, *, action_object: str) -> bool:
+        text = str(explanation or "").lower()
+        if action_object and not any(
+            token in text
+            for token in (
+                action_object,
+                "spoon",
+                "spatula",
+                "cup",
+                "glass",
+                "bowl",
+                "pan",
+                "pot",
+                "jar",
+                "lid",
+                "ladle",
+                "勺",
+                "铲",
+                "杯",
+                "碗",
+                "锅",
+                "盖",
+            )
+        ):
+            return False
+        has_return_signal = any(
+            token in text
+            for token in (
+                "back into the",
+                "fall back into",
+                "falls back into",
+                "drops back into",
+                "drops into the pan",
+                "falls into the bowl",
+                "掉回",
+                "落回",
+                "掉进锅里",
+                "落进锅里",
+                "水槽",
+            )
+        )
+        has_residue_signal = any(
+            token in text
+            for token in (
+                "remaining",
+                "excess",
+                "stuck bits",
+                "stuck to",
+                "sauce",
+                "oil",
+                "water",
+                "liquid",
+                "porridge",
+                "paste",
+                "stock",
+                "cheese",
+                "残余",
+                "多余",
+                "剩余",
+            )
+        )
+        has_competing_denial = any(
+            token in text
+            for token in (
+                "no immediate stirring motion",
+                "no actual put-down motion",
+                "no explicit workspace-clearing result",
+                "clearer evidence is",
+                "当前最直接可见的是",
+                "没有明确放下动作",
+                "没有明确腾空间结果",
+            )
+        )
+        return has_return_signal and has_residue_signal and has_competing_denial
 
     def _explanation_uses_tap_state_switch_chain(self, explanation: str) -> bool:
         text = str(explanation or "").lower()
