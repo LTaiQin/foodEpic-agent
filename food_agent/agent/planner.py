@@ -1233,7 +1233,11 @@ class GraphAgentPlanner:
         needed_profile = self._action_intent_needed_observation_profile(state=state, result=result)
         if self._action_intent_prefers_followup_state_change_only(state):
             return "state_change"
-        if needed_profile["prefer_mixed_horizon"] or self._action_intent_pair_spans_immediate_and_later_outcomes(state=state, result=result):
+        if (
+            needed_profile["prefer_mixed_horizon"]
+            or self._action_intent_pair_spans_immediate_and_later_outcomes(state=state, result=result)
+            or (result is None and self._action_intent_initial_pair_spans_immediate_and_later_outcomes(state))
+        ):
             return "mixed_temporal_horizon"
         if needed_profile["prefer_hand_free_next_action"] or self._action_intent_has_hand_free_future_use_conflict(state=state, result=result):
             return "hand_free_next_action"
@@ -1427,6 +1431,37 @@ class GraphAgentPlanner:
         ):
             return True
         return False
+
+    def _action_intent_initial_pair_spans_immediate_and_later_outcomes(self, state: AgentState) -> bool:
+        if not self._is_action_intent_task(state):
+            return False
+        choices = [str(choice) for choice in getattr(state, "choices", [])]
+        if len(choices) < 2:
+            return False
+        categories_by_index = selected_choice_categories(choices, None)
+        later_outcome_categories = {
+            "final_place_return",
+            "measure_weigh",
+            "transfer_contents",
+            "serve_consume",
+            "clean_dry",
+            "food_prep",
+            "discard",
+        }
+        immediate_indices = [
+            index
+            for index, categories in categories_by_index.items()
+            if self._action_intent_choice_is_immediate_micro_outcome_candidate(
+                choices[index],
+                set(categories or set()),
+            )
+        ]
+        if not immediate_indices:
+            return False
+        return any(
+            index not in immediate_indices and set(categories or set()) & later_outcome_categories
+            for index, categories in categories_by_index.items()
+        )
 
     def _action_intent_has_hand_free_future_use_conflict(
         self,
@@ -3919,18 +3954,25 @@ class GraphAgentPlanner:
     ) -> PlannerDecision | None:
         if not self._is_action_intent_task(state):
             return None
-        if not action_intent_requires_strict_visual_disambiguation(
+        strict_visual_disambiguation = action_intent_requires_strict_visual_disambiguation(
             question=str(getattr(state, "question", "") or ""),
             choices=[str(choice) for choice in getattr(state, "choices", [])],
             indices=None,
-        ):
+        )
+        initial_mixed_horizon = self._action_intent_initial_pair_spans_immediate_and_later_outcomes(state)
+        if not strict_visual_disambiguation and not initial_mixed_horizon:
             return None
         probe_window = self._action_intent_transition_probe_window(state=state, hints=hints, result=None)
         if probe_window is None:
             return None
         start_time, end_time, stride_s, max_frames = probe_window
+        thought = (
+            "why 题一开始就属于严格视觉消歧场景；先围绕动作尾部和紧随其后的短窗口做更密的关键帧搜索，优先抓决定性结果帧，而不是只抽静态动作片段。"
+            if strict_visual_disambiguation
+            else "why 题一开始就同时包含立刻微结果和稍后用途/归位冲突；先用 mixed-horizon 的 transition probe 同时覆盖近窗与稍后结果，再进入专用动作目的判断。"
+        )
         return PlannerDecision(
-            thought="why 题一开始就属于严格视觉消歧场景；先围绕动作尾部和紧随其后的短窗口做更密的关键帧搜索，优先抓决定性结果帧，而不是只抽静态动作片段。",
+            thought=thought,
             tool="extract_frames_for_range",
             args={
                 "start_time": start_time,

@@ -29,8 +29,8 @@
 ### 16.2.2 当前稳定基线
 
 - 专项回归命令：`pytest -q tests/test_graph_agent.py -k 'action_intent'`
-- 2026-06-07 当前结果：`237 passed, 344 deselected`
-- 相比本轮进入专项时的起点 `107 passed, 300 deselected`，当前阶段性增量为 `+130 passed`
+- 2026-06-07 当前结果：`239 passed, 344 deselected`
+- 相比本轮进入专项时的起点 `107 passed, 300 deselected`，当前阶段性增量为 `+132 passed`
 - 当前执行策略：why 逻辑不再追求“接近完美覆盖”，而是维持“足够可用、回归稳定、无明显结构性退化”的维护态；后续优先级切换到完整 agent 功能闭环与小样本真实验证。
 
 这说明 why 题已经不再是“直接把问题丢给模型猜答案”，而是已经存在完整骨架：
@@ -120,7 +120,15 @@
 - 本轮提交：新增并通过 2 条初始化路由测试，分别保护：
   - `flip orange cloth` 在已有 `query_state` 但还没有当前题帧时，会直接走 `followup_transition`
   - `pick up tea towel` 在同样条件下，也会直接走 `followup_transition`
-- 本轮提交：why 专项回归已更新到 `237 passed, 344 deselected`
+- 本轮提交：why 初始化阶段的主动取帧继续扩展到 `mixed-horizon` 场景。也就是完整选项里如果本来就存在“立刻检查/打开”对“稍后放回/称重/用途”的冲突，第一次没帧时也不再先抽普通 `segment`，而是直接走 `mixed-horizon followup_transition`
+- 本轮提交：当前新增覆盖：
+  - `take bottle`：`check the label` vs `put the bottle back in the fridge`
+  - `take jar`：`open the jar` vs `use the jar to weigh the ingredients`
+- 本轮提交：新增并通过 2 条初始化路由测试，分别保护：
+  - `take bottle` 在初始路由下直接进入 mixed-horizon `followup_transition`
+  - `take jar` 在初始路由下直接进入 mixed-horizon `followup_transition`
+- 本轮提交：同时保留了原有保守边界：像 `open kitchen cabinet -> retrieve/put away` 这类没有“立刻微结果 vs 稍后用途”结构的题，仍然保持原来的 `segment` 起手，不会被误推到 transition probe
+- 本轮提交：why 专项回归已更新到 `239 passed, 344 deselected`
 - 本轮提交：why 题在 `followup_transition / followup_peaks` 之后新增“短时序证据复核”分支，先让 agent 总结动作后立刻结果、下一步手部动作和 `hand-free / access / next-use` 证据，再回到 `infer_action_intent`
 - 本轮提交：`inspect_visual_evidence` 的写回字段扩到 `timeline_summary / immediate_result / next_action_hint / direct_purpose_hint / ambiguity_note`，并在 `needs_more_evidence=true` 时显式保留 `need_disambiguating_evidence`
 - 本轮提交：why 题 `inspect_visual_evidence -> infer_action_intent` 的回跳逻辑已改为识别 timeline review；若复核仍判定证据不足，则继续 `followup_ext2` 或转入 `future_use / pairwise` 专用裁决，而不是重新退回只看 `segment` 的早收口路径
