@@ -6120,13 +6120,49 @@ class GraphAgentPlanner:
             args={"query": query, "limit": 24},
         )
 
-    def _action_intent_long_horizon_window_from_nodes(
+    def _action_intent_long_horizon_target_tokens(self, state: AgentState) -> list[str]:
+        query = self._action_intent_question_object_hint(state)
+        return [token for token in re.split(r"[\s_/:-]+", query.lower()) if token]
+
+    def _action_intent_long_horizon_node_match_tier(
+        self,
+        *,
+        state: AgentState,
+        node: dict[str, Any],
+    ) -> int | None:
+        tokens = self._action_intent_long_horizon_target_tokens(state)
+        if not tokens:
+            return 2
+        attrs = node.get("attributes") or {}
+        direct_parts = [
+            str(node.get("object_name") or ""),
+            str(attrs.get("object_name") or ""),
+            str(node.get("label") or ""),
+            str(attrs.get("label") or ""),
+        ]
+        direct_text = " ".join(part.strip().lower() for part in direct_parts if part).strip()
+        summary_text = " ".join(
+            str(part).strip().lower()
+            for part in (
+                attrs.get("summary"),
+                attrs.get("payload_json"),
+                node.get("summary"),
+            )
+            if part
+        ).strip()
+        if direct_text and all(token in direct_text for token in tokens):
+            return 0
+        if (direct_text or summary_text) and all(token in f"{direct_text} {summary_text}" for token in tokens):
+            return 1
+        return None
+
+    def _action_intent_select_long_horizon_node(
         self,
         *,
         state: AgentState,
         hints: dict[str, Any],
         nodes: list[dict[str, Any]],
-    ) -> tuple[float, float] | None:
+    ) -> tuple[dict[str, Any], float, float] | None:
         if not self._is_action_intent_task(state):
             return None
         anchor_times = sorted([float(value) for value in hints.get("times") or []] + [float(value) for value in hints.get("input_times") or []])
@@ -6137,7 +6173,7 @@ class GraphAgentPlanner:
             return None
         latest_followup_end = self._latest_action_intent_followup_end_time(state)
         lower_bound = max(action_end + 0.35, (latest_followup_end or action_end) + 0.35)
-        candidates: list[tuple[tuple[int, float], float, float]] = []
+        candidates: list[tuple[tuple[int, int, float], dict[str, Any], float, float]] = []
         for node in nodes:
             if not isinstance(node, dict):
                 continue
@@ -6157,6 +6193,9 @@ class GraphAgentPlanner:
                 end_time = start_time
             if end_time <= lower_bound:
                 continue
+            match_tier = self._action_intent_long_horizon_node_match_tier(state=state, node=node)
+            if match_tier is None:
+                continue
             node_type = str(node.get("node_type") or "").lower()
             if node_type in {"object_track", "frame", "observation", "timeline_event"}:
                 priority = 0
@@ -6164,16 +6203,54 @@ class GraphAgentPlanner:
                 priority = 1
             else:
                 priority = 2
-            candidates.append(((priority, start_time), start_time, end_time))
+            candidates.append(((match_tier, priority, start_time), node, start_time, end_time))
         if not candidates:
             return None
-        _, start_time, end_time = min(candidates, key=lambda item: item[0])
+        _, node, start_time, end_time = min(candidates, key=lambda item: item[0])
+        return node, start_time, end_time
+
+    def _action_intent_long_horizon_window_from_nodes(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        nodes: list[dict[str, Any]],
+    ) -> tuple[float, float] | None:
+        selected = self._action_intent_select_long_horizon_node(state=state, hints=hints, nodes=nodes)
+        if selected is None:
+            return None
+        _node, start_time, end_time = selected
         duration = max(0.0, end_time - start_time)
         if duration <= 0.25:
             return (max(0.0, start_time - 0.5), start_time + 2.0)
         if duration <= 4.0:
             return (max(0.0, start_time - 0.4), end_time + 1.0)
         return (max(0.0, start_time - 0.4), min(end_time, start_time + 4.8))
+
+    def _build_action_intent_long_horizon_spatial_probe_decision(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        used_tools: list[str],
+        nodes: list[dict[str, Any]],
+    ) -> PlannerDecision | None:
+        if "query_spatial_context" in used_tools:
+            return None
+        selected = self._action_intent_select_long_horizon_node(state=state, hints=hints, nodes=nodes)
+        if selected is None:
+            return None
+        _node, start_time, end_time = selected
+        anchor_time = start_time if abs(end_time - start_time) < 0.25 else (start_time + min(end_time, start_time + 1.2)) / 2
+        return PlannerDecision(
+            thought="why 题已定位到目标对象在更晚时刻的再次出现；先补这一下的空间关系，再决定是否继续抽长时域关键帧。",
+            tool="query_spatial_context",
+            args={
+                "time_s": anchor_time,
+                "object_name": self._action_intent_question_object_hint(state),
+                "limit": 16,
+            },
+        )
 
     def _build_action_intent_long_horizon_sampling_decision(
         self,
@@ -7048,6 +7125,34 @@ class GraphAgentPlanner:
             self._is_action_intent_task(state)
             and isinstance(last_result, dict)
             and last_tool.get("tool") == "query_spatial_context"
+            and self._action_intent_prefers_long_horizon_object_retrieval(state=state)
+        ):
+            args = last_tool.get("args") or {}
+            if isinstance(args, dict):
+                object_name = str(args.get("object_name") or "").strip().lower()
+                target_name = self._action_intent_question_object_hint(state).strip().lower()
+                if object_name and object_name == target_name:
+                    anchor_time = args.get("time_s")
+                    try:
+                        anchor_value = float(anchor_time)
+                    except Exception:  # noqa: BLE001
+                        anchor_value = None
+                    if anchor_value is not None:
+                        attempt_count = self._action_intent_followup_attempt_count(state)
+                        return PlannerDecision(
+                            thought="why 题已补到更晚时刻的空间上下文；继续围绕该对象后续位置抽关键帧，检查它后来到底被放回、再使用，还是仅暂时移开。",
+                            tool="sample_sparse_frames",
+                            args={
+                                "start_time": max(0.0, anchor_value - 0.4),
+                                "end_time": anchor_value + 2.0,
+                                "sample_count": 4,
+                                "tag": f"{state.task_family}_followup_ext{attempt_count + 1}",
+                            },
+                        )
+        if (
+            self._is_action_intent_task(state)
+            and isinstance(last_result, dict)
+            and last_tool.get("tool") == "query_spatial_context"
             and state.retrieved_frames
         ):
             if self._action_intent_pending_resolution_tool(state) == "resolve_action_intent_future_use":
@@ -7353,6 +7458,14 @@ class GraphAgentPlanner:
         ):
             nodes = last_result.get("nodes", [])
             if isinstance(nodes, list):
+                long_horizon_spatial = self._build_action_intent_long_horizon_spatial_probe_decision(
+                    state=state,
+                    hints=hints,
+                    used_tools=used_tools,
+                    nodes=nodes,
+                )
+                if long_horizon_spatial is not None:
+                    return long_horizon_spatial
                 long_horizon_sampling = self._build_action_intent_long_horizon_sampling_decision(
                     state=state,
                     hints=hints,
@@ -8606,6 +8719,7 @@ class GraphAgentPlanner:
                 "resolve_action_intent_pairwise",
                 "resolve_action_intent_future_use",
                 "query_object",
+                "query_spatial_context",
                 "finish",
             }
         if self._is_recipe_catalog_task(state):
