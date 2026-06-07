@@ -14,6 +14,7 @@ from food_agent.agent.action_intent import (
     action_intent_needs_future_use_resolution,
     action_intent_needs_pairwise_resolution,
     action_intent_needs_precondition_context,
+    selected_choice_categories,
 )
 from food_agent.agent.artifact_policy import artifact_reuse_prefixes_for_task
 from food_agent.agent.state import AgentState
@@ -1011,6 +1012,99 @@ class GraphAgentPlanner:
                 "context_notes": context_notes,
             },
         )
+
+    def _build_action_intent_specialized_resolution_before_text_fallback(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+    ) -> PlannerDecision | None:
+        if not self._is_action_intent_task(state):
+            return None
+        if not self._select_action_intent_frames(state, hints, limit=8, require_current_scope=True):
+            return None
+        choices = [str(choice) for choice in getattr(state, "choices", [])]
+        question = str(getattr(state, "question", "") or "")
+        if (
+            action_intent_needs_precondition_context(question=question, choices=choices, indices=None)
+            and not self._action_intent_has_precondition_frames(state=state, hints=hints)
+        ):
+            return self._build_action_intent_precondition_sampling_decision(
+                state=state,
+                hints=hints,
+                focus="precondition_before_repeated_failure_resolution",
+            )
+        pairwise_candidates = self._fallback_action_intent_pairwise_candidate_indices(state)
+        pairwise_ready = len(pairwise_candidates) >= 2 and action_intent_needs_pairwise_resolution(
+            question=question,
+            choices=choices,
+            indices=pairwise_candidates,
+        )
+        future_use_ready = action_intent_needs_future_use_resolution(question=question, choices=choices, indices=None)
+        if pairwise_ready and self._action_intent_question_prefers_pairwise_resolution(question):
+            return self._build_action_intent_pairwise_resolution_decision(
+                state=state,
+                hints=hints,
+                result={"candidate_indices": pairwise_candidates},
+                thought="why 题专用视觉判断连续失败，但当前题已有足够原始帧；先走二选一后果裁决，不直接退回通用文本排序。",
+            )
+        if future_use_ready:
+            return self._build_action_intent_future_use_resolution_decision(
+                state=state,
+                hints=hints,
+                thought="why 题专用视觉判断连续失败，但当前题已有足够原始帧；先走后续用途专用裁决，不直接退回通用文本排序。",
+            )
+        if pairwise_ready:
+            return self._build_action_intent_pairwise_resolution_decision(
+                state=state,
+                hints=hints,
+                result={"candidate_indices": pairwise_candidates},
+                thought="why 题专用视觉判断连续失败，但当前题已有足够原始帧；先走二选一后果裁决，不直接退回通用文本排序。",
+            )
+        return None
+
+    def _action_intent_question_prefers_pairwise_resolution(self, question: str) -> bool:
+        text = str(question or "").lower()
+        pairwise_markers = (
+            "<move ",
+            "<shift ",
+            "<remove ",
+            "<clear ",
+            "<open ",
+            "<close ",
+            "<put ",
+            "<place ",
+            "<return ",
+        )
+        return any(marker in text for marker in pairwise_markers)
+
+    def _fallback_action_intent_pairwise_candidate_indices(self, state: AgentState) -> list[int]:
+        choices = [str(choice) for choice in getattr(state, "choices", [])]
+        categories_by_index = selected_choice_categories(choices)
+        preferred_pairs = (
+            ("access_retrieve", "space_clear"),
+            ("access_retrieve", "final_place_return"),
+            ("space_clear", "final_place_return"),
+            ("safety_avoid", "space_clear"),
+            ("safety_avoid", "access_retrieve"),
+        )
+        for left_category, right_category in preferred_pairs:
+            left_index = next((index for index, cats in categories_by_index.items() if left_category in cats), None)
+            right_index = next((index for index, cats in categories_by_index.items() if right_category in cats and index != left_index), None)
+            if left_index is not None and right_index is not None:
+                return [left_index, right_index]
+        pairwise_indices = [
+            index
+            for index, cats in categories_by_index.items()
+            if {"access_retrieve", "space_clear", "final_place_return", "safety_avoid"} & cats
+        ]
+        deduped: list[int] = []
+        for index in pairwise_indices:
+            if index not in deduped:
+                deduped.append(index)
+            if len(deduped) >= 2:
+                break
+        return deduped
 
     def _action_intent_failed_tool_count(self, state: AgentState, tool_name: str) -> int:
         count = 0
@@ -2603,6 +2697,12 @@ class GraphAgentPlanner:
                 if recovered is not None:
                     return recovered
             if retry_count >= 3:
+                specialized_resolution = self._build_action_intent_specialized_resolution_before_text_fallback(
+                    state=state,
+                    hints=hints,
+                )
+                if specialized_resolution is not None:
+                    return specialized_resolution
                 return self._build_action_intent_text_fallback_rank_decision(
                     state,
                     thought="why 题专用视觉判断连续失败，改用结构化文本因果裁决，避免继续空转 query_time。",
