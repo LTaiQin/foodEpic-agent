@@ -3213,21 +3213,22 @@ class AgentToolbox:
         choice = str(choices[best_index])
         choice_lc = choice.lower()
         categories = choice_categories(choice)
-        evidence_text = self._action_intent_candidate_evidence_text(result=result, index=best_index)
-        if not evidence_text.strip():
+        support_text = self._action_intent_candidate_support_text(result=result, index=best_index)
+        context_text = self._action_intent_candidate_context_text(result=result, index=best_index)
+        if not support_text.strip():
             return ["missing_candidate_positive_evidence"]
         gaps: list[str] = []
-        explicit_denial = self._action_intent_evidence_explicitly_denies_support(evidence_text)
+        explicit_denial = self._action_intent_evidence_explicitly_denies_support(context_text)
         if explicit_denial:
             gaps.append("candidate_explicitly_lacks_observed_support")
-        if any(term in evidence_text for term in ("least contradicted", "broadest", "least contradicted", "最不矛盾", "最宽泛")):
+        if any(term in context_text for term in ("least contradicted", "broadest", "least contradicted", "最不矛盾", "最宽泛")):
             gaps.append("best_is_unproven_broad_candidate")
         if "final_place_return" in categories and any(
             term in choice_lc
             for term in ("away", "put back", "store", "return", "right place", "proper place", "in place", "放回", "收起", "归位")
         ):
             if not self._text_has_any(
-                evidence_text,
+                support_text,
                 (
                     "put away",
                     "stored",
@@ -3254,7 +3255,7 @@ class AgentToolbox:
             ):
                 gaps.append("missing_final_placement_evidence")
             if self._text_has_any(
-                evidence_text,
+                context_text,
                 (
                     "temporarily",
                     "temporary",
@@ -3276,7 +3277,7 @@ class AgentToolbox:
                 gaps.append("temporary_relocation_not_final_placement")
         if "dry" in choice_lc and "hand" in choice_lc:
             if not self._text_has_grouped_terms(
-                evidence_text,
+                support_text,
                 (
                     ("hand", "hands", "手"),
                     ("dry", "dried", "wipe", "wiped", "towel", "cloth", "擦手", "干手", "擦干"),
@@ -3285,7 +3286,7 @@ class AgentToolbox:
                 gaps.append("missing_dry_hands_evidence")
         if "wipe" in choice_lc and any(term in choice_lc for term in ("surface", "counter", "worktop", "table", "台面", "桌")):
             if not self._text_has_grouped_terms(
-                evidence_text,
+                support_text,
                 (
                     ("wipe", "wiped", "clean", "cleaned", "scrub", "擦", "清洁"),
                     ("surface", "counter", "worktop", "table", "台面", "桌面"),
@@ -3294,13 +3295,55 @@ class AgentToolbox:
                 gaps.append("missing_surface_wiping_evidence")
         if "clean" in choice_lc and "check" not in choice_lc and "whether" not in choice_lc:
             if explicit_denial or not self._text_has_any(
-                evidence_text,
+                support_text,
                 ("cleaned", "cleaning", "wiped", "wipe", "washed", "wash", "rinsed", "scrub", "擦", "清洁", "洗", "冲洗"),
             ):
                 gaps.append("missing_cleaning_action_evidence")
+        if any(
+            term in choice_lc
+            for term in ("finished with", "finished now", "done with", "no longer need", "finished using", "不再需要", "用完")
+        ):
+            if not self._text_has_any(
+                support_text,
+                (
+                    "finished with",
+                    "done with",
+                    "no longer needed",
+                    "not used again",
+                    "last use",
+                    "finished now",
+                    "put away for good",
+                    "for storage",
+                    "won't be used again",
+                    "已经用完",
+                    "不再需要",
+                    "最后一次",
+                    "不会再用",
+                ),
+            ):
+                gaps.append("missing_finished_with_object_evidence")
+            if self._text_has_any(
+                context_text,
+                (
+                    "used again",
+                    "use again",
+                    "next step",
+                    "shortly after",
+                    "kept nearby",
+                    "within reach",
+                    "immediately reused",
+                    "ready for the next",
+                    "used shortly after",
+                    "再次使用",
+                    "下一步",
+                    "很快又用",
+                    "放在旁边待会再用",
+                ),
+            ):
+                gaps.append("immediate_reuse_contradicts_finished_with_object")
         if "fill" in choice_lc:
             if not self._text_has_grouped_terms(
-                evidence_text,
+                support_text,
                 (
                     ("fill", "filled", "water", "liquid", "running", "pour", "加水", "接水", "水"),
                     ("kettle", "pan", "pot", "container", "bottle", "水壶", "锅", "容器"),
@@ -3308,22 +3351,142 @@ class AgentToolbox:
             ):
                 gaps.append("missing_fill_evidence")
         if any(term in choice_lc for term in ("weigh", "measure", "scale")):
-            if not self._text_has_any(evidence_text, ("scale", "weigh", "weighed", "measure", "grams", "秤", "称", "克")):
+            if not self._text_has_any(support_text, ("scale", "weigh", "weighed", "measure", "grams", "秤", "称", "克")):
                 gaps.append("missing_measurement_evidence")
         if any(term in choice_lc for term in ("empty", "pour", "drain")):
             if not self._text_has_any(
-                evidence_text,
+                support_text,
                 ("empty", "emptied", "pour", "poured", "drain", "drained", "water", "liquid", "sink", "倒", "倒出", "沥", "水槽"),
             ):
                 gaps.append("missing_transfer_or_emptying_evidence")
+        if "serve_consume" in categories:
+            if not self._text_has_any(
+                support_text,
+                (
+                    "serve",
+                    "served",
+                    "plate",
+                    "plated",
+                    "portion",
+                    "dish out",
+                    "portioned",
+                    "served up",
+                    "端",
+                    "盛到",
+                    "分装",
+                    "上菜",
+                ),
+            ):
+                gaps.append("missing_serving_or_consumption_evidence")
+        if "open_close" in categories:
+            if not self._text_has_any(
+                support_text,
+                (
+                    "opened",
+                    "closed",
+                    "turned on",
+                    "turned off",
+                    "switch on",
+                    "switch off",
+                    "switched on",
+                    "switched off",
+                    "uncap",
+                    "uncapped",
+                    "cap",
+                    "capped",
+                    "unscrew",
+                    "unscrewed",
+                    "screwed back on",
+                    "打开",
+                    "关上",
+                    "开启",
+                    "关闭",
+                    "拧开",
+                    "盖上",
+                ),
+            ):
+                gaps.append("missing_open_close_state_change_evidence")
         if any(term in choice_lc for term in ("check", "inspect", "read", "label", "date", "look")):
-            if not self._text_has_any(evidence_text, ("check", "inspect", "look", "read", "label", "date", "visible", "查看", "看", "读", "标签")):
+            if not self._text_has_any(support_text, ("check", "inspect", "look", "read", "label", "date", "visible", "查看", "看", "读", "标签")):
                 gaps.append("missing_inspection_evidence")
+        if "hand_free_enablement" in categories:
+            if not self._text_has_grouped_terms(
+                support_text,
+                (
+                    ("hand", "left hand", "right hand", "both hands", "双手", "左手", "右手", "手"),
+                    ("free", "freed", "reach", "pick up", "turn on", "use", "hold", "拿", "腾出", "去拿", "去开", "使用"),
+                ),
+            ):
+                gaps.append("missing_hand_free_enablement_evidence")
+        if "access_retrieve" in categories and any(
+            term in choice_lc
+            for term in ("access", "behind", "retrieve", "get", "take out", "pick up", "reach", "missing")
+        ):
+            if not self._text_has_any(
+                support_text,
+                (
+                    "access",
+                    "behind",
+                    "retrieve",
+                    "retrieved",
+                    "picked up",
+                    "take out",
+                    "reached",
+                    "clear the way",
+                    "got the item",
+                    "够到",
+                    "后面",
+                    "取到",
+                    "拿到",
+                    "拿出",
+                    "腾开",
+                ),
+            ):
+                gaps.append("missing_access_or_retrieval_evidence")
+        if "safety_avoid" in categories:
+            if not self._text_has_any(
+                support_text,
+                (
+                    "avoid",
+                    "avoids",
+                    "hot",
+                    "burn",
+                    "spill",
+                    "mess",
+                    "too hot",
+                    "getting burnt",
+                    "stabilized",
+                    "two-handed",
+                    "防止",
+                    "太烫",
+                    "烧焦",
+                    "溢出",
+                    "弄脏",
+                    "避免",
+                    "双手稳住",
+                ),
+            ):
+                gaps.append("missing_hazard_or_spill_avoidance_evidence")
         return list(dict.fromkeys(gaps))
 
-    def _action_intent_candidate_evidence_text(self, *, result: dict[str, Any], index: int) -> str:
+    def _action_intent_candidate_support_text(self, *, result: dict[str, Any], index: int) -> str:
         parts = [
-            str(result.get("answer") or ""),
+            str(result.get("decisive_observation") or ""),
+        ]
+        for item in result.get("candidate_evidence") or []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                item_index = int(item.get("index"))
+            except Exception:  # noqa: BLE001
+                continue
+            if item_index != index:
+                continue
+            parts.append(str(item.get("support") or ""))
+        return " ".join(part for part in parts if part).lower()
+
+    def _action_intent_candidate_context_text(self, *, result: dict[str, Any], index: int) -> str:
+        parts = [
             str(result.get("decisive_observation") or ""),
             str(result.get("reason") or ""),
         ]
@@ -3368,6 +3531,8 @@ class AgentToolbox:
             return "post-action frames showing whether the towel or cloth contacts/wipes the hands"
         if any("surface_wiping" in gap or "cleaning" in gap for gap in gaps):
             return "post-action frames showing whether the towel/cloth actually wipes or cleans a surface/object"
+        if any("finished_with_object" in gap or "immediate_reuse_contradicts_finished_with_object" in gap for gap in gaps):
+            return "post-action frames showing whether the object is truly no longer needed or instead kept nearby and used again shortly after"
         if any("final_placement" in gap or "temporary_relocation" in gap for gap in gaps):
             return "post-action frames showing the object's final placement, storage, or return location rather than a temporary move"
         if any("fill" in gap for gap in gaps):
@@ -3376,8 +3541,18 @@ class AgentToolbox:
             return "post-action frames showing the scale/measurement setup and the object being weighed"
         if any("transfer_or_emptying" in gap for gap in gaps):
             return "post-action frames showing pouring, draining, emptying, or liquid/contents transfer"
+        if any("serving_or_consumption" in gap for gap in gaps):
+            return "post-action frames showing serving, plating, portioning, eating, or drinking rather than just moving the object"
+        if any("open_close_state_change" in gap for gap in gaps):
+            return "post-action frames showing the object actually being opened, closed, switched, capped, or uncapped"
         if any("inspection" in gap for gap in gaps):
             return "post-action frames showing the person inspecting, reading, or checking the target"
+        if any("hand_free_enablement" in gap for gap in gaps):
+            return "post-action frames showing which hand is freed and what that hand immediately reaches for or operates next"
+        if any("access_or_retrieval" in gap for gap in gaps):
+            return "post-action frames showing whether the moved/opened object actually allows access to or retrieval of the target item"
+        if any("hazard_or_spill_avoidance" in gap for gap in gaps):
+            return "post-action frames showing the concrete hazard being avoided, such as burn, spill, or mess prevention"
         return "more post-action frames showing the object's actual use, final placement, or a clear result that separates the top competing choices"
 
     def _text_has_any(self, text: str, terms: tuple[str, ...]) -> bool:
