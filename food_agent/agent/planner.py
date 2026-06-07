@@ -6667,6 +6667,12 @@ class GraphAgentPlanner:
             return False
         if not isinstance(result, dict):
             return False
+        if any(
+            isinstance(item, str)
+            and item.startswith("action_intent_resolution_withheld_for_nonexclusive_concrete_late_anchor=1")
+            for item in list(getattr(state, "working_memory", []))[-12:]
+        ):
+            return True
         if self._action_intent_result_has_direct_post_action_evidence(result):
             return False
         best_index = self._coerce_choice_index(result.get("best_index"), getattr(state, "choices", []))

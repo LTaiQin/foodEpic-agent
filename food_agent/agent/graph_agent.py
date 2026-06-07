@@ -896,6 +896,12 @@ class GraphAgent:
             ):
                 state.add_memory("action_intent_resolution_withheld_for_broad_generic_claim=1")
                 continue
+            elif self._action_intent_resolution_should_withhold_nonexclusive_concrete_late_anchor_claim(
+                raw_result=raw_result,
+                state=state,
+            ):
+                state.add_memory("action_intent_resolution_withheld_for_nonexclusive_concrete_late_anchor=1")
+                continue
             elif self._action_intent_resolution_should_withhold_timeline_review_bias_gap(
                 raw_result=raw_result,
                 state=state,
@@ -1183,6 +1189,124 @@ class GraphAgent:
         ):
             return True
         if best_is_immediate:
+            return not self._action_intent_choice_has_explicit_immediate_micro_outcome_evidence(best_choice, text)
+        return not self._action_intent_choice_has_explicit_later_outcome_evidence(best_choice, best_categories, text)
+
+    def _action_intent_resolution_should_withhold_nonexclusive_concrete_late_anchor_claim(
+        self,
+        *,
+        raw_result: dict[str, Any],
+        state: AgentState,
+    ) -> bool:
+        pair = self._action_intent_resolution_competing_pair(raw_result=raw_result, state=state)
+        if pair is None:
+            return False
+        best_index, competitor_index = pair
+        choices = [str(choice) for choice in getattr(state, "choices", [])]
+        pair_indices = [best_index, competitor_index]
+        categories_by_index = selected_choice_categories(choices, pair_indices)
+        best_choice = choices[best_index].lower()
+        best_categories = set(categories_by_index.get(best_index) or set())
+        text = " ".join(
+            str(raw_result.get(key) or "")
+            for key in ("reason", "decisive_observation", "needed_observation")
+        ).lower()
+        if not text or self._action_intent_text_has_negative_evidence(text):
+            return False
+        explicit_exclusive_terms = (
+            "reads the label",
+            "reading the label",
+            "read the label",
+            "inspects the label",
+            "looks at the label",
+            "checks the label",
+            "read the printed text",
+            "placed on the scale",
+            "put on the scale",
+            "used on the scale",
+            "used to weigh",
+            "weighed",
+            "put back",
+            "returned to",
+            "stored",
+            "inside the fridge",
+            "into the fridge",
+            "under running water",
+            "turns on the tap",
+            "opened the fridge",
+            "closed the fridge",
+            "poured into",
+            "wiped",
+            "dried",
+            "读标签",
+            "查看标签",
+            "放到秤上",
+            "放上秤",
+            "称量",
+            "放回",
+            "回到冰箱",
+            "打开冰箱",
+            "关上冰箱",
+        )
+        if any(term in text for term in explicit_exclusive_terms):
+            return False
+        label_visibility_terms = (
+            "label is visible",
+            "label faces the camera",
+            "label faces outward",
+            "front side becomes visible",
+            "front side is visible",
+            "printed side becomes visible",
+            "printed side is visible",
+            "visible while the bottle is held",
+        )
+        label_reading_terms = (
+            "read",
+            "reading",
+            "inspect",
+            "look at the label",
+            "check the label",
+            "printed text",
+            "nutrition facts",
+            "ingredient list",
+            "看标签",
+            "读标签",
+            "查看标签",
+        )
+        nearby_placement_terms = (
+            "set beside",
+            "placed beside",
+            "left beside",
+            "left nearby",
+            "set nearby",
+            "placed nearby",
+            "within reach",
+            "set aside",
+            "simply set aside",
+            "near the scale area",
+            "near the counter",
+            "near the counter surface",
+            "near the sink",
+            "near the fridge area",
+            "beside the scale",
+            "beside the counter",
+            "adjacent to the weighing station",
+            "left on the side",
+            "still near",
+            "放在旁边",
+            "放在附近",
+            "顺手放在旁边",
+            "放到一边",
+            "附近",
+        )
+        label_visible_without_reading = any(term in text for term in label_visibility_terms) and not any(
+            term in text for term in label_reading_terms
+        )
+        if label_visible_without_reading:
+            return True
+        if not any(term in text for term in nearby_placement_terms):
+            return False
+        if self._action_intent_choice_is_immediate_micro_outcome_candidate(best_choice, best_categories):
             return not self._action_intent_choice_has_explicit_immediate_micro_outcome_evidence(best_choice, text)
         return not self._action_intent_choice_has_explicit_later_outcome_evidence(best_choice, best_categories, text)
 
