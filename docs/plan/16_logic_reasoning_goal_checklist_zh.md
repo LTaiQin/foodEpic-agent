@@ -29,8 +29,8 @@
 ### 16.2.2 当前稳定基线
 
 - 专项回归命令：`pytest -q tests/test_graph_agent.py -k 'action_intent'`
-- 2026-06-07 当前结果：`205 passed, 337 deselected`
-- 相比本轮进入专项时的起点 `107 passed, 300 deselected`，当前阶段性增量为 `+98 passed`
+- 2026-06-07 当前结果：`207 passed, 337 deselected`
+- 相比本轮进入专项时的起点 `107 passed, 300 deselected`，当前阶段性增量为 `+100 passed`
 - 当前执行策略：why 逻辑不再追求“接近完美覆盖”，而是维持“足够可用、回归稳定、无明显结构性退化”的维护态；后续优先级切换到完整 agent 功能闭环与小样本真实验证。
 
 这说明 why 题已经不再是“直接把问题丢给模型猜答案”，而是已经存在完整骨架：
@@ -153,6 +153,14 @@
   - planner 在 `precondition blocker` 下优先补 `precontext`
   - planner 在 `post-action blocker` 下优先补 `followup`
 - 本轮提交：专项回归已更新到 `205 passed`
+- 本轮提交：`resolve_action_intent_future_use / resolve_action_intent_pairwise` 这两条专用裁决链路，在它们自己已经明确返回“证据仍不足/决定性观察为空/当前解释过于宽泛”时，不再默认先走 `detect_audio_peaks`。现在 planner 会优先尝试更贴题的 `transition probe`，直接围绕动作尾部后的短窗口补视觉关键帧，先确认“是否真的立刻称重/倒空/检查/放回”“是否真的拿到了后方物体/出现了直接物理效果”
+- 本轮提交：只有当 `transition probe` 已经存在、或当前题不适合再做这类近窗密采样时，才会退回 `detect_audio_peaks`。也就是说，音频峰值现在从 why 专用裁决缺证据时的第一选择，降级成第二选择/兜底路径
+- 本轮提交：新增与更新多条测试，分别保护：
+  - `future_use` 不确定裁决优先转到 `followup_transition`
+  - `pairwise` 不确定裁决优先转到 `followup_transition`
+  - 已经存在 `transition` 关键帧后，才允许回退到 `detect_audio_peaks`
+  - 宽泛 generic `future_use` 解释不会直接 finish，也不会先盲目扩长窗，而是先补更贴题的 transition 关键帧
+- 本轮提交：专项回归已更新到 `207 passed`
 
 ### 16.2.4 当前真正的瓶颈
 

@@ -1900,6 +1900,62 @@ class GraphAgentPlanner:
         )
         return any(term in text for term in precondition_terms) and any(term in text for term in gap_terms)
 
+    def _build_action_intent_resolution_transition_recovery_decision(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        tool_name: str,
+        result: dict[str, Any],
+    ) -> PlannerDecision | None:
+        if not self._is_action_intent_task(state):
+            return None
+        if not (
+            self._action_intent_resolution_needs_more_evidence(tool_name=tool_name, result=result)
+            or self._action_intent_result_is_weak_generic_claim(state=state, result=result)
+        ):
+            return None
+        if tool_name == "resolve_action_intent_future_use":
+            thought = (
+                "why 题后续用途专用裁决仍缺决定性动作后证据；先围绕动作尾部后的短窗口主动补关键帧，"
+                "确认是否真的出现称重、倒空、检查、放回或具体下游使用。"
+            )
+        else:
+            thought = (
+                "why 题二选一后果裁决仍缺决定性结果证据；先围绕动作尾部后的短窗口主动补关键帧，"
+                "确认是否真的出现取后方物体、腾空间后的下一步、最终归位或直接物理效果。"
+            )
+        needed = str(result.get("needed_observation") or "").strip()
+        if needed:
+            thought = f"{thought} needed_observation={needed}"
+        transition_probe = self._build_action_intent_transition_probe_decision(
+            state=state,
+            hints=hints,
+            result=result,
+            thought=thought,
+        )
+        if transition_probe is not None:
+            return transition_probe
+        if self._action_intent_has_transition_followup_frames(state):
+            return None
+        if self._action_intent_result_has_direct_post_action_evidence(result):
+            return None
+        probe_window = self._action_intent_transition_probe_window(state=state, hints=hints, result=result)
+        if probe_window is None:
+            return None
+        start_time, end_time = probe_window
+        return PlannerDecision(
+            thought=thought,
+            tool="extract_frames_for_range",
+            args={
+                "start_time": start_time,
+                "end_time": end_time,
+                "stride_s": 0.35 if self._action_intent_prefers_followup_state_change_only(state) else 0.4,
+                "max_frames": 6,
+                "tag": f"{state.task_family}_followup_transition",
+            },
+        )
+
     def _latest_action_intent_candidate_indices(self, state: AgentState, result: dict[str, Any] | None = None) -> list[int]:
         indices: list[int] = []
         if isinstance(result, dict):
@@ -5425,6 +5481,14 @@ class GraphAgentPlanner:
                 )
                 if precondition is not None:
                     return precondition
+            transition_probe = self._build_action_intent_resolution_transition_recovery_decision(
+                state=state,
+                hints=hints,
+                tool_name="resolve_action_intent_pairwise",
+                result=last_result,
+            )
+            if transition_probe is not None:
+                return transition_probe
             peak_guided = self._build_action_intent_peak_guided_followup_decision(
                 state=state,
                 hints=hints,
@@ -5498,6 +5562,14 @@ class GraphAgentPlanner:
                 )
                 if precondition is not None:
                     return precondition
+            transition_probe = self._build_action_intent_resolution_transition_recovery_decision(
+                state=state,
+                hints=hints,
+                tool_name="resolve_action_intent_future_use",
+                result=last_result,
+            )
+            if transition_probe is not None:
+                return transition_probe
             peak_guided = self._build_action_intent_peak_guided_followup_decision(
                 state=state,
                 hints=hints,
