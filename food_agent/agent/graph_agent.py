@@ -1073,6 +1073,20 @@ class GraphAgent:
             global_context=global_context,
         ):
             adjusted -= 0.24
+        if self._action_intent_choice_is_generic_hidden_access_over_exact_reveal_use(
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            global_context=global_context,
+        ):
+            adjusted -= 0.26
+        if self._action_intent_choice_is_generic_hidden_access_without_followup_use(
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            global_context=global_context,
+        ):
+            adjusted += 0.22
         if self._action_intent_choice_is_generic_disposal_without_pour_signal(
             choice=choice_lc,
             support=support_lc,
@@ -1097,6 +1111,13 @@ class GraphAgent:
             global_context=global_context,
         ):
             adjusted += 0.28
+        if self._action_intent_choice_is_exact_reveal_then_take_or_place(
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            global_context=global_context,
+        ):
+            adjusted += 0.26
         if self._action_intent_choice_is_generic_underneath_cleaning_under_hidden_target_context(
             choice=choice_lc,
             support=support_lc,
@@ -3173,6 +3194,8 @@ class GraphAgent:
             for token in (
                 "access what's behind",
                 "look what's behind",
+                "see what is behind",
+                "what is behind",
                 "look behind",
                 "see what's behind",
                 "access the",
@@ -3218,9 +3241,109 @@ class GraphAgent:
                 "rather than a generic look",
                 "rather than only generic access",
                 "rather than the action being only generic access",
+                "revealed slot is immediately used",
+                "revealed area is immediately used",
+                "the hidden item is then picked up",
                 "不是单纯查看",
                 "更直接的目标是",
                 "直接目的其实是",
+            )
+        )
+
+    def _action_intent_choice_is_generic_hidden_access_over_exact_reveal_use(
+        self,
+        *,
+        choice: str,
+        support: str,
+        contradiction: str,
+        global_context: str,
+    ) -> bool:
+        del support, global_context
+        if not any(
+            token in choice
+            for token in (
+                "access what's behind",
+                "look what's behind",
+                "see what is behind",
+                "what is behind",
+                "look behind",
+                "see what's behind",
+                "access the",
+                "access behind",
+                "behind the",
+                "后面有什么",
+                "看后面",
+                "查看后面",
+            )
+        ):
+            return False
+        return any(
+            token in contradiction
+            for token in (
+                "revealed slot is immediately used",
+                "revealed area is immediately used",
+                "the hidden item is then picked up",
+                "revealed item is then picked up",
+                "the item behind is immediately taken",
+                "exact placement into that slot",
+                "stronger than generic access",
+                "not merely generically accessed",
+                "腾出的槽位立刻被使用",
+                "露出的目标立刻被拿取",
+            )
+        )
+
+    def _action_intent_choice_is_generic_hidden_access_without_followup_use(
+        self,
+        *,
+        choice: str,
+        support: str,
+        contradiction: str,
+        global_context: str,
+    ) -> bool:
+        signal_text = f"{support} {contradiction} {global_context}"
+        if not any(
+            token in choice
+            for token in (
+                "access what's behind",
+                "look what's behind",
+                "see what is behind",
+                "what is behind",
+                "look behind",
+                "see what's behind",
+                "access the",
+                "access behind",
+                "behind the",
+                "后面有什么",
+                "看后面",
+                "查看后面",
+            )
+        ):
+            return False
+        if not any(
+            token in signal_text
+            for token in (
+                "behind",
+                "reveals",
+                "revealed",
+                "underneath",
+                "后面",
+                "下面",
+            )
+        ):
+            return False
+        return any(
+            token in contradiction
+            for token in (
+                "no hidden item is then picked up",
+                "no item behind is actually taken",
+                "no revealed slot is immediately used",
+                "no object is placed into the revealed area",
+                "no direct next target is established",
+                "no concrete hidden target is retrieved",
+                "没有实际取出",
+                "没有明确下一目标",
+                "没有物体被放入露出的区域",
             )
         )
 
@@ -3459,6 +3582,9 @@ class GraphAgent:
             for token in (
                 "access",
                 "retrieve",
+                "take the",
+                "take ",
+                "pick the",
                 "look for",
                 "find",
                 "reach the",
@@ -3500,11 +3626,19 @@ class GraphAgent:
                 "moved out of the way",
                 "pick up the stack",
                 "retrieve the",
+                "picked up from behind",
+                "taken from behind",
+                "grab the",
                 "reaches for the",
                 "target behind",
                 "item behind",
                 "look for a",
                 "needed tool",
+                "becomes reachable",
+                "reachable behind",
+                "freed enough to grab",
+                "hidden item",
+                "revealed item",
                 "后面",
                 "下面",
                 "让开",
@@ -3524,6 +3658,13 @@ class GraphAgent:
                 "look for a pan",
                 "the actual target is behind",
                 "hidden target becomes reachable",
+                "item behind becomes reachable",
+                "the revealed item is then picked up",
+                "the item behind is immediately taken",
+                "reaches behind and takes",
+                "taken from behind",
+                "grabbed from behind",
+                "freed enough to grab the hidden item",
                 "reaches for the item behind",
                 "moved aside to access",
                 "moved aside to retrieve",
@@ -3566,6 +3707,25 @@ class GraphAgent:
                 "下面",
                 "挪开后",
                 "让开",
+            )
+        ):
+            return False
+        if any(
+            token in choice
+            for token in (
+                "access what's behind",
+                "look what's behind",
+                "see what is behind",
+                "what is behind",
+                "look behind",
+                "see what's behind",
+                "access behind",
+                "to access the area behind",
+                "to access behind",
+                "to look what's behind",
+                "后面有什么",
+                "看后面",
+                "查看后面",
             )
         ):
             return False
@@ -3623,6 +3783,27 @@ class GraphAgent:
             )
         ):
             return True
+        if any(
+            token in signal_text
+            for token in (
+                "revealed slot is immediately used",
+                "revealed area is immediately used",
+                "freed slot is then used",
+                "the item behind is immediately taken",
+                "the revealed item is then picked up",
+                "reaches behind and takes",
+                "picked up from behind",
+                "taken from behind",
+                "grabbed from behind",
+                "item behind becomes reachable",
+                "revealed target is used immediately",
+                "revealed target is placed immediately",
+                "挪开后立刻取出",
+                "腾出的槽位立刻被使用",
+                "露出的目标立刻被拿取",
+            )
+        ):
+            return True
         return self._action_intent_choice_is_exact_immediate_downstream_use(
             question=question,
             choice=choice,
@@ -3631,6 +3812,104 @@ class GraphAgent:
             action_object=action_object,
             global_context=global_context,
         )
+
+    def _action_intent_choice_is_exact_reveal_then_take_or_place(
+        self,
+        *,
+        choice: str,
+        support: str,
+        contradiction: str,
+        global_context: str,
+    ) -> bool:
+        signal_text = f"{support} {contradiction} {global_context}"
+        if not any(
+            token in signal_text
+            for token in (
+                "behind",
+                "underneath",
+                "revealed",
+                "freed slot",
+                "available spot",
+                "hidden item",
+                "revealed item",
+                "后面",
+                "下面",
+                "腾出的槽位",
+            )
+        ):
+            return False
+        if any(
+            token in contradiction
+            for token in (
+                "no hidden item is then picked up",
+                "no item behind is actually taken",
+                "no object is placed into the revealed area",
+                "no revealed slot is immediately used",
+                "no direct next target is established",
+                "no concrete hidden target is retrieved",
+                "没有实际取出",
+                "没有明确下一目标",
+                "没有物体被放入露出的区域",
+            )
+        ):
+            return False
+        if any(
+            token in choice
+            for token in (
+                "take the",
+                "retrieve the",
+                "pick up the",
+                "look for the",
+                "find the",
+                "take the small",
+                "拿",
+                "取出",
+                "找到",
+            )
+        ):
+            return any(
+                token in signal_text
+                for token in (
+                    "becomes reachable",
+                    "reachable and is taken",
+                    "taken from behind",
+                    "picked up from behind",
+                    "the item behind is immediately taken",
+                    "the revealed item is then picked up",
+                    "reaches behind and takes",
+                    "grabbed from behind",
+                    "hidden-item retrieval",
+                    "挪开后立刻取出",
+                    "露出的目标立刻被拿取",
+                )
+            )
+        if any(
+            token in choice
+            for token in (
+                "put the",
+                "place the",
+                "into the freed slot",
+                "into the slot",
+                "right place",
+                "proper place",
+                "放进",
+                "放到腾出的槽位",
+            )
+        ):
+            return any(
+                token in signal_text
+                for token in (
+                    "revealed slot is immediately used",
+                    "revealed area is immediately used",
+                    "freed slot is then used",
+                    "placed into the freed slot",
+                    "inserted into the freed slot",
+                    "exact placement into that slot",
+                    "revealed-slot placement",
+                    "腾出的槽位立刻被使用",
+                )
+            )
+        return False
 
     def _action_intent_choice_is_generic_underneath_cleaning_under_hidden_target_context(
         self,
