@@ -29,7 +29,7 @@
 ### 16.2.2 当前稳定基线
 
 - 专项回归命令：`pytest -q tests/test_graph_agent.py -k 'action_intent'`
-- 2026-06-07 当前结果：`248 passed, 344 deselected`
+- 2026-06-07 当前结果：`251 passed, 344 deselected`
 - 相比本轮进入专项时的起点 `107 passed, 300 deselected`，当前阶段性增量为 `+135 passed`
 - 当前执行策略：why 逻辑不再追求“接近完美覆盖”，而是维持“足够可用、回归稳定、无明显结构性退化”的维护态；后续优先级切换到完整 agent 功能闭环与小样本真实验证。
 
@@ -160,7 +160,16 @@
   - `future_use` 弱 `sink slot / exact placement` 会优先进入 `followup_transition`
   - `pairwise` 弱 `right place / final placement` 会优先进入 `followup_transition`
 - 本轮提交：同时保留原有稳定边界：如果当前只是普通高置信 `right place` 候选、但还没出现弱支持文本/withheld marker，则 planner 仍按原路线先进入 `pairwise`，不会被新规则误抢走
-- 本轮提交：why 专项回归已更新到 `248 passed, 344 deselected`
+- 本轮提交：`transition probe` 的 reveal/access 路径继续细化，不再把所有“挪开物体后出现后方区域”的 why close-call 都压成同一个短窗。现在至少拆成三类：
+  - `revealed target retrieval`：重点看 reveal 后 2 到 3 秒内是否真的把后方目标拿出来；
+  - `revealed slot placement`：重点看 reveal 后稍晚一点是否真的把另一个物体放进腾出的槽位；
+  - `revealed fixture enablement`：重点看 reveal 后是否立刻去打开/启动后方装置（如秤、门、把手等）
+- 本轮提交：这一步新增并通过 3 条 transition-window 定向测试，分别保护：
+  - `move cereal box -> take hidden jar` 会走更短、更近的 retrieval 窗口
+  - `move mug -> place blue cup into freed slot` 会走稍后偏置的 slot-placement 窗口
+  - `move tray -> turn on the scale behind it` 会走 fixture-enable 窗口，而不是落回泛化 mixed-horizon 或 hand-free 短窗
+- 本轮提交：同时保留了 reveal 路径的边界条件：只有当前题、候选与证据文本里真正出现 `behind / hidden / reveal / slot / freed slot` 这类 reveal 语境时，才会启用这些 subtype；像 `take jar -> open vs weigh` 这种普通 mixed-horizon 题仍保持原来的 hybrid transition probe，不会被误判成 reveal-fixture
+- 本轮提交：why 专项回归已更新到 `251 passed, 344 deselected`
 - 本轮提交：why 题在 `followup_transition / followup_peaks` 之后新增“短时序证据复核”分支，先让 agent 总结动作后立刻结果、下一步手部动作和 `hand-free / access / next-use` 证据，再回到 `infer_action_intent`
 - 本轮提交：`inspect_visual_evidence` 的写回字段扩到 `timeline_summary / immediate_result / next_action_hint / direct_purpose_hint / ambiguity_note`，并在 `needs_more_evidence=true` 时显式保留 `need_disambiguating_evidence`
 - 本轮提交：why 题 `inspect_visual_evidence -> infer_action_intent` 的回跳逻辑已改为识别 timeline review；若复核仍判定证据不足，则继续 `followup_ext2` 或转入 `future_use / pairwise` 专用裁决，而不是重新退回只看 `segment` 的早收口路径

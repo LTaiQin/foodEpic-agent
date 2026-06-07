@@ -1191,6 +1191,21 @@ class GraphAgentPlanner:
             end_time = action_end + 3.6
             stride_s = 0.4
             max_frames = 6
+        elif mode == "revealed_target_retrieval":
+            start_time = max(0.0, action_end - 0.12)
+            end_time = action_end + 2.7
+            stride_s = 0.35
+            max_frames = 7
+        elif mode == "revealed_slot_placement":
+            start_time = action_end + 0.02
+            end_time = action_end + 3.6
+            stride_s = 0.4
+            max_frames = 7
+        elif mode == "revealed_fixture_enablement":
+            start_time = max(0.0, action_end - 0.08)
+            end_time = action_end + 3.0
+            stride_s = 0.35
+            max_frames = 6
         elif mode == "reveal_or_access_result":
             start_time = max(0.0, action_end - 0.15)
             end_time = action_end + 3.2
@@ -1231,15 +1246,25 @@ class GraphAgentPlanner:
         profile: dict[str, Any],
     ) -> str:
         needed_profile = self._action_intent_needed_observation_profile(state=state, result=result)
+        reveal_subtype = (
+            self._action_intent_reveal_conflict_subtype(state=state, result=result)
+            if bool(profile["has_hidden_access_exact_use_conflict"])
+            else self._action_intent_reveal_conflict_subtype(state=state, result=result)
+        )
+        has_explicit_hand_free_conflict = self._action_intent_has_hand_free_future_use_conflict(state=state, result=result)
         if self._action_intent_prefers_followup_state_change_only(state):
             return "state_change"
+        if reveal_subtype == "revealed_fixture_enablement" and not has_explicit_hand_free_conflict:
+            return reveal_subtype
         if (
             needed_profile["prefer_mixed_horizon"]
             or self._action_intent_pair_spans_immediate_and_later_outcomes(state=state, result=result)
             or (result is None and self._action_intent_initial_pair_spans_immediate_and_later_outcomes(state))
         ):
             return "mixed_temporal_horizon"
-        if needed_profile["prefer_hand_free_next_action"] or self._action_intent_has_hand_free_future_use_conflict(state=state, result=result):
+        if (needed_profile["prefer_hand_free_next_action"] or has_explicit_hand_free_conflict) and not (
+            reveal_subtype == "revealed_fixture_enablement" and not has_explicit_hand_free_conflict
+        ):
             return "hand_free_next_action"
         if needed_profile["prefer_receptacle_outcome"]:
             return "receptacle_outcome"
@@ -1268,6 +1293,8 @@ class GraphAgentPlanner:
         ):
             return "safety_or_spill_result"
         if bool(profile["has_hidden_access_exact_use_conflict"]):
+            if reveal_subtype:
+                return reveal_subtype
             return "reveal_or_access_result"
         final_placement_markers = (
             "put back",
@@ -1338,6 +1365,159 @@ class GraphAgentPlanner:
             }:
                 return "future_use_outcome"
         return "immediate_result"
+
+    def _action_intent_reveal_conflict_subtype(
+        self,
+        *,
+        state: AgentState,
+        result: dict[str, Any] | None,
+    ) -> str:
+        candidate_indices = self._latest_action_intent_candidate_indices(state, result=result)
+        choices = [str(choice) for choice in getattr(state, "choices", [])]
+        if len(candidate_indices) < 2:
+            candidate_indices = list(range(len(choices)))
+        candidate_choices = [
+            choices[index].lower()
+            for index in candidate_indices
+            if 0 <= index < len(choices)
+        ]
+        if not candidate_choices:
+            return ""
+        support_text = self._action_intent_result_support_text(result)
+        reveal_context_text = " ".join(candidate_choices) + " " + support_text + " " + str(getattr(state, "question", "") or "").lower()
+        if not any(
+            token in reveal_context_text
+            for token in (
+                "behind",
+                "hidden",
+                "reveals",
+                "revealed",
+                "reveal",
+                "slot",
+                "freed area",
+                "freed slot",
+                "available spot",
+                "behind it",
+                "behind the",
+                "后面",
+                "露出",
+                "腾出的槽位",
+                "空位",
+            )
+        ):
+            return ""
+        has_slot_placement = any(
+            any(
+                token in choice
+                for token in (
+                    "put into the freed slot",
+                    "place into the freed slot",
+                    "put the",
+                    "place the",
+                    "freed slot",
+                    "slot behind",
+                    "right place",
+                    "proper place",
+                    "放进腾出的槽位",
+                    "放到腾出的槽位",
+                    "归位",
+                )
+            )
+            for choice in candidate_choices
+        )
+        has_hidden_target_retrieval = any(
+            any(
+                token in choice
+                for token in (
+                    "retrieve",
+                    "take the hidden",
+                    "take the small jar",
+                    "pick up the hidden",
+                    "pick up the small jar",
+                    "take the spice jar",
+                    "hidden behind",
+                    "retrieve the red curry paste",
+                    "retrieve the",
+                    "取出后面的",
+                    "拿后面的",
+                    "取到后面",
+                )
+            )
+            for choice in candidate_choices
+        )
+        has_fixture_enablement = any(
+            any(
+                token in choice
+                for token in (
+                    "turn on",
+                    "switch on",
+                    "open the",
+                    "open ",
+                    "turn off",
+                    "switch off",
+                    "tap",
+                    "use the scale",
+                    "turn on the scale",
+                    "打开",
+                    "开启",
+                    "开机",
+                )
+            )
+            for choice in candidate_choices
+        )
+        if has_hidden_target_retrieval and any(
+            token in support_text
+            for token in (
+                "hidden item",
+                "item behind",
+                "behind it",
+                "behind the",
+                "retrieved from behind",
+                "picked up from behind",
+                "taken from behind",
+                "small jar",
+                "spice jar",
+                "red curry paste",
+                "后面物体",
+                "后面的目标",
+            )
+        ):
+            return "revealed_target_retrieval"
+        if has_slot_placement and any(
+            token in support_text
+            for token in (
+                "freed slot",
+                "slot behind",
+                "available spot",
+                "put into the freed slot",
+                "placed into the freed slot",
+                "revealed slot",
+                "腾出的槽位",
+                "空位",
+            )
+        ):
+            return "revealed_slot_placement"
+        if has_fixture_enablement and any(
+            token in support_text
+            for token in (
+                "scale behind",
+                "turn on the scale",
+                "open the",
+                "switch on",
+                "fixture behind",
+                "revealed appliance",
+                "露出的装置",
+                "后面的秤",
+            )
+        ):
+            return "revealed_fixture_enablement"
+        if has_hidden_target_retrieval and not has_slot_placement and not has_fixture_enablement:
+            return "revealed_target_retrieval"
+        if has_slot_placement:
+            return "revealed_slot_placement"
+        if has_fixture_enablement:
+            return "revealed_fixture_enablement"
+        return ""
 
     def _action_intent_pair_spans_immediate_and_later_outcomes(
         self,
