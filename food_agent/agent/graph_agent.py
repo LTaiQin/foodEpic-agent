@@ -875,6 +875,17 @@ class GraphAgent:
                 f"action_intent_exact_use_override_best_index={exact_use_override[0]} score={best_score:.2f}"
             )
             return exact_use_override
+        hidden_target_override = self._override_generic_hidden_access_with_exact_revealed_target_candidate(
+            state=state,
+            candidate_rows=candidate_rows,
+            unresolved_best_index=best_index,
+            unresolved_best_score=best_score,
+        )
+        if hidden_target_override is not None:
+            state.add_memory(
+                f"action_intent_hidden_target_override_best_index={hidden_target_override[0]} score={best_score:.2f}"
+            )
+            return hidden_target_override
         state.add_memory(f"action_intent_unresolved_rerank_best_index={best_index} score={best_score:.2f}")
         return best_index, best_choice, min(max(0.36 + max(best_score, 0.0) * 0.45, 0.36), 0.68)
 
@@ -1030,6 +1041,13 @@ class GraphAgent:
             global_context=global_context,
         ):
             adjusted -= 0.22
+        if self._action_intent_choice_is_generic_hidden_reveal_or_access(
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            global_context=global_context,
+        ):
+            adjusted -= 0.24
         if self._action_intent_choice_is_generic_disposal_without_pour_signal(
             choice=choice_lc,
             support=support_lc,
@@ -1045,6 +1063,15 @@ class GraphAgent:
             global_context=global_context,
         ):
             adjusted += 0.34
+        if self._action_intent_choice_is_exact_revealed_target_purpose(
+            question=question_lc,
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            action_object=action_object,
+            global_context=global_context,
+        ):
+            adjusted += 0.28
         if self._action_intent_choice_is_generic_underneath_cleaning_under_hidden_target_context(
             choice=choice_lc,
             support=support_lc,
@@ -1528,6 +1555,73 @@ class GraphAgent:
         if unresolved_best_score > alt_score + 0.26 and unresolved_best_score >= 0.8:
             return None
         confidence = min(max(0.5 + max(alt_score, 0.0) * 0.36, 0.5), 0.74)
+        return alt_index, alt_choice, confidence
+
+    def _override_generic_hidden_access_with_exact_revealed_target_candidate(
+        self,
+        *,
+        state: AgentState,
+        candidate_rows: list[dict[str, Any]],
+        unresolved_best_index: int,
+        unresolved_best_score: float,
+    ) -> tuple[int, str, float] | None:
+        question = str(getattr(state, "question", "") or "")
+        question_lc = question.lower()
+        if not any(token in question_lc for token in ("move ", "transfer ", "shift ", "remove ", "clear ")):
+            return None
+        best_row = next(
+            (
+                row
+                for row in candidate_rows
+                if int(row.get("index", -1)) == unresolved_best_index
+            ),
+            None,
+        )
+        if best_row is None:
+            return None
+        best_choice = str(best_row.get("choice") or "").lower()
+        global_context = " ".join(
+            str(item)
+            for item in list(getattr(state, "evidence_bundle", []))[-24:]
+            + list(getattr(state, "working_memory", []))[-24:]
+            if isinstance(item, str)
+        ).lower()
+        if not self._action_intent_choice_is_generic_hidden_reveal_or_access(
+            choice=best_choice,
+            support=str(best_row.get("support") or "").lower(),
+            contradiction=str(best_row.get("contradiction") or "").lower(),
+            global_context=global_context,
+        ):
+            return None
+        action_object = self._action_intent_question_object(question)
+        exact_candidates: list[tuple[float, int, str]] = []
+        for row in candidate_rows:
+            index = int(row.get("index", -1))
+            if index == unresolved_best_index:
+                continue
+            choice = str(row.get("choice") or "").lower()
+            support = str(row.get("support") or "").lower()
+            contradiction = str(row.get("contradiction") or "").lower()
+            adjusted_score = float(row.get("adjusted_score") or 0.0)
+            if not self._action_intent_choice_is_exact_revealed_target_purpose(
+                question=question_lc,
+                choice=choice,
+                support=support,
+                contradiction=contradiction,
+                action_object=action_object,
+                global_context=global_context,
+            ):
+                continue
+            if adjusted_score < 0.12:
+                continue
+            exact_candidates.append((adjusted_score, index, str(state.choices[index])))
+        if not exact_candidates:
+            return None
+        exact_candidates.sort(key=lambda item: (-item[0], item[1]))
+        alt_score, alt_index, alt_choice = exact_candidates[0]
+        if unresolved_best_score > alt_score + 0.24 and unresolved_best_score >= 0.8:
+            return None
+        confidence = min(max(0.5 + max(alt_score, 0.0) * 0.38, 0.5), 0.74)
         return alt_index, alt_choice, confidence
 
     def _action_intent_question_object(self, question: str) -> str:
@@ -2344,13 +2438,14 @@ class GraphAgent:
             )
         ):
             return False
-        if any(
+        choice_uses_generic_right_place = any(
             token in choice
             for token in (
                 "right place",
                 "proper place",
             )
-        ) and not any(
+        )
+        choice_has_explicit_destination = any(
             token in choice
             for token in (
                 "sink",
@@ -2367,8 +2462,7 @@ class GraphAgent:
                 "saucepan",
                 "pan",
             )
-        ):
-            return False
+        )
         signal_text = f"{support} {contradiction} {global_context}"
         if action_object and not any(
             token in signal_text
@@ -2442,6 +2536,8 @@ class GraphAgent:
                 "接着就",
             )
         )
+        if choice_uses_generic_right_place and not choice_has_explicit_destination and not has_destination:
+            return False
         if not (has_target and has_destination and has_immediacy):
             return False
         return not any(
@@ -2817,6 +2913,70 @@ class GraphAgent:
             )
         )
 
+    def _action_intent_choice_is_generic_hidden_reveal_or_access(
+        self,
+        *,
+        choice: str,
+        support: str,
+        contradiction: str,
+        global_context: str,
+    ) -> bool:
+        if not any(
+            token in choice
+            for token in (
+                "access what's behind",
+                "look what's behind",
+                "look behind",
+                "see what's behind",
+                "access the",
+                "access behind",
+                "to access the area behind",
+                "to access behind",
+                "to look what's behind",
+                "后面有什么",
+                "看后面",
+                "查看后面",
+            )
+        ):
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        if not any(
+            token in signal_text
+            for token in (
+                "behind",
+                "underneath",
+                "second shelf",
+                "back shelf",
+                "moved aside",
+                "reveals",
+                "revealed",
+                "clear the way",
+                "后面",
+                "下面",
+                "挪开后",
+                "让开",
+            )
+        ):
+            return False
+        return any(
+            token in contradiction
+            for token in (
+                "not merely looked",
+                "not merely looking",
+                "not just checking",
+                "clearer evidence is",
+                "weaker than the concrete hidden-target retrieval",
+                "the direct target is",
+                "the direct purpose is",
+                "rather than a generic look",
+                "rather than only generic access",
+                "rather than the action being only generic access",
+                "不是单纯查看",
+                "更直接的目标是",
+                "直接目的其实是",
+            )
+        )
+
     def _action_intent_choice_is_brief_cooking_inspection_over_disposal(
         self,
         *,
@@ -3090,6 +3250,101 @@ class GraphAgent:
                 "蔬菜削皮刀",
                 "红咖喱酱",
             )
+        )
+
+    def _action_intent_choice_is_exact_revealed_target_purpose(
+        self,
+        *,
+        question: str,
+        choice: str,
+        support: str,
+        contradiction: str,
+        action_object: str,
+        global_context: str,
+    ) -> bool:
+        signal_text = f"{support} {contradiction} {global_context}"
+        if not any(
+            token in signal_text
+            for token in (
+                "behind",
+                "underneath",
+                "second shelf",
+                "back shelf",
+                "moved aside",
+                "reveals",
+                "revealed",
+                "clear the way",
+                "freed slot",
+                "available spot",
+                "behind the",
+                "后面",
+                "下面",
+                "挪开后",
+                "让开",
+            )
+        ):
+            return False
+        if any(
+            token in contradiction
+            for token in (
+                "no actual retrieval is shown",
+                "no direct next target is established",
+                "no concrete hidden target is retrieved",
+                "没有实际取出",
+                "没有明确下一目标",
+            )
+        ):
+            return False
+        if (
+            self._action_intent_choice_is_hidden_target_access_or_retrieval(
+                choice=choice,
+                support=support,
+                contradiction=contradiction,
+                global_context=global_context,
+            )
+            and not self._action_intent_choice_is_generic_hidden_reveal_or_access(
+                choice=choice,
+                support=support,
+                contradiction=contradiction,
+                global_context=global_context,
+            )
+        ):
+            return True
+        if self._action_intent_choice_is_exact_downstream_targeted_placement(
+            question=question,
+            choice=choice,
+            support=support,
+            contradiction=contradiction,
+            action_object=action_object,
+            global_context=global_context,
+        ):
+            return True
+        if any(token in choice for token in ("right place", "proper place")) and any(
+            token in signal_text
+            for token in (
+                "inserted into",
+                "inserted in",
+                "put into that exact",
+                "put into the freed slot",
+                "placed into the freed slot",
+                "freed slot",
+                "exact rack slot",
+                "available spot",
+                "right place",
+                "proper place",
+                "插进",
+                "放进腾出的槽位",
+                "准确放回",
+            )
+        ):
+            return True
+        return self._action_intent_choice_is_exact_immediate_downstream_use(
+            question=question,
+            choice=choice,
+            support=support,
+            contradiction=contradiction,
+            action_object=action_object,
+            global_context=global_context,
         )
 
     def _action_intent_choice_is_generic_underneath_cleaning_under_hidden_target_context(
