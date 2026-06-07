@@ -917,6 +917,14 @@ class GraphAgent:
             global_context=global_context,
         ):
             adjusted += 0.32
+        if self._action_intent_choice_is_direct_same_object_cleaning(
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            action_object=action_object,
+            global_context=global_context,
+        ):
+            adjusted += 0.28
         if self._action_intent_choice_is_direct_residue_release(
             question=question_lc,
             choice=choice_lc,
@@ -1274,6 +1282,61 @@ class GraphAgent:
                 "另一只手",
                 "盖",
                 "打开",
+            )
+        )
+
+    def _action_intent_choice_is_direct_same_object_cleaning(
+        self,
+        *,
+        choice: str,
+        support: str,
+        contradiction: str,
+        action_object: str,
+        global_context: str,
+    ) -> bool:
+        if not self._choice_is_same_object_active_use(choice, action_object):
+            return False
+        if any(
+            token in action_object
+            for token in ("sponge", "brush", "cloth", "towel", "napkin", "paper towel", "scrubber")
+        ):
+            return False
+        if not any(token in choice for token in ("wash", "rinse", "clean", "scrub", "冲洗", "清洗", "刷")):
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        if any(
+            token in signal_text
+            for token in (
+                "later",
+                "downstream",
+                "after that picks up",
+                "之后再",
+                "后续才",
+            )
+        ):
+            return False
+        return any(
+            token in signal_text
+            for token in (
+                "while holding",
+                "holding in one hand",
+                "other hand",
+                "free hand",
+                "brush",
+                "sponge",
+                "tap",
+                "running water",
+                "under water",
+                "rinse the",
+                "wash the",
+                "scrub the",
+                "一只手",
+                "另一只手",
+                "拿着",
+                "海绵",
+                "刷子",
+                "水龙头",
+                "流水",
             )
         )
 
