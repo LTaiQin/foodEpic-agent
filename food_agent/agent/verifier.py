@@ -200,7 +200,7 @@ class GraphAgentVerifier:
             if self._action_intent_has_pending_evidence_gap(state):
                 return False
             if self._has_action_intent_textual_rank_fallback_answer(state):
-                return True
+                return self._action_intent_textual_rank_fallback_can_finish(state)
             if not self._action_intent_has_sufficient_grounding_for_stable_answer(state):
                 return False
         prefixes = (
@@ -247,6 +247,51 @@ class GraphAgentVerifier:
                 infer_failures += 1
         return infer_failures >= 3
 
+    def _action_intent_textual_rank_fallback_can_finish(self, state: AgentState) -> bool:
+        if not self._has_action_intent_textual_rank_fallback_answer(state):
+            return False
+        if self._action_intent_has_pending_evidence_gap(state):
+            return False
+        if not self._action_intent_has_current_task_artifact_grounding(state):
+            return False
+        if not self._action_intent_has_sufficient_grounding_for_stable_answer(state):
+            return False
+        if self._action_intent_has_unresolved_secondary_conflicts(state):
+            return False
+        return True
+
+    def _action_intent_has_current_task_artifact_grounding(self, state: AgentState) -> bool:
+        task_prefix = f"{str(getattr(state, 'task_family', '') or '').lower()}_"
+        frame_paths = list(getattr(state, "retrieved_frames", []) or []) + list(getattr(state, "artifacts", []) or [])
+        for path in frame_paths:
+            name = Path(str(path)).name.lower()
+            if task_prefix and task_prefix in name and any(tag in name for tag in ("segment", "followup", "ext2")):
+                return True
+        for call in list(getattr(state, "tool_trace", []) or []):
+            if not isinstance(call, dict):
+                continue
+            raw_result = call.get("raw_result")
+            if not isinstance(raw_result, dict):
+                continue
+            artifact_paths = raw_result.get("artifact_paths")
+            if not isinstance(artifact_paths, list):
+                continue
+            for path in artifact_paths:
+                name = Path(str(path)).name.lower()
+                if task_prefix and task_prefix in name and any(tag in name for tag in ("segment", "followup", "ext2")):
+                    return True
+        return False
+
+    def _action_intent_has_unresolved_secondary_conflicts(self, state: AgentState) -> bool:
+        pending_markers = {
+            "conflict:conflicting_locations",
+            "conflict:conflicting_state_observations",
+        }
+        if any(item in pending_markers for item in list(getattr(state, "open_questions", []) or [])):
+            return True
+        detected = set(self._detect_conflicts(state))
+        return bool({"conflicting_locations", "conflicting_state_observations"} & detected)
+
     def _action_intent_has_pending_evidence_gap(self, state: AgentState) -> bool:
         for item in list(state.working_memory) + list(state.evidence_bundle):
             if not isinstance(item, str):
@@ -262,9 +307,11 @@ class GraphAgentVerifier:
     def _action_intent_missing_grounding_types(self, state: AgentState) -> list[str]:
         if not self._is_action_intent_task(state):
             return []
-        if self._has_action_intent_textual_rank_fallback_answer(state):
+        if self._action_intent_textual_rank_fallback_can_finish(state):
             return []
         missing: list[str] = []
+        if self._has_action_intent_textual_rank_fallback_answer(state):
+            missing.append("need_alternative_evidence_path")
         choices = [str(choice) for choice in getattr(state, "choices", [])]
         question = str(getattr(state, "question", "") or "")
         if self._action_intent_has_pending_evidence_gap(state):
