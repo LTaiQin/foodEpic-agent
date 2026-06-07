@@ -971,6 +971,27 @@ class GraphAgent:
             global_context=global_context,
         ):
             adjusted += 0.3
+        if self._action_intent_choice_is_generic_inspection_under_hidden_target_context(
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            global_context=global_context,
+        ):
+            adjusted -= 0.22
+        if self._action_intent_choice_is_hidden_target_access_or_retrieval(
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            global_context=global_context,
+        ):
+            adjusted += 0.34
+        if self._action_intent_choice_is_generic_underneath_cleaning_under_hidden_target_context(
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            global_context=global_context,
+        ):
+            adjusted -= 0.2
         if self._action_intent_choice_is_exact_workspace_creation(
             choice=choice_lc,
             support=support_lc,
@@ -1976,6 +1997,220 @@ class GraphAgent:
                 "正朝",
                 "摆正",
                 "盖子是否合适",
+            )
+        )
+
+    def _action_intent_choice_is_generic_inspection_under_hidden_target_context(
+        self,
+        *,
+        choice: str,
+        support: str,
+        contradiction: str,
+        global_context: str,
+    ) -> bool:
+        if not any(
+            token in choice
+            for token in (
+                "inspect",
+                "check",
+                "look at",
+                "look what's",
+                "see whether",
+                "find",
+                "study",
+                "inspect the",
+                "检查",
+                "查看",
+                "看看",
+            )
+        ):
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        if not any(
+            token in signal_text
+            for token in (
+                "behind",
+                "underneath",
+                "under the",
+                "back of the counter",
+                "back shelf",
+                "second shelf",
+                "clear the way",
+                "moved aside",
+                "moved out of the way",
+                "target behind",
+                "hidden target",
+                "pick up the stack",
+                "retrieve the",
+                "reaches for the",
+                "拿后面的",
+                "后面",
+                "下面",
+                "让开",
+                "挪开后",
+            )
+        ):
+            return False
+        return any(
+            token in contradiction
+            for token in (
+                "retrieval is more direct",
+                "actual target is behind",
+                "not merely looking",
+                "not merely looked",
+                "not just checking",
+                "clearer evidence is the hidden target",
+                "inspection is weaker than",
+                "weaker than the concrete hidden-target retrieval",
+                "rather than a generic look",
+                "rather than generic look",
+                "检索目的更直接",
+                "不是单纯查看",
+                "后面的目标更直接",
+            )
+        )
+
+    def _action_intent_choice_is_hidden_target_access_or_retrieval(
+        self,
+        *,
+        choice: str,
+        support: str,
+        contradiction: str,
+        global_context: str,
+    ) -> bool:
+        if not any(
+            token in choice
+            for token in (
+                "access",
+                "retrieve",
+                "look for",
+                "find",
+                "reach the",
+                "pick up the stack",
+                "clear the way to pick up",
+                "get easier access",
+                "access what's behind",
+                "target behind",
+                "拿到后面",
+                "取后面",
+                "找",
+                "拿起后面的",
+            )
+        ):
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        if any(
+            token in contradiction
+            for token in (
+                "no hidden target",
+                "no item behind",
+                "not actually retrieved",
+                "without any later retrieval",
+                "没有后方目标",
+                "没有拿到后面的东西",
+            )
+        ):
+            return False
+        if not any(
+            token in signal_text
+            for token in (
+                "behind",
+                "underneath",
+                "under the",
+                "back shelf",
+                "second shelf",
+                "clear the way",
+                "moved aside",
+                "moved out of the way",
+                "pick up the stack",
+                "retrieve the",
+                "reaches for the",
+                "target behind",
+                "item behind",
+                "look for a",
+                "needed tool",
+                "后面",
+                "下面",
+                "让开",
+                "挪开后",
+                "目标在后面",
+            )
+        ):
+            return False
+        return any(
+            token in signal_text
+            for token in (
+                "retrieve the red curry paste",
+                "red curry paste",
+                "pick up the stack of large bowls",
+                "look for the tool that is needed",
+                "vegetable peeler",
+                "look for a pan",
+                "the actual target is behind",
+                "hidden target becomes reachable",
+                "reaches for the item behind",
+                "moved aside to access",
+                "moved aside to retrieve",
+                "clear the way to pick up",
+                "needed tool",
+                "red curry paste behind",
+                "后面的目标",
+                "要找的工具",
+                "蔬菜削皮刀",
+                "红咖喱酱",
+            )
+        )
+
+    def _action_intent_choice_is_generic_underneath_cleaning_under_hidden_target_context(
+        self,
+        *,
+        choice: str,
+        support: str,
+        contradiction: str,
+        global_context: str,
+    ) -> bool:
+        if not any(
+            token in choice
+            for token in (
+                "clean underneath",
+                "clean underneath items",
+                "clean under",
+                "wipe underneath",
+                "clear up",
+                "clean below",
+                "清理下面",
+                "清洁下面",
+            )
+        ):
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        if not any(
+            token in signal_text
+            for token in (
+                "underneath",
+                "under the",
+                "hidden tool",
+                "needed tool",
+                "vegetable peeler",
+                "missing tool",
+                "find",
+                "look for",
+                "下面",
+                "要找的工具",
+                "削皮刀",
+            )
+        ):
+            return False
+        return any(
+            token in contradiction
+            for token in (
+                "rather than cleaning underneath",
+                "explicit target is the missing tool",
+                "organized around finding the needed hidden tool",
+                "not mainly cleaning",
+                "不是主要为了清洁",
+                "明确目标是缺失工具",
+                "是为了找隐藏工具",
             )
         )
 
