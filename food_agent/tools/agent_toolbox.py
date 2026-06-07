@@ -1593,7 +1593,8 @@ class AgentToolbox:
                 "\n9. 如果动作是 tap/shake/tilt/tip/pour/hit/knock 某个勺子、杯子、锅或容器，并且候选描述的是让残余食材/液体掉回锅碗罐或水槽，这种 same-object residue release 往往就是当前动作本身的直接目的。"
                 "\n10. 如果当前动作是在一只手继续拿着同一个物体的同时，腾出另一只手用海绵/刷子/水龙头去洗、冲、刷这个同一个物体，那么“清洗该物体”通常比泛泛的 free-hand 或 pick-up 选项更直接。"
                 "\n11. 如果动作物体本身就是 sponge/napkin/cloth/paper towel 这类清洁工具，而候选里有“擦台面/洗某个具体器具/刷某个具体表面”与泛泛的“to clean / dry hands”同时出现，优先找被清洁的具体目标；具体目标通常比泛化清洁目标更直接。"
-                "\n12. 如果证据不足，允许低置信，但仍然要给出基于当前证据最合理的排序。"
+                "\n12. 如果动作是 place/put 某个器具，要区分“因为已经用完所以放下”和“因为刚洗过、要晾干/沥水所以放下”；有洗后潮湿证据时优先考虑 drying，没有潮湿证据时不要随便猜 drying。"
+                "\n13. 如果证据不足，允许低置信，但仍然要给出基于当前证据最合理的排序。"
                 '\n输出 JSON，格式固定为 {"scores":[{"index":0,"score":0.0,"reason":""}],"best_index":0,"answer":"","confidence":0.0}。'
             )
         return (
@@ -2913,6 +2914,7 @@ class AgentToolbox:
             "\n10. 如果动作是 tap/shake/tilt/tip/pour/hit/knock 某个勺子、锅、杯子或容器，要注意当前动作本身可能就是为了把残余内容物甩回、倒回或沥回原来的锅碗罐/水槽，这属于直接目的。"
             "\n11. 如果动作让一只手继续拿着某个刀/杯/碗/锅，而另一只手立刻去用海绵、刷子或流水清洗这个同一个物体，那么更直接的目的通常是‘清洗这个物体’，而不是泛泛的 free-hand 或 pick-up。"
             "\n12. 如果动作物体本身就是海绵/纸巾/抹布/毛巾这类清洁工具，而选项里同时出现“擦某个具体台面/洗某个具体器具”和泛泛的“clean / dry hands”，通常要优先判断那个具体被清洁的目标。"
+            "\n13. 如果动作是 place/put 某个器具，一定区分“已经用完所以放下”和“洗后为了晾干/沥水而放下”；只有当证据里有洗后潮湿、流水、肥皂、水滴、朝上晾干等线索时，drying 才应优先。"
             f"\n上下文线索: {scoped_notes}"
             '\n输出 JSON，字段固定为 {"best_index":0,"answer":"","confidence":0.0,"reason":"","second_best_index":0,"ambiguity":false,"need_future_evidence":false,"future_window_s":4.0,"followup_focus":""}。'
             f"\n问题: {question}\n选项:\n"
