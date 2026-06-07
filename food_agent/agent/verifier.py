@@ -82,9 +82,14 @@ class GraphAgentVerifier:
                 "need_region_grounding",
                 "need_state_evidence",
                 "need_alternative_evidence_path",
-                "conflict:conflicting_locations",
-                "conflict:conflicting_state_observations",
             }
+            if self._action_intent_can_suppress_secondary_conflicts(state):
+                irrelevant.update(
+                    {
+                        "conflict:conflicting_locations",
+                        "conflict:conflicting_state_observations",
+                    }
+                )
             missing = [item for item in missing if item not in irrelevant]
         elif self._has_stable_structured_family_answer_evidence(state):
             irrelevant = {
@@ -333,6 +338,13 @@ class GraphAgentVerifier:
             return True
         return False
 
+    def _action_intent_can_suppress_secondary_conflicts(self, state: AgentState) -> bool:
+        return (
+            self._is_action_intent_task(state)
+            and not self._action_intent_has_pending_evidence_gap(state)
+            and self._action_intent_has_successful_specialized_resolution(state)
+        )
+
     def _action_intent_has_precondition_grounding(self, state: AgentState) -> bool:
         for path in list(getattr(state, "retrieved_frames", []) or []):
             name = Path(str(path)).name.lower()
@@ -405,7 +417,7 @@ class GraphAgentVerifier:
                 for item in conflicts
                 if item not in {"conflicting_locations", "conflicting_state_observations"}
             ]
-        if self._is_action_intent_task(state) and self._has_stable_structured_family_answer_evidence(state):
+        if self._action_intent_can_suppress_secondary_conflicts(state):
             return [
                 item
                 for item in conflicts
