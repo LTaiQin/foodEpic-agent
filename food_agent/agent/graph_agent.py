@@ -1226,6 +1226,14 @@ class GraphAgent:
             global_context=global_context,
         ):
             adjusted += 0.26
+        if self._action_intent_choice_is_hygiene_surface_protection_staging(
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            action_object=action_object,
+            global_context=global_context,
+        ):
+            adjusted += 0.24
         if self._action_intent_choice_is_unfinished_cleanup_context_for_finished_or_storage(
             choice=choice_lc,
             support=support_lc,
@@ -4915,6 +4923,58 @@ class GraphAgent:
                 "not reused",
                 "不再使用",
                 "确实用完",
+            )
+        )
+
+    def _action_intent_choice_is_hygiene_surface_protection_staging(
+        self,
+        *,
+        choice: str,
+        support: str,
+        contradiction: str,
+        action_object: str,
+        global_context: str,
+    ) -> bool:
+        del action_object
+        if not any(
+            token in choice
+            for token in (
+                "dirty",
+                "messy",
+                "not dirty",
+                "no spots",
+                "avoid mess",
+                "avoid dirtying",
+                "keep the dirty end",
+                "counter messy",
+                "弄脏",
+                "不弄脏",
+                "脏的一端",
+            )
+        ):
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        return any(
+            token in signal_text
+            for token in (
+                "dirty end",
+                "over the tray",
+                "over the chopping board",
+                "over one of the muffin trays",
+                "not touching the kitchen top",
+                "facing up",
+                "oily part",
+                "kept over the board",
+                "kept over the tray",
+                "to keep the counter from getting messy",
+                "placement hygiene",
+                "dirty side",
+                "脏的一端",
+                "放在托盘上方",
+                "放在砧板上方",
+                "不接触台面",
+                "避免弄脏台面",
+                "朝上",
             )
         )
 
