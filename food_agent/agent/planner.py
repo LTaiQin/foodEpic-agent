@@ -6925,6 +6925,28 @@ class GraphAgentPlanner:
             ordered.append(token)
         return ordered
 
+    def _action_intent_choice_fixture_target_candidates(self, *, choice: str, action_object: str) -> list[str]:
+        fixture_targets = {
+            "tap",
+            "faucet",
+            "scale",
+            "sink",
+            "hob",
+            "microwave",
+            "oven",
+            "fridge",
+            "door",
+            "drawer",
+            "cupboard",
+            "rack",
+            "dishwasher",
+        }
+        return [
+            token
+            for token in self._action_intent_choice_target_object_candidates(choice=choice, action_object=action_object)
+            if token in fixture_targets
+        ]
+
     def _action_intent_unresolved_rerank_downstream_object_hint(self, state: AgentState) -> str:
         reason = self._action_intent_recent_unresolved_rerank_withheld_reason(state)
         if not reason or not any(
@@ -6944,6 +6966,23 @@ class GraphAgentPlanner:
         for token in self._action_intent_choice_target_object_candidates(choice=choice, action_object=action_object):
             if token in fixture_only:
                 continue
+            return token
+        return ""
+
+    def _action_intent_unresolved_rerank_downstream_fixture_hint(self, state: AgentState) -> str:
+        reason = self._action_intent_recent_unresolved_rerank_withheld_reason(state)
+        if not reason or "timeline_review_hand_free_or_fixture_gap" not in reason:
+            return ""
+        latest = self._latest_action_intent_resolution_payload(state)
+        if latest is None:
+            return ""
+        _tool_name, payload = latest
+        best_index = self._coerce_choice_index(payload.get("best_index"), getattr(state, "choices", []))
+        if best_index is None:
+            return ""
+        choice = str(getattr(state, "choices", [])[best_index])
+        action_object = self._action_intent_question_object_hint(state)
+        for token in self._action_intent_choice_fixture_target_candidates(choice=choice, action_object=action_object):
             return token
         return ""
 
@@ -7069,6 +7108,58 @@ class GraphAgentPlanner:
         if selected is None:
             return PlannerDecision(
                 thought=f"{thought} 继续重新检索下游目标对象 `{downstream_target}` 的更晚轨迹。",
+                tool="query_object",
+                args={"query": downstream_target, "limit": 24},
+            )
+        _node, start_time, end_time = selected
+        query_time = start_time if abs(end_time - start_time) < 0.25 else (start_time + min(end_time, start_time + 1.2)) / 2
+        return PlannerDecision(
+            thought=thought,
+            tool="query_spatial_context",
+            args={
+                "time_s": query_time,
+                "object_name": downstream_target,
+                "limit": 16,
+            },
+        )
+
+    def _build_action_intent_unresolved_rerank_downstream_fixture_revisit_decision(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        thought: str,
+    ) -> PlannerDecision | None:
+        downstream_target = self._action_intent_unresolved_rerank_downstream_fixture_hint(state)
+        if not downstream_target:
+            return None
+        nodes = self._latest_action_intent_long_horizon_nodes(state, object_hint=downstream_target)
+        if not nodes:
+            return PlannerDecision(
+                thought=f"{thought} 先定位下游装置/fixture `{downstream_target}` 在更晚时刻的轨迹。",
+                tool="query_object",
+                args={"query": downstream_target, "limit": 24},
+            )
+        anchor_time = self._latest_action_intent_target_spatial_anchor_time(state)
+        latest_followup_end = self._latest_action_intent_followup_end_time(state)
+        after_time: float | None = None
+        if anchor_time is not None and latest_followup_end is not None:
+            after_time = max(anchor_time, latest_followup_end)
+        elif latest_followup_end is not None:
+            after_time = latest_followup_end
+        else:
+            after_time = anchor_time
+        min_start_time = None if after_time is None else float(after_time) + 0.15
+        selected = self._action_intent_select_long_horizon_node(
+            state=state,
+            hints=hints,
+            nodes=nodes,
+            min_start_time=min_start_time,
+            object_hint=downstream_target,
+        )
+        if selected is None:
+            return PlannerDecision(
+                thought=f"{thought} 继续重新检索下游装置/fixture `{downstream_target}` 的更晚轨迹。",
                 tool="query_object",
                 args={"query": downstream_target, "limit": 24},
             )
@@ -8625,6 +8716,13 @@ class GraphAgentPlanner:
                 )
                 if precondition is not None:
                     return precondition
+            unresolved_rerank_downstream_fixture_revisit = self._build_action_intent_unresolved_rerank_downstream_fixture_revisit_decision(
+                state=state,
+                hints=hints,
+                thought="why 题 unresolved rerank 已指出 hand-free / fixture enablement 仍缺决定性证据；优先转去追踪真正的下游装置，而不是继续只盯动作物体或泛化补帧。",
+            )
+            if unresolved_rerank_downstream_fixture_revisit is not None:
+                return unresolved_rerank_downstream_fixture_revisit
             unresolved_rerank_downstream_target_revisit = self._build_action_intent_unresolved_rerank_downstream_target_revisit_decision(
                 state=state,
                 hints=hints,
@@ -8730,6 +8828,13 @@ class GraphAgentPlanner:
                 )
                 if precondition is not None:
                     return precondition
+            unresolved_rerank_downstream_fixture_revisit = self._build_action_intent_unresolved_rerank_downstream_fixture_revisit_decision(
+                state=state,
+                hints=hints,
+                thought="why 题 unresolved rerank 已指出 hand-free / fixture enablement 的真正下游装置还没被确认；优先转去追踪那个 fixture，而不是继续只看动作物体。",
+            )
+            if unresolved_rerank_downstream_fixture_revisit is not None:
+                return unresolved_rerank_downstream_fixture_revisit
             unresolved_rerank_downstream_target_revisit = self._build_action_intent_unresolved_rerank_downstream_target_revisit_decision(
                 state=state,
                 hints=hints,
