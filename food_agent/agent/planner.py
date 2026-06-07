@@ -2374,6 +2374,40 @@ class GraphAgentPlanner:
         _tool, payload = latest
         return str(payload.get("needed_observation") or "").strip().lower()
 
+    def _action_intent_needed_observation_target_hint(
+        self,
+        *,
+        state: AgentState,
+        result: dict[str, Any] | None = None,
+    ) -> tuple[str, str] | None:
+        if self._action_intent_followup_attempt_count(state) < 2:
+            return None
+        text = self._action_intent_needed_observation_text(state=state, result=result)
+        if not text:
+            return None
+        action_object = self._action_intent_question_object_hint(state)
+        fixture_targets = self._action_intent_choice_fixture_target_candidates(choice=text, action_object=action_object)
+        object_targets = [
+            token
+            for token in self._action_intent_choice_target_object_candidates(choice=text, action_object=action_object)
+            if token not in set(fixture_targets)
+        ]
+        unique_targets: list[tuple[str, str]] = []
+        seen_targets: set[str] = set()
+        for target in fixture_targets:
+            if not target or target == action_object or target in seen_targets:
+                continue
+            seen_targets.add(target)
+            unique_targets.append((target, "fixture"))
+        for target in object_targets:
+            if not target or target == action_object or target in seen_targets:
+                continue
+            seen_targets.add(target)
+            unique_targets.append((target, "object"))
+        if len(unique_targets) == 1:
+            return unique_targets[0]
+        return None
+
     def _action_intent_needed_observation_profile(
         self,
         *,
@@ -6835,6 +6869,60 @@ class GraphAgentPlanner:
             after_time=after_time,
         )
 
+    def _build_action_intent_needed_observation_target_revisit_decision(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        result: dict[str, Any] | None,
+        thought: str,
+    ) -> PlannerDecision | None:
+        hint = self._action_intent_needed_observation_target_hint(state=state, result=result)
+        if hint is None:
+            return None
+        downstream_target, target_kind = hint
+        nodes = self._latest_action_intent_long_horizon_nodes(state, object_hint=downstream_target)
+        if not nodes:
+            return PlannerDecision(
+                thought=f"{thought} 先定位 `needed_observation` 明确点名的判别目标 `{downstream_target}` 在更晚时刻的轨迹。",
+                tool="query_object",
+                args={"query": downstream_target, "limit": 24},
+            )
+        anchor_time = self._latest_action_intent_target_spatial_anchor_time(state)
+        latest_followup_end = self._latest_action_intent_followup_end_time(state)
+        after_time: float | None = None
+        if anchor_time is not None and latest_followup_end is not None:
+            after_time = max(anchor_time, latest_followup_end)
+        elif latest_followup_end is not None:
+            after_time = latest_followup_end
+        else:
+            after_time = anchor_time
+        min_start_time = None if after_time is None else float(after_time) + 0.15
+        selected = self._action_intent_select_long_horizon_node(
+            state=state,
+            hints=hints,
+            nodes=nodes,
+            min_start_time=min_start_time,
+            object_hint=downstream_target,
+        )
+        if selected is None:
+            return PlannerDecision(
+                thought=f"{thought} 继续重新检索 `needed_observation` 指向的判别目标 `{downstream_target}`。",
+                tool="query_object",
+                args={"query": downstream_target, "limit": 24},
+            )
+        _node, start_time, end_time = selected
+        query_time = start_time if abs(end_time - start_time) < 0.25 else (start_time + min(end_time, start_time + 1.2)) / 2
+        return PlannerDecision(
+            thought=thought,
+            tool="query_spatial_context",
+            args={
+                "time_s": query_time,
+                "object_name": downstream_target,
+                "limit": 16 if target_kind == "fixture" else 18,
+            },
+        )
+
     def _action_intent_recent_later_outcome_finalize_withheld_marker(self, state: AgentState) -> str:
         recent = list(getattr(state, "working_memory", []))[-16:]
         marker_prefixes = (
@@ -8833,6 +8921,14 @@ class GraphAgentPlanner:
                 if precondition is not None:
                     return precondition
             if self._action_intent_requires_followup(state, result=last_result):
+                needed_observation_target_revisit = self._build_action_intent_needed_observation_target_revisit_decision(
+                    state=state,
+                    hints=hints,
+                    result=last_result,
+                    thought="why 题当前已经知道真正需要确认的是某个判别目标/位置；优先去追 `needed_observation` 明确点名的目标，而不是继续做泛化 followup 或只沿动作物体后追。",
+                )
+                if needed_observation_target_revisit is not None:
+                    return needed_observation_target_revisit
                 weak_late_anchor_revisit = self._build_action_intent_weak_late_anchor_revisit_decision(
                     state=state,
                     hints=hints,
@@ -9273,6 +9369,14 @@ class GraphAgentPlanner:
                 },
             )
         if isinstance(last_result, dict) and last_tool.get("tool") == "resolve_action_intent_pairwise" and last_result.get("best_index") is not None:
+            needed_observation_target_revisit = self._build_action_intent_needed_observation_target_revisit_decision(
+                state=state,
+                hints=hints,
+                result=last_result,
+                thought="why 题 pairwise 已经明确真正缺的是某个判别目标/位置上的后续证据；优先去追 `needed_observation` 点名的目标，而不是继续只沿动作物体做泛化补帧。",
+            )
+            if needed_observation_target_revisit is not None:
+                return needed_observation_target_revisit
             if any(
                 isinstance(item, str)
                 and item.startswith("action_intent_resolution_withheld_for_missing_state_change_prereq=1")
@@ -9433,6 +9537,14 @@ class GraphAgentPlanner:
                 confidence=float(last_result.get("confidence") or 0.0),
             )
         if isinstance(last_result, dict) and last_tool.get("tool") == "resolve_action_intent_future_use" and last_result.get("best_index") is not None:
+            needed_observation_target_revisit = self._build_action_intent_needed_observation_target_revisit_decision(
+                state=state,
+                hints=hints,
+                result=last_result,
+                thought="why 题 future-use 裁决已经明确真正缺的是某个判别目标/位置上的后续证据；优先去追 `needed_observation` 点名的目标，而不是继续只沿动作物体做泛化补帧。",
+            )
+            if needed_observation_target_revisit is not None:
+                return needed_observation_target_revisit
             if any(
                 isinstance(item, str)
                 and item.startswith("action_intent_resolution_withheld_for_weak_surface_wiping_evidence=1")
