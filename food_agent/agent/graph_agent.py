@@ -1501,6 +1501,7 @@ class GraphAgent:
         action_object = self._action_intent_question_object(question)
         best_choice = str(best_row.get("choice") or "").lower()
         best_support = str(best_row.get("support") or "").lower()
+        best_contradiction = str(best_row.get("contradiction") or "").lower()
         if not self._action_intent_choice_is_downstream_followup_use(
             question=question_lc,
             choice=best_choice,
@@ -1530,7 +1531,22 @@ class GraphAgent:
             return None
         direct_candidates.sort(key=lambda item: (-item[0], item[1]))
         alt_score, alt_index, alt_choice = direct_candidates[0]
-        if unresolved_best_score > alt_score + 0.34 and unresolved_best_score >= 0.82:
+        explicit_downstream_consequence = any(
+            token in best_contradiction
+            for token in (
+                "downstream pickup after the transfer",
+                "rather than the direct purpose of the transfer itself",
+                "later downstream effect",
+                "this is a downstream pickup",
+                "不是当前转移动作的直接目的",
+                "只是转移动作之后的下游拿取",
+            )
+        )
+        if (
+            unresolved_best_score > alt_score + 0.34
+            and unresolved_best_score >= 0.82
+            and not explicit_downstream_consequence
+        ):
             return None
         confidence = min(max(0.48 + max(alt_score, 0.0) * 0.38, 0.48), 0.72)
         return alt_index, alt_choice, confidence
