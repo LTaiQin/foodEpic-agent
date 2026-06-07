@@ -12753,6 +12753,22 @@ class GraphAgentPlanner:
         }
         if not is_close_call and not requires_blocker_driven_recovery:
             return None
+        needed_observation_relation_revisit = self._build_action_intent_needed_observation_relation_revisit_decision(
+            state=state,
+            hints=hints,
+            result=payload,
+            thought="why 题被 verifier 拦下后，当前真正缺的已经收敛到某个关系型判别证据；优先直接追动作物体与目标之间是否真的形成了 `on/into/over/returned` 这类关系，而不是先退回泛化补帧。",
+        )
+        if needed_observation_relation_revisit is not None:
+            return needed_observation_relation_revisit
+        needed_observation_target_revisit = self._build_action_intent_needed_observation_target_revisit_decision(
+            state=state,
+            hints=hints,
+            result=payload,
+            thought="why 题被 verifier 拦下后，当前真正缺的已经收敛到某个判别目标/位置上的后续证据；优先直接追 `needed_observation` 点名的目标，而不是先退回泛化补帧。",
+        )
+        if needed_observation_target_revisit is not None:
+            return needed_observation_target_revisit
         if tool_name == "infer_action_intent":
             if (
                 blocker_hint == "precondition_context"
