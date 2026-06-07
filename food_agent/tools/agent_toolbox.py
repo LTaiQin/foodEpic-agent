@@ -1588,7 +1588,9 @@ class AgentToolbox:
                 "\n4. 如果候选描述的是 tap/sink/drain/workspace access，要检查是否有接近龙头、水槽、排水口、腾出操作空间、解除遮挡等直接 enablement 证据。"
                 "\n5. drainage 类答案只有在明确出现排水口被遮挡/被腾开，且和当前动作直接相关时才能高分；如果只是后来物体出现在排水口附近，不足以单独证明。"
                 "\n6. 不要因为某个候选更具体或更晚发生就天然高分；后续动作如果只是 downstream consequence，应降权。"
-                "\n7. 如果证据不足，允许低置信，但仍然要给出基于当前证据最合理的排序。"
+                "\n7. 如果动作是把一个物体换到一只手上、侧边或临时位置，从而腾出另一只手去开盖、开龙头、拿起下一件物品，这种 free-hand enablement 仍然可以是当前动作的直接目的，不应机械地当成纯下游后果。"
+                "\n8. 如果动作是 turn off/close tap 一类控制动作，要区分“容器已经装满”与“当前冷/热水阶段结束、准备切换到下一种水流或下一步烹饪目标”；generic 的 full 答案必须有匹配容器证据。"
+                "\n9. 如果证据不足，允许低置信，但仍然要给出基于当前证据最合理的排序。"
                 '\n输出 JSON，格式固定为 {"scores":[{"index":0,"score":0.0,"reason":""}],"best_index":0,"answer":"","confidence":0.0}。'
             )
         return (
@@ -2903,6 +2905,8 @@ class AgentToolbox:
             "\n5. 如果当前帧只能看出“挪开某物”，但还看不清后续到底是为了取后面的东西，还是为了单纯腾空间/整理，请明确标记需要后续证据。"
             "\n6. 如果动作是拿起/转移某物，但目的依赖后续用途，例如称重、倒空、盛装、检查或清洗，也请明确标记需要后续证据。"
             "\n7. 如果两个选项都合理，不要勉强硬选；请给出第二候选，并说明需要看动作后结果帧。"
+            "\n8. 如果动作是把物体换到一只手上、侧边或临时位置，从而腾出另一只手去开盖、开龙头、拿起别的物体，这种 free-hand enablement 也可能就是当前动作的直接目的。"
+            "\n9. 如果动作是 turn off/close tap，一定要区分“容器满了”和“当前水流阶段结束，准备换成热/冷水或进入下一烹饪子目标”；不要因为 full 类答案更短就默认它正确。"
             f"\n上下文线索: {scoped_notes}"
             '\n输出 JSON，字段固定为 {"best_index":0,"answer":"","confidence":0.0,"reason":"","second_best_index":0,"ambiguity":false,"need_future_evidence":false,"future_window_s":4.0,"followup_focus":""}。'
             f"\n问题: {question}\n选项:\n"

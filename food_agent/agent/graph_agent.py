@@ -881,6 +881,7 @@ class GraphAgent:
         support_lc = support.lower()
         contradiction_lc = contradiction.lower()
         choice_lc = choice.lower()
+        action_object = self._action_intent_question_object(question)
         global_context = " ".join(
             str(item)
             for item in list(getattr(state, "evidence_bundle", []))[-24:] + list(getattr(state, "working_memory", []))[-24:]
@@ -905,8 +906,23 @@ class GraphAgent:
             question=question_lc,
             choice=choice_lc,
             support=support_lc,
+            global_context=global_context,
+            action_object=action_object,
         ):
             adjusted -= 0.36
+        if self._action_intent_choice_is_direct_same_object_manipulation(
+            choice=choice_lc,
+            support=support_lc,
+            action_object=action_object,
+            global_context=global_context,
+        ):
+            adjusted += 0.32
+        if self._action_intent_choice_is_hand_free_enablement(
+            choice=choice_lc,
+            support=support_lc,
+            global_context=global_context,
+        ):
+            adjusted += 0.24
         if self._action_intent_choice_is_direct_enablement(
             choice=choice_lc,
             support=support_lc,
@@ -944,6 +960,19 @@ class GraphAgent:
             contradiction=contradiction_lc,
         ):
             adjusted -= 0.22
+        if self._action_intent_choice_is_tap_state_switch(
+            choice=choice_lc,
+            support=support_lc,
+            global_context=global_context,
+        ):
+            adjusted += 0.28
+        if self._action_intent_choice_is_generic_fill_limit_without_match(
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            global_context=global_context,
+        ):
+            adjusted -= 0.24
         if self._action_intent_text_has_direct_positive_evidence(support_lc):
             adjusted += 0.1
         if self._action_intent_text_has_direct_positive_evidence(contradiction_lc):
@@ -956,8 +985,18 @@ class GraphAgent:
         question: str,
         choice: str,
         support: str,
+        global_context: str,
+        action_object: str,
     ) -> bool:
         if not any(token in question for token in ("move ", "transfer ", "shift ", "remove ", "clear ")):
+            return False
+        if self._choice_is_same_object_active_use(choice, action_object):
+            return False
+        if self._action_intent_choice_is_hand_free_enablement(
+            choice=choice,
+            support=support,
+            global_context=global_context,
+        ):
             return False
         if any(token in choice for token in ("tap", "faucet", "drain", "drainage", "while holding", " in hand")):
             return False
@@ -1173,12 +1212,124 @@ class GraphAgent:
                 "wipe",
                 "dry",
                 "fill",
+                "open",
+                "uncap",
+                "cap",
+                "lid",
+                "unscrew",
+                "shake",
                 "hold",
                 "in hand",
                 "while holding",
                 "冲洗",
                 "清洗",
                 "擦",
+                "拿着",
+                "打开",
+                "拧开",
+                "摇",
+            )
+        )
+
+    def _action_intent_choice_is_direct_same_object_manipulation(
+        self,
+        *,
+        choice: str,
+        support: str,
+        action_object: str,
+        global_context: str,
+    ) -> bool:
+        if not self._choice_is_same_object_active_use(choice, action_object):
+            return False
+        if not any(token in choice for token in ("open", "uncap", "cap", "lid", "unscrew", "打开", "拧开")):
+            return False
+        signal_text = f"{support} {global_context}"
+        return any(
+            token in signal_text
+            for token in (
+                "cap",
+                "lid",
+                "open",
+                "uncap",
+                "unscrew",
+                "free hand",
+                "other hand",
+                "holding",
+                "while holding",
+                "holding in one hand",
+                "keeps holding",
+                "one hand",
+                "other hand",
+                "拿着",
+                "一只手",
+                "另一只手",
+                "盖",
+                "打开",
+            )
+        )
+
+    def _action_intent_choice_is_hand_free_enablement(
+        self,
+        *,
+        choice: str,
+        support: str,
+        global_context: str,
+    ) -> bool:
+        if not any(
+            token in choice
+            for token in (
+                "pick up",
+                "take",
+                "grab",
+                "turn on",
+                "turn off",
+                "adjust",
+                "open",
+                "uncap",
+                "shake",
+                "left hand",
+                "right hand",
+                "拿起",
+                "打开",
+                "调",
+                "左手",
+                "右手",
+            )
+        ):
+            return False
+        signal_text = f"{support} {global_context}"
+        has_hand_free_structure = any(
+            token in signal_text
+            for token in (
+                "free hand",
+                "other hand",
+                "one hand",
+                "while holding",
+                "holding in one hand",
+                "keeps holding",
+                "holds the",
+                "still holding",
+                "transfer to one hand",
+                "另一只手",
+                "一只手",
+                "拿在一只手上",
+                "腾出",
+            )
+        )
+        if not has_hand_free_structure:
+            return False
+        return any(
+            token in signal_text
+            for token in (
+                "left hand",
+                "right hand",
+                "other hand",
+                "free hand",
+                "左手",
+                "右手",
+                "另一只手",
+                "腾出",
+                "holding",
                 "拿着",
             )
         )
@@ -1308,6 +1459,69 @@ class GraphAgent:
             )
         )
         return support_signal and (soft_missing or "direct" in support or "直接" in support)
+
+    def _action_intent_choice_is_tap_state_switch(
+        self,
+        *,
+        choice: str,
+        support: str,
+        global_context: str,
+    ) -> bool:
+        if not any(token in choice for token in ("tap", "water", "hot", "cold", "boil", "saucepan", "pan", "水", "锅")):
+            return False
+        signal_text = f"{support} {global_context}"
+        has_tap_context = any(
+            token in signal_text
+            for token in (
+                "tap",
+                "water",
+                "hot",
+                "cold",
+                "saucepan",
+                "pan",
+                "boil",
+                "filling",
+                "fill",
+                "水龙头",
+                "热水",
+                "冷水",
+                "锅",
+                "烧开",
+                "接水",
+            )
+        )
+        return has_tap_context and any(token in choice for token in ("hot", "cold", "boil", "saucepan", "pan", "热水", "冷水", "锅"))
+
+    def _action_intent_choice_is_generic_fill_limit_without_match(
+        self,
+        *,
+        choice: str,
+        support: str,
+        contradiction: str,
+        global_context: str,
+    ) -> bool:
+        if "full" not in choice and "满" not in choice:
+            return False
+        matched_targets = [token for token in ("cup", "glass", "kettle", "bottle", "mug", "杯", "壶", "瓶") if token in choice]
+        if not matched_targets:
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        if any(token in signal_text for token in matched_targets):
+            return False
+        if any(token in signal_text for token in ("saucepan", "pan", "pot", "hot water", "cold water", "boil", "锅", "热水", "冷水", "烧开")):
+            return True
+        return any(
+            token in signal_text
+            for token in (
+                "no cup",
+                "no glass",
+                "no kettle",
+                "not visible",
+                "没有杯",
+                "没有壶",
+                "未看到",
+            )
+        )
 
     def _action_intent_text_has_negative_evidence(self, text: str) -> bool:
         return any(

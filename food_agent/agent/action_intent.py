@@ -126,7 +126,26 @@ CHOICE_CATEGORY_PATTERNS: dict[str, tuple[str, ...]] = {
         r"\bclose\b",
         r"\bturn\s+on\b",
         r"\bturn\s+off\b",
+        r"\bturn(?:ed)?\s+.*?\s+on\b",
+        r"\bturn(?:ed)?\s+.*?\s+off\b",
+        r"\bswitch\s+on\b",
+        r"\bswitch\s+off\b",
         r"\bswitch\b",
+        r"\buncap\b",
+        r"\bcap\b",
+        r"\blid\b",
+        r"\bunscrew\b",
+        r"\bopen\s+up\b",
+    ),
+    "hand_free_enablement": (
+        r"\bfree\s+hand\b",
+        r"\bother\s+hand\b",
+        r"\bleft\s+hand\b",
+        r"\bright\s+hand\b",
+        r"\bwith\s+left\s+hand\b",
+        r"\bwith\s+right\s+hand\b",
+        r"\bone\s+hand\b",
+        r"\btwo\s+hands?\b",
     ),
     "food_prep": (
         r"\bmix\b",
@@ -172,6 +191,7 @@ FUTURE_USE_CATEGORIES = frozenset(
         "discard",
         "final_place_return",
         "access_retrieve",
+        "hand_free_enablement",
     }
 )
 
