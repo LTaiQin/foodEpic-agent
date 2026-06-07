@@ -2408,6 +2408,77 @@ class GraphAgentPlanner:
             return unique_targets[0]
         return None
 
+    def _action_intent_needed_observation_relation_hint(
+        self,
+        *,
+        state: AgentState,
+        result: dict[str, Any] | None = None,
+    ) -> tuple[str, str, str] | None:
+        if self._action_intent_followup_attempt_count(state) < 2:
+            return None
+        target_hint = self._action_intent_needed_observation_target_hint(state=state, result=result)
+        if target_hint is None:
+            return None
+        text = self._action_intent_needed_observation_text(state=state, result=result)
+        if not text:
+            return None
+        relation_matches: list[str] = []
+        relation_specs = (
+            (
+                "on_target",
+                (
+                    "placed onto the scale",
+                    "placed on the scale",
+                    "put on the scale",
+                    "used on the scale",
+                    "onto the scale",
+                    "on the scale",
+                ),
+            ),
+            (
+                "return_to_target",
+                (
+                    "put back in the fridge",
+                    "back in the fridge",
+                    "returned to the fridge",
+                    "returned into the fridge",
+                    "returned to the shelf",
+                    "placed back on the shelf",
+                ),
+            ),
+            (
+                "into_target",
+                (
+                    "placed into the sink",
+                    "put into the sink",
+                    "into the sink",
+                    "in the sink",
+                    "sink wash area",
+                    "into the sink area",
+                ),
+            ),
+            (
+                "over_target",
+                (
+                    "carried over the plate",
+                    "moved over the plate",
+                    "over the plate",
+                    "carried over the bowl",
+                    "over the bowl",
+                    "over the sink",
+                    "toward the sink",
+                ),
+            ),
+        )
+        for relation_name, markers in relation_specs:
+            if any(marker in text for marker in markers):
+                relation_matches.append(relation_name)
+        unique_relations = list(dict.fromkeys(relation_matches))
+        if len(unique_relations) != 1:
+            return None
+        target_name, target_kind = target_hint
+        return target_name, target_kind, unique_relations[0]
+
     def _action_intent_needed_observation_profile(
         self,
         *,
@@ -6923,6 +6994,73 @@ class GraphAgentPlanner:
             },
         )
 
+    def _build_action_intent_needed_observation_relation_revisit_decision(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        result: dict[str, Any] | None,
+        thought: str,
+    ) -> PlannerDecision | None:
+        hint = self._action_intent_needed_observation_relation_hint(state=state, result=result)
+        if hint is None:
+            return None
+        target_name, _target_kind, relation_name = hint
+        action_object = self._action_intent_question_object_hint(state)
+        if not action_object:
+            return None
+        anchor_time = self._latest_action_intent_target_spatial_anchor_time(state)
+        latest_followup_end = self._latest_action_intent_followup_end_time(state)
+        after_time: float | None = None
+        if anchor_time is not None and latest_followup_end is not None:
+            after_time = max(anchor_time, latest_followup_end)
+        elif latest_followup_end is not None:
+            after_time = latest_followup_end
+        else:
+            after_time = anchor_time
+        min_start_time = None if after_time is None else float(after_time) + 0.15
+        nodes = self._latest_action_intent_long_horizon_nodes(state, object_hint=action_object)
+        selected = None
+        if nodes:
+            selected = self._action_intent_select_long_horizon_node(
+                state=state,
+                hints=hints,
+                nodes=nodes,
+                min_start_time=min_start_time,
+                object_hint=action_object,
+            )
+        if selected is None:
+            target_nodes = self._latest_action_intent_long_horizon_nodes(state, object_hint=target_name)
+            if target_nodes:
+                selected = self._action_intent_select_long_horizon_node(
+                    state=state,
+                    hints=hints,
+                    nodes=target_nodes,
+                    min_start_time=min_start_time,
+                    object_hint=target_name,
+                )
+        if selected is None:
+            query_name = target_name if target_name and target_name != action_object else action_object
+            return PlannerDecision(
+                thought=(
+                    f"{thought} 当前还没有足够晚的轨迹锚点，先重新定位 `{query_name}` 的更晚轨迹，"
+                    f"确认 `{action_object}` 与判别目标的关系是否真的变成了 `{relation_name}`。"
+                ),
+                tool="query_object",
+                args={"query": query_name, "limit": 24},
+            )
+        _node, start_time, end_time = selected
+        query_time = start_time if abs(end_time - start_time) < 0.25 else (start_time + min(end_time, start_time + 1.2)) / 2
+        return PlannerDecision(
+            thought=thought,
+            tool="query_spatial_context",
+            args={
+                "time_s": query_time,
+                "object_name": action_object,
+                "limit": 18,
+            },
+        )
+
     def _action_intent_recent_later_outcome_finalize_withheld_marker(self, state: AgentState) -> str:
         recent = list(getattr(state, "working_memory", []))[-16:]
         marker_prefixes = (
@@ -8921,6 +9059,14 @@ class GraphAgentPlanner:
                 if precondition is not None:
                     return precondition
             if self._action_intent_requires_followup(state, result=last_result):
+                needed_observation_relation_revisit = self._build_action_intent_needed_observation_relation_revisit_decision(
+                    state=state,
+                    hints=hints,
+                    result=last_result,
+                    thought="why 题当前已经知道要确认的不只是某个目标，而是动作物体与该目标之间的判别关系；优先去查这个关系是否真的变成 `on/into/over/returned`，而不是继续泛化补帧。",
+                )
+                if needed_observation_relation_revisit is not None:
+                    return needed_observation_relation_revisit
                 needed_observation_target_revisit = self._build_action_intent_needed_observation_target_revisit_decision(
                     state=state,
                     hints=hints,
@@ -9369,6 +9515,14 @@ class GraphAgentPlanner:
                 },
             )
         if isinstance(last_result, dict) and last_tool.get("tool") == "resolve_action_intent_pairwise" and last_result.get("best_index") is not None:
+            needed_observation_relation_revisit = self._build_action_intent_needed_observation_relation_revisit_decision(
+                state=state,
+                hints=hints,
+                result=last_result,
+                thought="why 题 pairwise 已经明确真正缺的是某个关系型判别证据；优先去查动作物体与目标之间是否真的出现了 `on/into/over/returned` 这类关系，而不是继续泛化补帧。",
+            )
+            if needed_observation_relation_revisit is not None:
+                return needed_observation_relation_revisit
             needed_observation_target_revisit = self._build_action_intent_needed_observation_target_revisit_decision(
                 state=state,
                 hints=hints,
@@ -9537,6 +9691,14 @@ class GraphAgentPlanner:
                 confidence=float(last_result.get("confidence") or 0.0),
             )
         if isinstance(last_result, dict) and last_tool.get("tool") == "resolve_action_intent_future_use" and last_result.get("best_index") is not None:
+            needed_observation_relation_revisit = self._build_action_intent_needed_observation_relation_revisit_decision(
+                state=state,
+                hints=hints,
+                result=last_result,
+                thought="why 题 future-use 裁决已经明确真正缺的是某个关系型判别证据；优先去查动作物体与目标之间是否真的出现了 `on/into/over/returned` 这类关系，而不是继续泛化补帧。",
+            )
+            if needed_observation_relation_revisit is not None:
+                return needed_observation_relation_revisit
             needed_observation_target_revisit = self._build_action_intent_needed_observation_target_revisit_decision(
                 state=state,
                 hints=hints,
