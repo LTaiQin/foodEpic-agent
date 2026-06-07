@@ -4675,6 +4675,13 @@ class GraphAgentPlanner:
             )
             if long_horizon_query is not None:
                 return long_horizon_query
+            long_horizon_revisit = self._build_action_intent_cached_long_horizon_revisit_decision(
+                state=state,
+                hints=hints,
+                thought="why 题之前已经检索过目标对象的后续轨迹；当前近窗证据仍不足，就继续沿更晚的目标对象出现点向后追，而不是直接收口或原地空转。",
+            )
+            if long_horizon_revisit is not None:
+                return long_horizon_revisit
         specialized_resolution = self._build_action_intent_specialized_resolution_before_text_fallback(
             state=state,
             hints=hints,
@@ -6120,9 +6127,39 @@ class GraphAgentPlanner:
             args={"query": query, "limit": 24},
         )
 
+    def _latest_action_intent_long_horizon_nodes(self, state: AgentState) -> list[dict[str, Any]]:
+        if not self._is_action_intent_task(state):
+            return []
+        target_query = self._action_intent_question_object_hint(state).strip().lower()
+        for entry in reversed(getattr(state, "tool_trace", [])):
+            if not isinstance(entry, dict) or entry.get("tool") != "query_object":
+                continue
+            args = entry.get("args") or {}
+            if not isinstance(args, dict):
+                continue
+            query = str(args.get("query") or "").strip().lower()
+            if target_query and query and target_query not in query and query not in target_query:
+                continue
+            payload = entry.get("raw_result")
+            if not isinstance(payload, dict):
+                continue
+            nodes = payload.get("nodes")
+            if isinstance(nodes, list):
+                return [node for node in nodes if isinstance(node, dict)]
+        return []
+
     def _action_intent_long_horizon_target_tokens(self, state: AgentState) -> list[str]:
         query = self._action_intent_question_object_hint(state)
         return [token for token in re.split(r"[\s_/:-]+", query.lower()) if token]
+
+    def _action_intent_long_horizon_prefers_latest_candidate(self, state: AgentState) -> bool:
+        if not self._is_action_intent_task(state):
+            return False
+        bias_profile = self._action_intent_timeline_review_bias_profile(state)
+        if bias_profile["final_location_unclear"]:
+            return True
+        needed_profile = self._action_intent_needed_observation_profile(state=state)
+        return bool(needed_profile["prefer_final_placement"]) and not bool(needed_profile["prefer_future_use_outcome"])
 
     def _action_intent_long_horizon_node_match_tier(
         self,
@@ -6173,6 +6210,7 @@ class GraphAgentPlanner:
             return None
         latest_followup_end = self._latest_action_intent_followup_end_time(state)
         lower_bound = max(action_end + 0.35, (latest_followup_end or action_end) + 0.35)
+        prefer_latest = self._action_intent_long_horizon_prefers_latest_candidate(state)
         candidates: list[tuple[tuple[int, int, float], dict[str, Any], float, float]] = []
         for node in nodes:
             if not isinstance(node, dict):
@@ -6203,7 +6241,8 @@ class GraphAgentPlanner:
                 priority = 1
             else:
                 priority = 2
-            candidates.append(((match_tier, priority, start_time), node, start_time, end_time))
+            time_key = -start_time if prefer_latest else start_time
+            candidates.append(((match_tier, priority, time_key), node, start_time, end_time))
         if not candidates:
             return None
         _, node, start_time, end_time = min(candidates, key=lambda item: item[0])
@@ -6272,6 +6311,33 @@ class GraphAgentPlanner:
                 "end_time": end_time,
                 "sample_count": 4,
                 "tag": f"{state.task_family}_followup_ext{attempt_count + 1}",
+            },
+        )
+
+    def _build_action_intent_cached_long_horizon_revisit_decision(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        thought: str,
+    ) -> PlannerDecision | None:
+        if not self._action_intent_prefers_long_horizon_object_retrieval(state=state):
+            return None
+        nodes = self._latest_action_intent_long_horizon_nodes(state)
+        if not nodes:
+            return None
+        selected = self._action_intent_select_long_horizon_node(state=state, hints=hints, nodes=nodes)
+        if selected is None:
+            return None
+        _node, start_time, end_time = selected
+        anchor_time = start_time if abs(end_time - start_time) < 0.25 else (start_time + min(end_time, start_time + 1.2)) / 2
+        return PlannerDecision(
+            thought=thought,
+            tool="query_spatial_context",
+            args={
+                "time_s": anchor_time,
+                "object_name": self._action_intent_question_object_hint(state),
+                "limit": 16,
             },
         )
 
@@ -7334,6 +7400,13 @@ class GraphAgentPlanner:
                 )
                 if transition_probe is not None:
                     return transition_probe
+                long_horizon_revisit = self._build_action_intent_cached_long_horizon_revisit_decision(
+                    state=state,
+                    hints=hints,
+                    thought="why 题当前这轮后续帧仍不足以区分更晚用途或最终放置；沿目标对象已知的后续轨迹继续往后追，再决定是否进入专用裁决。",
+                )
+                if long_horizon_revisit is not None:
+                    return long_horizon_revisit
                 if self._action_intent_needs_future_use_evidence(state=state, result=last_result):
                     future_use = self._build_action_intent_future_use_resolution_decision(
                         state=state,
@@ -7382,6 +7455,13 @@ class GraphAgentPlanner:
                 )
                 if transition_probe is not None:
                     return transition_probe
+                long_horizon_revisit = self._build_action_intent_cached_long_horizon_revisit_decision(
+                    state=state,
+                    hints=hints,
+                    thought="why 题 top-2 仍缺更晚的排他性结果；沿目标对象已知的后续轨迹继续向后找关键证据，再做二选一裁决。",
+                )
+                if long_horizon_revisit is not None:
+                    return long_horizon_revisit
                 pairwise = self._build_action_intent_pairwise_resolution_decision(
                     state=state,
                     hints=hints,
@@ -7411,6 +7491,13 @@ class GraphAgentPlanner:
                 )
                 if transition_probe is not None:
                     return transition_probe
+                long_horizon_revisit = self._build_action_intent_cached_long_horizon_revisit_decision(
+                    state=state,
+                    hints=hints,
+                    thought="why 题当前晚帧仍看不出目标对象的真实后续用途；继续沿目标对象更晚的再次出现位置向后追，再决定是否进入用途专用裁决。",
+                )
+                if long_horizon_revisit is not None:
+                    return long_horizon_revisit
                 future_use = self._build_action_intent_future_use_resolution_decision(
                     state=state,
                     hints=hints,
@@ -7492,6 +7579,13 @@ class GraphAgentPlanner:
                 if self._action_intent_is_timeline_review_payload(last_result):
                     latest_intent = self._latest_successful_action_intent_result(state)
                     if self._action_intent_timeline_review_needs_more_evidence(last_result):
+                        long_horizon_revisit = self._build_action_intent_cached_long_horizon_revisit_decision(
+                            state=state,
+                            hints=hints,
+                            thought="why 题在当前长时域关键帧上仍有多个 plausible 解释；继续沿目标对象更晚的再次出现位置向后追，确认它到底被放回、继续使用，还是只是暂时移开。",
+                        )
+                        if long_horizon_revisit is not None:
+                            return long_horizon_revisit
                         transition_probe = self._build_action_intent_transition_probe_decision(
                             state=state,
                             hints=hints,
