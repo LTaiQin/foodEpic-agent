@@ -3040,14 +3040,14 @@ class AgentToolbox:
             "need_more_evidence": bool(payload.get("need_more_evidence")),
             "needed_observation": str(payload.get("needed_observation") or ""),
         }
-        result = self._apply_action_intent_pairwise_sufficiency(
-            question=question,
-            result=result,
-        )
-        return self._apply_action_intent_pairwise_causal_hierarchy(
+        result = self._apply_action_intent_pairwise_causal_hierarchy(
             question=question,
             choices=choices,
             valid_indices=valid_indices[:2],
+            result=result,
+        )
+        return self._apply_action_intent_pairwise_sufficiency(
+            question=question,
             result=result,
         )
 
@@ -3772,6 +3772,41 @@ class AgentToolbox:
         question_lc = str(question or "").lower()
         if not any(token in question_lc for token in ("move ", "moved ", "shift ", "remove ", "clear ", "pick up ", "take ")):
             return result
+        explanation = " ".join(
+            str(result.get(key) or "")
+            for key in ("reason", "direct_effect", "downstream_action")
+        ).lower()
+        hidden_access_index = next(
+            (
+                index
+                for index in valid_indices
+                if self._choice_is_generic_hidden_access_purpose(str(choices[index]))
+            ),
+            None,
+        )
+        exact_reveal_index = next(
+            (
+                index
+                for index in valid_indices
+                if self._choice_is_exact_reveal_target_purpose(str(choices[index]))
+            ),
+            None,
+        )
+        if hidden_access_index is not None and exact_reveal_index is not None:
+            best_index = int(result.get("best_index", -1))
+            if best_index == hidden_access_index and self._explanation_uses_exact_reveal_then_take_or_place_chain(explanation):
+                adjusted = dict(result)
+                adjusted["best_index"] = exact_reveal_index
+                adjusted["answer"] = str(choices[exact_reveal_index])
+                adjusted["losing_index"] = hidden_access_index
+                adjusted["confidence"] = max(0.8, min(0.9, float(result.get("confidence") or 0.0) + 0.04))
+                adjusted["causal_hierarchy_adjusted"] = True
+                adjusted["reason"] = (
+                    f"{result.get('reason') or ''} causal_hierarchy_adjustment: "
+                    "the evidence shows a reveal-then-take/place chain with an exact target used immediately after the move, "
+                    "so the direct purpose is the specific revealed target use rather than generic access."
+                ).strip()
+                return adjusted
         direct_space_index = next(
             (
                 index
@@ -3792,10 +3827,6 @@ class AgentToolbox:
             return result
         if int(result.get("best_index", -1)) != downstream_place_index:
             return result
-        explanation = " ".join(
-            str(result.get(key) or "")
-            for key in ("reason", "direct_effect", "downstream_action")
-        ).lower()
         if not self._explanation_uses_downstream_space_chain(explanation):
             return result
         downstream_choice = str(choices[downstream_place_index])
@@ -3815,6 +3846,96 @@ class AgentToolbox:
             "for a move action, that supports the direct purpose of making space rather than selecting the downstream placement as the action purpose."
         ).strip()
         return adjusted
+
+    def _choice_is_generic_hidden_access_purpose(self, choice: str) -> bool:
+        text = str(choice or "").lower()
+        if any(
+            token in text
+            for token in (
+                "take the",
+                "retrieve the",
+                "pick up the",
+                "look for the",
+                "find the",
+                "put the",
+                "place the",
+                "right place",
+                "proper place",
+            )
+        ):
+            return False
+        return any(
+            token in text
+            for token in (
+                "access what's behind",
+                "access what is behind",
+                "access behind",
+                "access the slot behind",
+                "access the area behind",
+                "see what is behind",
+                "see what's behind",
+                "look what's behind",
+                "look behind",
+                "what is behind",
+                "what's behind",
+                "behind the",
+            )
+        )
+
+    def _choice_is_exact_reveal_target_purpose(self, choice: str) -> bool:
+        text = str(choice or "").lower()
+        if any(
+            token in text
+            for token in (
+                "take the",
+                "retrieve the",
+                "pick up the",
+                "look for the",
+                "find the",
+                "take the small",
+                "grab the",
+            )
+        ):
+            return True
+        if self._choice_is_exact_downstream_placement_purpose(text):
+            return True
+        return any(token in text for token in ("freed slot", "right place", "proper place", "put the", "place the"))
+
+    def _explanation_uses_exact_reveal_then_take_or_place_chain(self, explanation: str) -> bool:
+        text = str(explanation or "").lower()
+        has_reveal = any(
+            token in text
+            for token in (
+                "reveals",
+                "revealed",
+                "behind",
+                "hidden",
+                "moved aside",
+                "clear the way",
+                "freed slot",
+                "available spot",
+                "becomes reachable",
+            )
+        )
+        has_immediate_target_use = any(
+            token in text
+            for token in (
+                "immediately",
+                "right afterwards",
+                "right after",
+                "then picked up",
+                "then taken",
+                "is taken from behind",
+                "picked up from behind",
+                "reaches behind and takes",
+                "placed into the freed slot",
+                "put into the freed slot",
+                "inserted into the freed slot",
+                "revealed slot is immediately used",
+                "revealed area is immediately used",
+            )
+        )
+        return has_reveal and has_immediate_target_use
 
     def _choice_is_direct_space_purpose(self, choice: str) -> bool:
         text = str(choice or "").lower()
