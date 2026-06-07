@@ -5926,6 +5926,155 @@ class GraphAgentPlanner:
             )
         return None
 
+    def _action_intent_question_action_text(self, state: AgentState) -> str:
+        question = str(getattr(state, "question", "") or "")
+        match = re.search(r"<([^>]+)>", question)
+        if match:
+            return " ".join(str(match.group(1) or "").split())
+        lowered = question.lower()
+        marker = "performed the action"
+        if marker not in lowered:
+            return ""
+        tail = question[lowered.index(marker) + len(marker) :].strip()
+        if not tail:
+            return ""
+        tail = re.split(r"in video\s+\d+", tail, maxsplit=1, flags=re.IGNORECASE)[0]
+        return " ".join(tail.strip(" ?.:").split())
+
+    def _action_intent_question_object_hint(self, state: AgentState, provided_hint: Any = None) -> str:
+        if provided_hint:
+            return " ".join(str(provided_hint).strip().split())
+        action_text = self._action_intent_question_action_text(state)
+        if not action_text:
+            return ""
+        lowered = action_text.lower()
+        prefixes = (
+            "pick up ",
+            "put down ",
+            "turn off ",
+            "turn on ",
+            "switch off ",
+            "switch on ",
+            "move ",
+            "shift ",
+            "transfer ",
+            "place ",
+            "pick ",
+            "grab ",
+            "lift ",
+            "take ",
+            "open ",
+            "close ",
+            "clear ",
+            "check ",
+            "flip ",
+            "turn ",
+            "shake ",
+            "stir ",
+            "push ",
+            "slide ",
+            "tap ",
+            "hit ",
+            "set ",
+            "put ",
+            "run ",
+        )
+        for prefix in prefixes:
+            if lowered.startswith(prefix):
+                object_text = action_text[len(prefix) :].strip()
+                return " ".join(object_text.split())
+        return action_text
+
+    def _action_intent_localization_window_from_nodes(
+        self,
+        *,
+        state: AgentState,
+        nodes: list[dict[str, Any]],
+    ) -> tuple[float, float] | None:
+        if not self._is_action_intent_task(state):
+            return None
+        timed: list[tuple[tuple[int, float, float], float, float]] = []
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            start_raw = node.get("start_time")
+            end_raw = node.get("end_time")
+            if start_raw is None:
+                continue
+            try:
+                start_time = float(start_raw)
+            except Exception:  # noqa: BLE001
+                continue
+            try:
+                end_time = float(end_raw) if end_raw is not None else start_time
+            except Exception:  # noqa: BLE001
+                end_time = start_time
+            if end_time < start_time:
+                end_time = start_time
+            node_type = str(node.get("node_type") or "").lower()
+            if node_type in {"frame", "observation", "timeline_event"}:
+                priority = 0
+            elif node_type == "object_track":
+                priority = 1
+            elif node_type in {"segment", "activity"}:
+                priority = 2
+            else:
+                priority = 3
+            duration = max(0.0, end_time - start_time)
+            timed.append(((priority, duration if priority == 0 else min(duration, 8.0), start_time), start_time, end_time))
+        if not timed:
+            return None
+        _, start_time, end_time = min(timed, key=lambda item: item[0])
+        duration = max(0.0, end_time - start_time)
+        if duration <= 0.2:
+            return (max(0.0, start_time - 1.0), start_time + 1.8)
+        if duration <= 4.0:
+            return (max(0.0, start_time - 0.6), end_time + 0.9)
+        focus_end = min(end_time, start_time + 4.5)
+        return (max(0.0, start_time - 0.5), focus_end)
+
+    def _action_intent_step_decision(
+        self,
+        *,
+        state: AgentState,
+        used_tools: list[str],
+        combined_times: list[float],
+        object_hint: Any,
+        last_result: dict[str, Any],
+    ) -> PlannerDecision | None:
+        if not self._is_action_intent_task(state) or combined_times:
+            return None
+        localization_keyword = self._action_intent_question_object_hint(state, object_hint)
+        if state.current_step <= 1 and localization_keyword and "query_event" not in used_tools:
+            return PlannerDecision(
+                thought="why 题当前没有显式时间点；先按题目里的动作对象做结构化定位，缩小候选时间段，再抽关键帧判断动作目的。",
+                tool="query_event",
+                args={
+                    "event_types": ["frame", "observation", "timeline_event", "object_track", "segment", "activity"],
+                    "keyword": localization_keyword,
+                    "start_time": None,
+                    "end_time": None,
+                    "limit": 12,
+                },
+            )
+        if state.current_step == 2:
+            nodes = last_result.get("nodes", []) if isinstance(last_result, dict) else []
+            window = self._action_intent_localization_window_from_nodes(state=state, nodes=nodes if isinstance(nodes, list) else [])
+            if window is not None:
+                start_time, end_time = window
+                return PlannerDecision(
+                    thought="why 题已经定位到动作对象附近的候选时刻；先围绕最像动作发生点的短窗口抽关键帧，再进入动作目的判断。",
+                    tool="extract_frames_for_range",
+                    args={
+                        "start_time": start_time,
+                        "end_time": end_time,
+                        "stride_s": max(0.35, (end_time - start_time) / 4),
+                        "max_frames": 4,
+                        "tag": f"{state.task_family}_segment",
+                    },
+                )
+        return None
+
     def _recipe_following_activity_step_decision(
         self,
         *,
@@ -7571,6 +7720,10 @@ class GraphAgentPlanner:
                 prediction=best_index,
                 confidence=float(last_result.get("confidence") or 0.0),
             )
+        precombined_times = sorted(
+            [float(value) for value in hints.get("times") or []]
+            + [float(value) for value in hints.get("input_times") or []]
+        )
         initial_action_intent_route = self._build_initial_action_intent_specialized_decision(
             state=state,
             hints=hints,
@@ -7578,6 +7731,15 @@ class GraphAgentPlanner:
         )
         if initial_action_intent_route is not None:
             return initial_action_intent_route
+        action_intent_step = self._action_intent_step_decision(
+            state=state,
+            used_tools=used_tools,
+            combined_times=precombined_times,
+            object_hint=hints.get("object_hint"),
+            last_result=last_result if isinstance(last_result, dict) else {},
+        )
+        if action_intent_step is not None:
+            return action_intent_step
         candidate = self._select_state_driven_candidate(state=state, hints=hints, used_tools=used_tools)
         if candidate is not None:
             return candidate
