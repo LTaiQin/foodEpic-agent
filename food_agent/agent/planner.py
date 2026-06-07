@@ -1033,6 +1033,80 @@ class GraphAgentPlanner:
                 notes.append(item)
         return notes[:limit]
 
+    def _action_intent_scoped_textual_fallback_evidence(
+        self,
+        state: AgentState,
+        *,
+        limit: int,
+    ) -> list[str]:
+        anchor_times = self._action_intent_anchor_times(state)
+        scoped: list[str] = []
+        for item in list(getattr(state, "evidence_bundle", []) or []):
+            if not isinstance(item, str):
+                continue
+            note = str(item).strip()
+            if not note or self._is_action_intent_leaky_context_note(note):
+                continue
+            if note.startswith(("planner_thought=", "tool_failure tool=", "verifier=")):
+                continue
+            if anchor_times and "type=" in note:
+                spans = self._extract_embedded_note_times(note)
+                if spans:
+                    window_start = min(anchor_times) - 6.0
+                    window_end = max(anchor_times) + 6.0
+                    if not any(not (end_time < window_start or start_time > window_end) for start_time, end_time in spans):
+                        continue
+            if note not in scoped:
+                scoped.append(note)
+        if not scoped:
+            return self._action_intent_context_notes(state, limit=limit)
+        return scoped[:limit]
+
+    def _action_intent_anchor_times(self, state: AgentState) -> list[float]:
+        times: list[float] = []
+        payload = {}
+        inputs_payload = getattr(state, "inputs_payload", None)
+        if callable(inputs_payload):
+            raw_payload = inputs_payload()
+            payload = raw_payload if isinstance(raw_payload, dict) else {}
+        for key in ("times", "input_times"):
+            values = payload.get(key)
+            if not isinstance(values, list):
+                continue
+            for value in values:
+                try:
+                    times.append(float(value))
+                except Exception:  # noqa: BLE001
+                    continue
+        for path in self._filter_visual_image_paths(list(getattr(state, "retrieved_frames", []) or [])):
+            inferred = self._infer_artifact_time(path)
+            if inferred is not None:
+                times.append(float(inferred))
+        deduped: list[float] = []
+        for value in sorted(times):
+            rounded = round(value, 3)
+            if rounded not in deduped:
+                deduped.append(rounded)
+        return deduped
+
+    def _extract_embedded_note_times(self, text: str) -> list[tuple[float, float]]:
+        spans: list[tuple[float, float]] = []
+        for match in re.finditer(r"time=([0-9.]+)-([0-9.]+)", str(text)):
+            try:
+                spans.append((float(match.group(1)), float(match.group(2))))
+            except Exception:  # noqa: BLE001
+                continue
+        return spans
+
+    def _infer_artifact_time(self, path: str) -> float | None:
+        match = re.search(r"_([0-9]+\.[0-9]+)s\.(?:jpg|jpeg|png|webp)$", str(path), flags=re.IGNORECASE)
+        if not match:
+            return None
+        try:
+            return float(match.group(1))
+        except Exception:  # noqa: BLE001
+            return None
+
     def _build_action_intent_missing_post_action_followup_decision(
         self,
         *,
@@ -1159,12 +1233,14 @@ class GraphAgentPlanner:
         )
 
     def _build_action_intent_text_fallback_rank_decision(self, state: AgentState, *, thought: str) -> PlannerDecision:
-        evidence = self._action_intent_context_notes(state, limit=12) + list(getattr(state, "evidence_bundle", []) or [])[-12:]
+        evidence = self._action_intent_scoped_textual_fallback_evidence(state, limit=16)
         deduped_evidence = list(dict.fromkeys(str(item) for item in evidence if isinstance(item, str) and str(item).strip()))
         working_memory = [
             str(item)
             for item in list(getattr(state, "working_memory", []) or [])[-20:]
-            if isinstance(item, str) and str(item).strip()
+            if isinstance(item, str)
+            and str(item).strip()
+            and not str(item).startswith(("planner_thought=", "tool_failure tool=", "verifier="))
         ]
         return PlannerDecision(
             thought=thought,
