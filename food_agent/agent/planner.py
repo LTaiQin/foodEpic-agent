@@ -6127,10 +6127,15 @@ class GraphAgentPlanner:
             args={"query": query, "limit": 24},
         )
 
-    def _latest_action_intent_long_horizon_nodes(self, state: AgentState) -> list[dict[str, Any]]:
+    def _latest_action_intent_long_horizon_nodes(
+        self,
+        state: AgentState,
+        *,
+        object_hint: Any = None,
+    ) -> list[dict[str, Any]]:
         if not self._is_action_intent_task(state):
             return []
-        target_query = self._action_intent_question_object_hint(state).strip().lower()
+        target_query = self._action_intent_question_object_hint(state, object_hint).strip().lower()
         for entry in reversed(getattr(state, "tool_trace", [])):
             if not isinstance(entry, dict) or entry.get("tool") != "query_object":
                 continue
@@ -6148,8 +6153,8 @@ class GraphAgentPlanner:
                 return [node for node in nodes if isinstance(node, dict)]
         return []
 
-    def _action_intent_long_horizon_target_tokens(self, state: AgentState) -> list[str]:
-        query = self._action_intent_question_object_hint(state)
+    def _action_intent_long_horizon_target_tokens(self, state: AgentState, *, object_hint: Any = None) -> list[str]:
+        query = self._action_intent_question_object_hint(state, object_hint)
         return [token for token in re.split(r"[\s_/:-]+", query.lower()) if token]
 
     def _action_intent_long_horizon_prefers_latest_candidate(self, state: AgentState) -> bool:
@@ -6166,8 +6171,9 @@ class GraphAgentPlanner:
         *,
         state: AgentState,
         node: dict[str, Any],
+        object_hint: Any = None,
     ) -> int | None:
-        tokens = self._action_intent_long_horizon_target_tokens(state)
+        tokens = self._action_intent_long_horizon_target_tokens(state, object_hint=object_hint)
         if not tokens:
             return 2
         attrs = node.get("attributes") or {}
@@ -6200,6 +6206,7 @@ class GraphAgentPlanner:
         hints: dict[str, Any],
         nodes: list[dict[str, Any]],
         min_start_time: float | None = None,
+        object_hint: Any = None,
     ) -> tuple[dict[str, Any], float, float] | None:
         if not self._is_action_intent_task(state):
             return None
@@ -6236,7 +6243,7 @@ class GraphAgentPlanner:
                 continue
             if end_time <= lower_bound:
                 continue
-            match_tier = self._action_intent_long_horizon_node_match_tier(state=state, node=node)
+            match_tier = self._action_intent_long_horizon_node_match_tier(state=state, node=node, object_hint=object_hint)
             if match_tier is None:
                 continue
             node_type = str(node.get("node_type") or "").lower()
@@ -6865,6 +6872,81 @@ class GraphAgentPlanner:
         )
         return any(gap in reason for gap in later_outcome_gaps)
 
+    def _action_intent_choice_target_object_candidates(self, *, choice: str, action_object: str) -> list[str]:
+        choice_lc = str(choice or "").lower()
+        action_object_tokens = {token for token in re.split(r"[^a-z0-9]+", str(action_object or "").lower()) if token}
+        target_tokens = [
+            token
+            for token in (
+                "whisk",
+                "knife",
+                "fork",
+                "spoon",
+                "spatula",
+                "bottle",
+                "sponge",
+                "brush",
+                "cloth",
+                "towel",
+                "lid",
+                "cover",
+                "bowl",
+                "plate",
+                "tray",
+                "pot",
+                "pan",
+                "saucepan",
+                "cup",
+                "glass",
+                "jar",
+                "colander",
+                "scale",
+                "tap",
+                "faucet",
+                "sink",
+                "hob",
+                "microwave",
+                "oven",
+                "fridge",
+                "door",
+                "drawer",
+                "cupboard",
+                "rack",
+                "dishwasher",
+            )
+            if token in choice_lc and token not in action_object_tokens
+        ]
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for token in target_tokens:
+            if token in seen:
+                continue
+            seen.add(token)
+            ordered.append(token)
+        return ordered
+
+    def _action_intent_unresolved_rerank_downstream_object_hint(self, state: AgentState) -> str:
+        reason = self._action_intent_recent_unresolved_rerank_withheld_reason(state)
+        if not reason or not any(
+            gap in reason for gap in ("timeline_review_revealed_slot_gap", "timeline_review_revealed_target_gap")
+        ):
+            return ""
+        latest = self._latest_action_intent_resolution_payload(state)
+        if latest is None:
+            return ""
+        _tool_name, payload = latest
+        best_index = self._coerce_choice_index(payload.get("best_index"), getattr(state, "choices", []))
+        if best_index is None:
+            return ""
+        choice = str(getattr(state, "choices", [])[best_index])
+        action_object = self._action_intent_question_object_hint(state)
+        fixture_only = {"slot", "rack", "sink", "tap", "faucet", "fridge", "door", "drawer", "cupboard", "dishwasher"}
+        for token in self._action_intent_choice_target_object_candidates(choice=choice, action_object=action_object):
+            if token in fixture_only:
+                continue
+            return token
+        return ""
+
     def _build_action_intent_finalize_withheld_long_horizon_revisit_decision(
         self,
         *,
@@ -6946,6 +7028,58 @@ class GraphAgentPlanner:
             args={
                 "time_s": query_time,
                 "object_name": self._action_intent_question_object_hint(state),
+                "limit": 16,
+            },
+        )
+
+    def _build_action_intent_unresolved_rerank_downstream_target_revisit_decision(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        thought: str,
+    ) -> PlannerDecision | None:
+        downstream_target = self._action_intent_unresolved_rerank_downstream_object_hint(state)
+        if not downstream_target:
+            return None
+        nodes = self._latest_action_intent_long_horizon_nodes(state, object_hint=downstream_target)
+        if not nodes:
+            return PlannerDecision(
+                thought=f"{thought} 先定位下游目标对象 `{downstream_target}` 在更晚时刻的轨迹。",
+                tool="query_object",
+                args={"query": downstream_target, "limit": 24},
+            )
+        anchor_time = self._latest_action_intent_target_spatial_anchor_time(state)
+        latest_followup_end = self._latest_action_intent_followup_end_time(state)
+        after_time: float | None = None
+        if anchor_time is not None and latest_followup_end is not None:
+            after_time = max(anchor_time, latest_followup_end)
+        elif latest_followup_end is not None:
+            after_time = latest_followup_end
+        else:
+            after_time = anchor_time
+        min_start_time = None if after_time is None else float(after_time) + 0.15
+        selected = self._action_intent_select_long_horizon_node(
+            state=state,
+            hints=hints,
+            nodes=nodes,
+            min_start_time=min_start_time,
+            object_hint=downstream_target,
+        )
+        if selected is None:
+            return PlannerDecision(
+                thought=f"{thought} 继续重新检索下游目标对象 `{downstream_target}` 的更晚轨迹。",
+                tool="query_object",
+                args={"query": downstream_target, "limit": 24},
+            )
+        _node, start_time, end_time = selected
+        query_time = start_time if abs(end_time - start_time) < 0.25 else (start_time + min(end_time, start_time + 1.2)) / 2
+        return PlannerDecision(
+            thought=thought,
+            tool="query_spatial_context",
+            args={
+                "time_s": query_time,
+                "object_name": downstream_target,
                 "limit": 16,
             },
         )
@@ -8491,6 +8625,13 @@ class GraphAgentPlanner:
                 )
                 if precondition is not None:
                     return precondition
+            unresolved_rerank_downstream_target_revisit = self._build_action_intent_unresolved_rerank_downstream_target_revisit_decision(
+                state=state,
+                hints=hints,
+                thought="why 题 unresolved rerank 已指出 freed-slot / revealed-target 仍缺证据；优先转去追踪下游目标物体，而不是继续盯着被移动的物体本身。",
+            )
+            if unresolved_rerank_downstream_target_revisit is not None:
+                return unresolved_rerank_downstream_target_revisit
             unresolved_rerank_long_horizon_revisit = self._build_action_intent_unresolved_rerank_long_horizon_revisit_decision(
                 state=state,
                 hints=hints,
@@ -8589,6 +8730,13 @@ class GraphAgentPlanner:
                 )
                 if precondition is not None:
                     return precondition
+            unresolved_rerank_downstream_target_revisit = self._build_action_intent_unresolved_rerank_downstream_target_revisit_decision(
+                state=state,
+                hints=hints,
+                thought="why 题 unresolved rerank 已指出 revealed-target / freed-slot 的真正下游目标还没被确认；优先转去追踪那个目标物体，而不是继续只看动作物体。",
+            )
+            if unresolved_rerank_downstream_target_revisit is not None:
+                return unresolved_rerank_downstream_target_revisit
             unresolved_rerank_long_horizon_revisit = self._build_action_intent_unresolved_rerank_long_horizon_revisit_decision(
                 state=state,
                 hints=hints,
