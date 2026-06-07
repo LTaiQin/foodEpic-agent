@@ -94,6 +94,12 @@ CHOICE_CATEGORY_PATTERNS: dict[str, tuple[str, ...]] = {
         r"\bfill\b",
         r"\btransfer\b",
         r"\binto\b",
+        r"\bdrop\b",
+        r"\bfall\s+off\b",
+        r"\bfall\s+back\b",
+        r"\bexcess\b",
+        r"\bshake\s+off\b",
+        r"\brelease\b",
     ),
     "serve_consume": (
         r"\bserve\b",

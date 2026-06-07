@@ -917,6 +917,15 @@ class GraphAgent:
             global_context=global_context,
         ):
             adjusted += 0.32
+        if self._action_intent_choice_is_direct_residue_release(
+            question=question_lc,
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            action_object=action_object,
+            global_context=global_context,
+        ):
+            adjusted += 0.3
         if self._action_intent_choice_is_hand_free_enablement(
             choice=choice_lc,
             support=support_lc,
@@ -1331,6 +1340,107 @@ class GraphAgent:
                 "腾出",
                 "holding",
                 "拿着",
+            )
+        )
+
+    def _action_intent_choice_is_direct_residue_release(
+        self,
+        *,
+        question: str,
+        choice: str,
+        support: str,
+        contradiction: str,
+        action_object: str,
+        global_context: str,
+    ) -> bool:
+        if not any(
+            token in question
+            for token in ("tap ", "shake ", "tilt ", "tip ", "pour ", "turn ", "flip ", "hit ", "knock ")
+        ):
+            return False
+        if not any(
+            token in choice
+            for token in (
+                "excess",
+                "drop",
+                "fall",
+                "release",
+                "remaining",
+                "oil",
+                "water",
+                "sauce",
+                "milk",
+                "liquid",
+                "get rid",
+                "drain",
+                "倒",
+                "多余",
+                "剩余",
+                "掉",
+                "落回",
+                "沥",
+            )
+        ):
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        if not any(
+            token in signal_text
+            for token in (
+                "into the pan",
+                "into the bowl",
+                "into the pot",
+                "into the cup",
+                "into the jar",
+                "into the sink",
+                "fall back",
+                "falls off",
+                "shake off",
+                "excess",
+                "remaining bits",
+                "drops off",
+                "back into",
+                "掉回",
+                "落回",
+                "锅里",
+                "碗里",
+                "杯里",
+                "罐里",
+                "水槽",
+                "多余",
+                "剩余",
+            )
+        ):
+            return False
+        if any(
+            token in signal_text
+            for token in (
+                "pick up later",
+                "later retrieves",
+                "after that picks up",
+                "之后拿起别的",
+                "后续去拿",
+            )
+        ):
+            return False
+        if action_object and any(token in action_object for token in ("spoon", "spatula", "cup", "glass", "bowl", "pan", "pot", "jar")):
+            return True
+        return any(
+            token in signal_text
+            for token in (
+                "spoon",
+                "spatula",
+                "cup",
+                "glass",
+                "bowl",
+                "pan",
+                "pot",
+                "jar",
+                "勺",
+                "铲",
+                "杯",
+                "碗",
+                "锅",
+                "罐",
             )
         )
 

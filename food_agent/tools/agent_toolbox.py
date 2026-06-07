@@ -1590,7 +1590,8 @@ class AgentToolbox:
                 "\n6. 不要因为某个候选更具体或更晚发生就天然高分；后续动作如果只是 downstream consequence，应降权。"
                 "\n7. 如果动作是把一个物体换到一只手上、侧边或临时位置，从而腾出另一只手去开盖、开龙头、拿起下一件物品，这种 free-hand enablement 仍然可以是当前动作的直接目的，不应机械地当成纯下游后果。"
                 "\n8. 如果动作是 turn off/close tap 一类控制动作，要区分“容器已经装满”与“当前冷/热水阶段结束、准备切换到下一种水流或下一步烹饪目标”；generic 的 full 答案必须有匹配容器证据。"
-                "\n9. 如果证据不足，允许低置信，但仍然要给出基于当前证据最合理的排序。"
+                "\n9. 如果动作是 tap/shake/tilt/tip/pour/hit/knock 某个勺子、杯子、锅或容器，并且候选描述的是让残余食材/液体掉回锅碗罐或水槽，这种 same-object residue release 往往就是当前动作本身的直接目的。"
+                "\n10. 如果证据不足，允许低置信，但仍然要给出基于当前证据最合理的排序。"
                 '\n输出 JSON，格式固定为 {"scores":[{"index":0,"score":0.0,"reason":""}],"best_index":0,"answer":"","confidence":0.0}。'
             )
         return (
@@ -2907,6 +2908,7 @@ class AgentToolbox:
             "\n7. 如果两个选项都合理，不要勉强硬选；请给出第二候选，并说明需要看动作后结果帧。"
             "\n8. 如果动作是把物体换到一只手上、侧边或临时位置，从而腾出另一只手去开盖、开龙头、拿起别的物体，这种 free-hand enablement 也可能就是当前动作的直接目的。"
             "\n9. 如果动作是 turn off/close tap，一定要区分“容器满了”和“当前水流阶段结束，准备换成热/冷水或进入下一烹饪子目标”；不要因为 full 类答案更短就默认它正确。"
+            "\n10. 如果动作是 tap/shake/tilt/tip/pour/hit/knock 某个勺子、锅、杯子或容器，要注意当前动作本身可能就是为了把残余内容物甩回、倒回或沥回原来的锅碗罐/水槽，这属于直接目的。"
             f"\n上下文线索: {scoped_notes}"
             '\n输出 JSON，字段固定为 {"best_index":0,"answer":"","confidence":0.0,"reason":"","second_best_index":0,"ambiguity":false,"need_future_evidence":false,"future_window_s":4.0,"followup_focus":""}。'
             f"\n问题: {question}\n选项:\n"
