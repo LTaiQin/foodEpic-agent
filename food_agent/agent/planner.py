@@ -7083,6 +7083,89 @@ class GraphAgentPlanner:
             return token
         return ""
 
+    def _action_intent_unresolved_rerank_mixed_horizon_later_target_hint(
+        self,
+        state: AgentState,
+    ) -> tuple[str, str] | None:
+        reason = self._action_intent_recent_unresolved_rerank_withheld_reason(state)
+        if not reason or not any(
+            gap in reason
+            for gap in (
+                "missing_later_outcome_evidence",
+                "timeline_review_next_use_gap",
+                "timeline_review_final_location_gap",
+            )
+        ):
+            return None
+        latest = self._latest_action_intent_resolution_payload(state)
+        if latest is None:
+            return None
+        _tool_name, payload = latest
+        choices = [str(choice) for choice in getattr(state, "choices", [])]
+        best_index = self._coerce_choice_index(payload.get("best_index"), choices)
+        competitor_index = self._action_intent_competing_candidate_index(payload, state)
+        if best_index is None or competitor_index is None or best_index == competitor_index:
+            return None
+        categories_by_index = selected_choice_categories(choices, [best_index, competitor_index])
+        best_categories = set(categories_by_index.get(best_index) or set())
+        competitor_categories = set(categories_by_index.get(competitor_index) or set())
+        later_outcome_categories = {
+            "final_place_return",
+            "measure_weigh",
+            "transfer_contents",
+            "serve_consume",
+            "clean_dry",
+            "food_prep",
+            "discard",
+        }
+        best_choice = choices[best_index]
+        competitor_choice = choices[competitor_index]
+        best_is_immediate = self._action_intent_choice_is_immediate_micro_outcome_candidate(best_choice, best_categories)
+        competitor_is_immediate = self._action_intent_choice_is_immediate_micro_outcome_candidate(
+            competitor_choice,
+            competitor_categories,
+        )
+        later_index: int | None = None
+        later_categories: set[str] = set()
+        later_choice = ""
+        if best_is_immediate and competitor_categories & later_outcome_categories:
+            later_index = competitor_index
+            later_categories = competitor_categories
+            later_choice = competitor_choice
+        elif competitor_is_immediate and best_categories & later_outcome_categories:
+            later_index = best_index
+            later_categories = best_categories
+            later_choice = best_choice
+        if later_index is None:
+            return None
+        action_object = self._action_intent_question_object_hint(state)
+        fixture_targets = self._action_intent_choice_fixture_target_candidates(choice=later_choice, action_object=action_object)
+        if fixture_targets:
+            return fixture_targets[0], "fixture"
+        object_targets = [
+            token
+            for token in self._action_intent_choice_target_object_candidates(choice=later_choice, action_object=action_object)
+            if token not in set(fixture_targets)
+        ]
+        if object_targets:
+            return object_targets[0], "object"
+        if "measure_weigh" in later_categories:
+            return "scale", "fixture"
+        combined_text = later_choice.lower()
+        for item in payload.get("candidate_evidence") or []:
+            if not isinstance(item, dict):
+                continue
+            index = self._coerce_choice_index(item.get("index"), choices)
+            if index != later_index:
+                continue
+            combined_text = f"{combined_text} {str(item.get('support') or '').lower()} {str(item.get('contradiction') or '').lower()}"
+            break
+        if "final_place_return" in later_categories:
+            for token in ("fridge", "drawer", "cupboard", "rack", "dishwasher", "shelf"):
+                if token in combined_text:
+                    return token, ("object" if token == "shelf" else "fixture")
+        return None
+
     def _action_intent_unresolved_rerank_hand_free_object_hint(self, state: AgentState) -> str:
         reason = self._action_intent_recent_unresolved_rerank_withheld_reason(state)
         if not reason or "timeline_review_hand_free_or_fixture_gap" not in reason:
@@ -7425,6 +7508,59 @@ class GraphAgentPlanner:
                 "time_s": query_time,
                 "object_name": self._action_intent_question_object_hint(state),
                 "limit": 16,
+            },
+        )
+
+    def _build_action_intent_unresolved_rerank_mixed_horizon_later_target_revisit_decision(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        thought: str,
+    ) -> PlannerDecision | None:
+        hint = self._action_intent_unresolved_rerank_mixed_horizon_later_target_hint(state)
+        if hint is None:
+            return None
+        downstream_target, target_kind = hint
+        nodes = self._latest_action_intent_long_horizon_nodes(state, object_hint=downstream_target)
+        if not nodes:
+            return PlannerDecision(
+                thought=f"{thought} 先定位 mixed-horizon 竞争里更晚结果对应的真实目标 `{downstream_target}` 轨迹。",
+                tool="query_object",
+                args={"query": downstream_target, "limit": 24},
+            )
+        anchor_time = self._latest_action_intent_target_spatial_anchor_time(state)
+        latest_followup_end = self._latest_action_intent_followup_end_time(state)
+        after_time: float | None = None
+        if anchor_time is not None and latest_followup_end is not None:
+            after_time = max(anchor_time, latest_followup_end)
+        elif latest_followup_end is not None:
+            after_time = latest_followup_end
+        else:
+            after_time = anchor_time
+        min_start_time = None if after_time is None else float(after_time) + 0.15
+        selected = self._action_intent_select_long_horizon_node(
+            state=state,
+            hints=hints,
+            nodes=nodes,
+            min_start_time=min_start_time,
+            object_hint=downstream_target,
+        )
+        if selected is None:
+            return PlannerDecision(
+                thought=f"{thought} 继续重新检索 mixed-horizon 竞争里更晚结果对应的真实目标 `{downstream_target}`。",
+                tool="query_object",
+                args={"query": downstream_target, "limit": 24},
+            )
+        _node, start_time, end_time = selected
+        query_time = start_time if abs(end_time - start_time) < 0.25 else (start_time + min(end_time, start_time + 1.2)) / 2
+        return PlannerDecision(
+            thought=thought,
+            tool="query_spatial_context",
+            args={
+                "time_s": query_time,
+                "object_name": downstream_target,
+                "limit": 16 if target_kind == "fixture" else 18,
             },
         )
 
@@ -9178,6 +9314,15 @@ class GraphAgentPlanner:
             )
             if unresolved_rerank_downstream_target_revisit is not None:
                 return unresolved_rerank_downstream_target_revisit
+            unresolved_rerank_mixed_horizon_later_target_revisit = (
+                self._build_action_intent_unresolved_rerank_mixed_horizon_later_target_revisit_decision(
+                    state=state,
+                    hints=hints,
+                    thought="why 题 unresolved rerank 已明确 mixed-horizon 的更晚结果还没看到；优先转去追 later outcome 对应的真实目标，而不是继续只沿动作物体做泛化 long-horizon 后追。",
+                )
+            )
+            if unresolved_rerank_mixed_horizon_later_target_revisit is not None:
+                return unresolved_rerank_mixed_horizon_later_target_revisit
             unresolved_rerank_long_horizon_revisit = self._build_action_intent_unresolved_rerank_long_horizon_revisit_decision(
                 state=state,
                 hints=hints,
@@ -9329,6 +9474,15 @@ class GraphAgentPlanner:
             )
             if unresolved_rerank_downstream_target_revisit is not None:
                 return unresolved_rerank_downstream_target_revisit
+            unresolved_rerank_mixed_horizon_later_target_revisit = (
+                self._build_action_intent_unresolved_rerank_mixed_horizon_later_target_revisit_decision(
+                    state=state,
+                    hints=hints,
+                    thought="why 题 unresolved rerank 已明确 mixed-horizon 的更晚结果还没被确认；优先转去追 later outcome 对应的真实目标，而不是继续只沿动作物体做泛化 long-horizon 后追。",
+                )
+            )
+            if unresolved_rerank_mixed_horizon_later_target_revisit is not None:
+                return unresolved_rerank_mixed_horizon_later_target_revisit
             unresolved_rerank_long_horizon_revisit = self._build_action_intent_unresolved_rerank_long_horizon_revisit_decision(
                 state=state,
                 hints=hints,
