@@ -29,7 +29,7 @@
 ### 16.2.2 当前稳定基线
 
 - 专项回归命令：`pytest -q tests/test_graph_agent.py -k 'action_intent'`
-- 2026-06-07 当前结果：`207 passed, 337 deselected`
+- 2026-06-07 当前结果：`207 passed, 339 deselected`
 - 相比本轮进入专项时的起点 `107 passed, 300 deselected`，当前阶段性增量为 `+100 passed`
 - 当前执行策略：why 逻辑不再追求“接近完美覆盖”，而是维持“足够可用、回归稳定、无明显结构性退化”的维护态；后续优先级切换到完整 agent 功能闭环与小样本真实验证。
 
@@ -161,6 +161,13 @@
   - 已经存在 `transition` 关键帧后，才允许回退到 `detect_audio_peaks`
   - 宽泛 generic `future_use` 解释不会直接 finish，也不会先盲目扩长窗，而是先补更贴题的 transition 关键帧
 - 本轮提交：专项回归已更新到 `207 passed`
+- 本轮提交：`toolbox` 的 `future_use sufficiency` 继续向 measurement bucket 收紧：
+  - `to measure the ingredients.` 这类 exact measurement future-use，不再只因为 support 里出现 `scale / measure` 就算过；现在必须看到更直接的 measurement role/use 证据，例如“放到秤上”“立即用于称量”“作为称量基底”“实际称量发生”
+  - `to adjust the measurements.` / `read the measurements.` 这类 generic measurement-meta，也不再只因为处于 measurement 语境里就算过；现在必须看到更具体的 reading / tare / zero / app-update / readout 证据
+- 本轮提交：新增 2 条 measurement 定向测试，分别保护：
+  - generic measurement context 但缺 direct measurement role 时，`future_use sufficiency` 会继续要证据
+  - generic measurement-meta 但缺 reading / tare / readout 信号时，`future_use sufficiency` 会继续要证据
+- 本轮提交：measurement 正例回归与 why 专项总回归均保持通过；当前专项结果仍为 `207 passed, 339 deselected`
 
 ### 16.2.4 当前真正的瓶颈
 

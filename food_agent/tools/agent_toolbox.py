@@ -2896,8 +2896,13 @@ class AgentToolbox:
         return self._postprocess_action_mechanism_result(question=question, choices=choices, result=result)
 
     def infer_action_intent(self, question: str, choices: list[str], image_paths: list[str], context_notes: list[str]) -> dict[str, Any]:
-        selected_paths = self._select_compact_visual_paths(image_paths=image_paths, max_images=4)
+        selected_paths = self._select_action_intent_visual_paths(
+            image_paths=image_paths,
+            max_images=6,
+            context_notes=context_notes,
+        )
         scoped_notes = self._scope_action_intent_context_notes(question=question, image_paths=selected_paths, context_notes=context_notes)
+        context_block = self._build_action_intent_context_block(scoped_notes)
         prompt = (
             "你在看厨房第一视角视频中某个动作前后的关键帧，这些图片按时间顺序排列。"
             "请判断这个动作的最直接目的。"
@@ -2915,7 +2920,8 @@ class AgentToolbox:
             "\n11. 如果动作让一只手继续拿着某个刀/杯/碗/锅，而另一只手立刻去用海绵、刷子或流水清洗这个同一个物体，那么更直接的目的通常是‘清洗这个物体’，而不是泛泛的 free-hand 或 pick-up。"
             "\n12. 如果动作物体本身就是海绵/纸巾/抹布/毛巾这类清洁工具，而选项里同时出现“擦某个具体台面/洗某个具体器具”和泛泛的“clean / dry hands”，通常要优先判断那个具体被清洁的目标。"
             "\n13. 如果动作是 place/put 某个器具，一定区分“已经用完所以放下”和“洗后为了晾干/沥水而放下”；只有当证据里有洗后潮湿、流水、肥皂、水滴、朝上晾干等线索时，drying 才应优先。"
-            f"\n上下文线索: {scoped_notes}"
+            "\n14. 如果结构化时间线复核已经指出当前证据仍不足、仍有歧义、或者需要看后续用途/结果，而这些图片没有展示更新后的直接结果，你必须返回 need_future_evidence=true。"
+            f"\n{context_block}"
             '\n输出 JSON，字段固定为 {"best_index":0,"answer":"","confidence":0.0,"reason":"","second_best_index":0,"ambiguity":false,"need_future_evidence":false,"future_window_s":4.0,"followup_focus":""}。'
             f"\n问题: {question}\n选项:\n"
             + "\n".join(f"{idx}. {choice}" for idx, choice in enumerate(choices))
@@ -2962,7 +2968,470 @@ class AgentToolbox:
             if not result["followup_focus"]:
                 result["followup_focus"] = heuristic_reason
             result["reason"] = f"{result['reason']}; followup_needed={heuristic_reason}"
-        return result
+        return self._apply_action_intent_review_guard(
+            mode="infer",
+            result=result,
+            context_notes=scoped_notes,
+        )
+
+    def _action_intent_visual_priority_mode(self, context_notes: list[str] | None = None) -> str:
+        review_fields = self._latest_action_intent_inspection_fields(context_notes or [])
+        if not review_fields:
+            return "balanced"
+        next_use = str(review_fields.get("next_use_evidence") or "").strip().lower()
+        access = str(review_fields.get("access_or_reveal_evidence") or "").strip().lower()
+        hand_free = str(review_fields.get("hand_free_enablement_evidence") or "").strip().lower()
+        next_action = str(review_fields.get("next_action_hint") or "").strip().lower()
+        direct = str(review_fields.get("direct_purpose_hint") or "").strip().lower()
+        ambiguity = str(review_fields.get("ambiguity_note") or "").strip().lower()
+        combined = " ".join(item for item in (next_use, access, hand_free, next_action, direct, ambiguity) if item)
+        if self._text_has_any(
+            combined,
+            (
+                "put back",
+                "return",
+                "store",
+                "stored",
+                "final placement",
+                "proper place",
+                "right place",
+                "drying rack",
+                "drain board",
+                "final location",
+                "放回",
+                "归位",
+                "收起",
+                "最终位置",
+                "晾干",
+                "沥水",
+            ),
+        ):
+            return "final_state_first"
+        if next_use or self._text_has_any(
+            combined,
+            (
+                "weigh",
+                "scale",
+                "measure",
+                "pour",
+                "empty",
+                "drain",
+                "serve",
+                "plate",
+                "use next",
+                "later use",
+                "称",
+                "倒",
+                "沥",
+                "盛装",
+                "后续用途",
+            ),
+        ):
+            return "future_use_first"
+        if access or hand_free or self._text_has_any(
+            combined,
+            (
+                "free hand",
+                "freed hand",
+                "reach",
+                "retrieve",
+                "access",
+                "behind",
+                "clear the way",
+                "make space",
+                "slot",
+                "right hand",
+                "left hand",
+                "腾手",
+                "取到",
+                "拿到",
+                "后面",
+                "腾开",
+                "空位",
+            ),
+        ):
+            return "transition_first"
+        return "balanced"
+
+    def _sort_visual_paths_by_time(self, image_paths: list[str]) -> list[str]:
+        def sort_key(path: str) -> tuple[int, float, str]:
+            inferred = self._infer_artifact_time(path)
+            if inferred is None:
+                return (1, float("inf"), Path(path).name.lower())
+            return (0, float(inferred), Path(path).name.lower())
+
+        return sorted(image_paths, key=sort_key)
+
+    def _select_action_intent_visual_paths(
+        self,
+        *,
+        image_paths: list[str],
+        max_images: int = 6,
+        context_notes: list[str] | None = None,
+    ) -> list[str]:
+        unique_paths = self._filter_visual_paths(image_paths)
+        if len(unique_paths) <= max_images:
+            return self._sort_visual_paths_by_time(unique_paths)
+        precontext_paths: list[str] = []
+        segment_paths: list[str] = []
+        followup_transition_paths: list[str] = []
+        followup_peak_paths: list[str] = []
+        followup_paths: list[str] = []
+        ext_followup_paths: list[str] = []
+        other_paths: list[str] = []
+        for path in unique_paths:
+            name = Path(path).name.lower()
+            if "_precontext" in name:
+                precontext_paths.append(path)
+            elif "_followup_transition" in name:
+                followup_transition_paths.append(path)
+            elif "_followup_peaks" in name:
+                followup_peak_paths.append(path)
+            elif any(token in name for token in ("_followup_ext2", "_followup_ext3", "_followup_ext4")):
+                ext_followup_paths.append(path)
+            elif "_followup" in name:
+                followup_paths.append(path)
+            elif "_segment" in name:
+                segment_paths.append(path)
+            else:
+                other_paths.append(path)
+        priority_mode = self._action_intent_visual_priority_mode(context_notes)
+        selected: list[str] = []
+        selected.extend(precontext_paths[:1])
+        if len(segment_paths) <= 2:
+            selected.extend(segment_paths)
+        else:
+            selected.extend(self._select_compact_visual_paths(image_paths=segment_paths, max_images=2))
+        remaining_budget = max(0, max_images - len(selected))
+        transition_budget_cap = 2
+        ext_budget_cap = 1
+        prioritized_followup = followup_peak_paths + followup_paths
+        if priority_mode == "transition_first":
+            transition_budget_cap = 3
+            ext_budget_cap = 1
+            prioritized_followup = followup_peak_paths + followup_paths
+        elif priority_mode == "future_use_first":
+            transition_budget_cap = 1
+            ext_budget_cap = 2
+            prioritized_followup = followup_peak_paths + followup_paths
+        elif priority_mode == "final_state_first":
+            transition_budget_cap = 1
+            ext_budget_cap = 2
+            prioritized_followup = followup_paths + followup_peak_paths
+        if followup_transition_paths and remaining_budget > 0 and transition_budget_cap > 0:
+            transition_budget = min(transition_budget_cap, remaining_budget, len(followup_transition_paths))
+            if transition_budget >= len(followup_transition_paths):
+                selected.extend(followup_transition_paths)
+            else:
+                selected.extend(self._select_compact_visual_paths(image_paths=followup_transition_paths, max_images=transition_budget))
+        remaining_budget = max(0, max_images - len(selected))
+        if ext_followup_paths and remaining_budget > 0:
+            ext_budget = min(ext_budget_cap, remaining_budget, len(ext_followup_paths))
+            if ext_budget >= len(ext_followup_paths):
+                selected.extend(ext_followup_paths)
+            else:
+                selected.extend(self._select_compact_visual_paths(image_paths=ext_followup_paths, max_images=ext_budget))
+        remaining_budget = max(0, max_images - len(selected))
+        if prioritized_followup and remaining_budget > 0:
+            if len(prioritized_followup) <= remaining_budget:
+                selected.extend(prioritized_followup)
+            else:
+                selected.extend(self._select_compact_visual_paths(image_paths=prioritized_followup, max_images=remaining_budget))
+        if len(selected) < max_images and other_paths:
+            remaining_budget = max_images - len(selected)
+            extras = other_paths if len(other_paths) <= remaining_budget else self._select_compact_visual_paths(
+                image_paths=other_paths,
+                max_images=remaining_budget,
+            )
+            selected.extend(extras)
+        deduped: list[str] = []
+        for path in selected:
+            if path not in deduped:
+                deduped.append(path)
+        if len(deduped) < min(max_images, len(unique_paths)):
+            for path in unique_paths:
+                if path not in deduped:
+                    deduped.append(path)
+                if len(deduped) >= max_images:
+                    break
+        return self._sort_visual_paths_by_time(deduped[:max_images])
+
+    def _describe_action_intent_frame_sequence(self, image_paths: list[str]) -> list[str]:
+        sequence: list[str] = []
+        for path in image_paths[:12]:
+            name = Path(path).name.lower()
+            if "_precontext" in name:
+                stage = "precontext"
+            elif "_followup_transition" in name:
+                stage = "followup_transition"
+            elif "_followup_peaks" in name:
+                stage = "followup_peak"
+            elif any(token in name for token in ("_followup_ext2", "_followup_ext3", "_followup_ext4")):
+                stage = "followup_extended"
+            elif "_followup" in name:
+                stage = "followup"
+            elif "_segment" in name:
+                stage = "action_segment"
+            else:
+                stage = "other"
+            inferred_time = self._infer_artifact_time(path)
+            time_token = f"{inferred_time:.3f}s" if inferred_time is not None else "unknown"
+            sequence.append(f"{stage}@{time_token}")
+        return sequence
+
+    def _structured_note_fields(self, note: str) -> dict[str, str]:
+        fields: dict[str, str] = {}
+        for part in str(note or "").split(";"):
+            item = part.strip()
+            if not item or item.lower() == "inspection":
+                continue
+            if "=" not in item:
+                continue
+            key, value = item.split("=", 1)
+            key = key.strip()
+            value = value.strip()
+            if key:
+                fields[key] = value
+        return fields
+
+    def _latest_action_intent_inspection_fields(self, context_notes: list[str]) -> dict[str, str]:
+        preferred_keys = {
+            "timeline_summary",
+            "immediate_result",
+            "next_action_hint",
+            "direct_purpose_hint",
+            "access_or_reveal_evidence",
+            "hand_free_enablement_evidence",
+            "next_use_evidence",
+            "ambiguity_note",
+            "needs_more_evidence",
+            "target_object",
+            "target_location",
+            "ongoing_action",
+            "state_change_hint",
+        }
+        latest: dict[str, str] = {}
+        for raw in context_notes:
+            note = str(raw).strip()
+            if not note.lower().startswith("inspection;"):
+                continue
+            fields = self._structured_note_fields(note)
+            if any(key in fields for key in preferred_keys):
+                latest = fields
+        return latest
+
+    def _action_intent_review_needs_more_evidence(self, review_fields: dict[str, str]) -> bool:
+        if not review_fields:
+            return False
+        raw_flag = str(review_fields.get("needs_more_evidence") or "").strip().lower()
+        if raw_flag in {"1", "true", "yes"}:
+            return True
+        text = " ".join(
+            str(review_fields.get(key) or "")
+            for key in (
+                "timeline_summary",
+                "immediate_result",
+                "next_action_hint",
+                "direct_purpose_hint",
+                "access_or_reveal_evidence",
+                "hand_free_enablement_evidence",
+                "next_use_evidence",
+                "ambiguity_note",
+            )
+        ).lower()
+        return self._text_has_any(
+            text,
+            (
+                "need more evidence",
+                "needs more evidence",
+                "still ambiguous",
+                "remains ambiguous",
+                "not enough evidence",
+                "insufficient evidence",
+                "could still",
+                "could also",
+                "both plausible",
+                "still cannot tell",
+                "unclear whether",
+                "需要更多证据",
+                "仍有歧义",
+                "还不清楚",
+                "证据不足",
+                "两者都可能",
+                "都合理",
+            ),
+        )
+
+    def _action_intent_review_followup_focus(self, review_fields: dict[str, str]) -> str:
+        if not review_fields:
+            return ""
+        if str(review_fields.get("next_use_evidence") or "").strip():
+            return "timeline_review_next_use_outcome"
+        if str(review_fields.get("access_or_reveal_evidence") or "").strip():
+            return "timeline_review_access_or_reveal_outcome"
+        if str(review_fields.get("hand_free_enablement_evidence") or "").strip():
+            return "timeline_review_hand_free_followup"
+        if str(review_fields.get("next_action_hint") or "").strip():
+            return "timeline_review_next_action"
+        if str(review_fields.get("immediate_result") or "").strip():
+            return "timeline_review_immediate_result"
+        return "timeline_review_disambiguation"
+
+    def _action_intent_review_future_window_s(self, review_fields: dict[str, str], default: float = 4.0) -> float:
+        if not review_fields:
+            return default
+        if str(review_fields.get("next_use_evidence") or "").strip():
+            return max(default, 8.0)
+        if str(review_fields.get("next_action_hint") or "").strip():
+            return max(default, 6.0)
+        return max(default, 5.0)
+
+    def _action_intent_review_needed_observation(self, review_fields: dict[str, str]) -> str:
+        next_use = str(review_fields.get("next_use_evidence") or "").strip()
+        if next_use:
+            return f"post-action frames confirming whether this later use really happens: {next_use}"
+        access = str(review_fields.get("access_or_reveal_evidence") or "").strip()
+        if access:
+            return f"post-action frames confirming the concrete access/retrieval result: {access}"
+        hand_free = str(review_fields.get("hand_free_enablement_evidence") or "").strip()
+        if hand_free:
+            return f"post-action frames confirming the freed-hand outcome: {hand_free}"
+        next_action = str(review_fields.get("next_action_hint") or "").strip()
+        if next_action:
+            return f"post-action frames confirming the next immediate action: {next_action}"
+        direct = str(review_fields.get("direct_purpose_hint") or "").strip()
+        if direct:
+            return f"post-action frames confirming whether the direct purpose is really: {direct}"
+        ambiguity = str(review_fields.get("ambiguity_note") or "").strip()
+        if ambiguity:
+            return f"post-action frames resolving this ambiguity: {ambiguity}"
+        return "more post-action frames showing a concrete result that separates the top competing purposes"
+
+    def _compact_action_intent_note(self, note: str, *, max_len: int = 220) -> str:
+        compact = re.sub(r"\s+", " ", str(note or "")).strip()
+        if len(compact) <= max_len:
+            return compact
+        return compact[: max_len - 3] + "..."
+
+    def _build_action_intent_context_block(self, context_notes: list[str]) -> str:
+        if not context_notes:
+            return "结构化上下文: 无额外文字证据。"
+        review_fields = self._latest_action_intent_inspection_fields(context_notes)
+        lines: list[str] = ["结构化上下文:"]
+        if review_fields:
+            lines.append("时间线复核结构化证据（优先于泛化猜测）:")
+            label_map = (
+                ("timeline_summary", "时间线总结"),
+                ("immediate_result", "动作后立即结果"),
+                ("next_action_hint", "下一步动作线索"),
+                ("direct_purpose_hint", "直接目的线索"),
+                ("access_or_reveal_evidence", "访问/显露线索"),
+                ("hand_free_enablement_evidence", "腾手线索"),
+                ("next_use_evidence", "后续用途线索"),
+                ("ambiguity_note", "剩余歧义"),
+                ("target_object", "目标对象"),
+                ("target_location", "目标位置"),
+                ("ongoing_action", "当前动作"),
+                ("state_change_hint", "状态变化"),
+            )
+            for key, label in label_map:
+                value = str(review_fields.get(key) or "").strip()
+                if value:
+                    lines.append(f"- {label}: {value}")
+            if self._action_intent_review_needs_more_evidence(review_fields):
+                lines.append("- 复核判定: 现有证据仍不足。除非当前图片已经展示更晚且更直接的结果，否则必须继续找后续帧。")
+        other_notes = [
+            self._compact_action_intent_note(note)
+            for note in context_notes
+            if str(note).strip() and not str(note).strip().lower().startswith("inspection;")
+        ]
+        if other_notes:
+            lines.append("其他观测线索:")
+            for item in other_notes[:4]:
+                lines.append(f"- {item}")
+        return "\n".join(lines)
+
+    def _apply_action_intent_review_guard(self, *, mode: str, result: dict[str, Any], context_notes: list[str]) -> dict[str, Any]:
+        review_fields = self._latest_action_intent_inspection_fields(context_notes)
+        if not self._action_intent_review_needs_more_evidence(review_fields):
+            return result
+        adjusted = dict(result)
+        if mode == "infer":
+            reason_text = " ".join(
+                str(adjusted.get(key) or "")
+                for key in ("reason", "followup_focus")
+            ).lower()
+            confidence = float(adjusted.get("confidence") or 0.0)
+            if confidence >= 0.92 and self._text_has_any(
+                reason_text,
+                (
+                    "after",
+                    "then",
+                    "later",
+                    "immediately",
+                    "post-action",
+                    "result",
+                    "afterwards",
+                    "之后",
+                    "随后",
+                    "立刻",
+                    "后续",
+                    "结果",
+                ),
+            ):
+                return adjusted
+            adjusted["need_future_evidence"] = True
+            adjusted["ambiguity"] = True
+            adjusted["future_window_s"] = self._action_intent_review_future_window_s(
+                review_fields,
+                float(adjusted.get("future_window_s") or 4.0),
+            )
+            current_focus = str(adjusted.get("followup_focus") or "").strip()
+            if (
+                not current_focus
+                or current_focus in {"future_use_evidence_needed", "outcome_dependent_pairwise_needed", "model_flagged_future_evidence"}
+            ):
+                adjusted["followup_focus"] = self._action_intent_review_followup_focus(review_fields)
+            adjusted["reason"] = (
+                f"{adjusted.get('reason') or ''}; timeline_review_guard=needs_more_evidence"
+            ).strip("; ")
+            adjusted["confidence"] = min(confidence, 0.7)
+            return adjusted
+        if mode == "pairwise":
+            if adjusted.get("need_more_evidence"):
+                return adjusted
+            confidence = float(adjusted.get("confidence") or 0.0)
+            direct_effect = str(adjusted.get("direct_effect") or "").strip()
+            downstream_action = str(adjusted.get("downstream_action") or "").strip()
+            if confidence >= 0.84 and direct_effect and downstream_action:
+                return adjusted
+            adjusted["need_more_evidence"] = True
+            if not str(adjusted.get("needed_observation") or "").strip():
+                adjusted["needed_observation"] = self._action_intent_review_needed_observation(review_fields)
+            adjusted["reason"] = (
+                f"{adjusted.get('reason') or ''} pairwise_review_guard=needs_more_evidence"
+            ).strip()
+            adjusted["confidence"] = min(confidence, 0.66)
+            return adjusted
+        if mode == "future_use":
+            if adjusted.get("need_more_evidence"):
+                return adjusted
+            confidence = float(adjusted.get("confidence") or 0.0)
+            decisive = str(adjusted.get("decisive_observation") or "").strip()
+            scores = self._valid_future_use_scores(adjusted.get("candidate_evidence"), adjusted.get("candidate_indices") or [])
+            top_score = scores[0][1] if scores else 0.0
+            second_score = scores[1][1] if len(scores) > 1 else 0.0
+            if confidence >= 0.82 and decisive and top_score - second_score >= 0.22:
+                return adjusted
+            adjusted["need_more_evidence"] = True
+            if not str(adjusted.get("needed_observation") or "").strip():
+                adjusted["needed_observation"] = self._action_intent_review_needed_observation(review_fields)
+            adjusted["reason"] = (
+                f"{adjusted.get('reason') or ''} future_use_review_guard=needs_more_evidence"
+            ).strip()
+            adjusted["confidence"] = min(confidence, 0.66)
+            return adjusted
+        return adjusted
 
     def resolve_action_intent_pairwise(
         self,
@@ -2982,12 +3451,19 @@ class AgentToolbox:
                 valid_indices.append(index)
         if len(valid_indices) < 2:
             return self.infer_action_intent(question=question, choices=choices, image_paths=image_paths, context_notes=context_notes)
-        selected_paths = self._select_compact_visual_paths(image_paths=image_paths, max_images=8)
+        selected_paths = self._select_action_intent_visual_paths(
+            image_paths=image_paths,
+            max_images=8,
+            context_notes=context_notes,
+        )
         scoped_notes = self._scope_action_intent_context_notes(question=question, image_paths=selected_paths, context_notes=context_notes)
+        frame_sequence = self._describe_action_intent_frame_sequence(selected_paths)
+        context_block = self._build_action_intent_context_block(scoped_notes)
         pair_choices = [{"index": index, "choice": str(choices[index])} for index in valid_indices[:2]]
         prompt = (
             "你在做厨房第一视角视频 why 题的最终歧义裁决。"
             "现在不是五选一，而是只在两个高混淆候选之间做判断。"
+            "\n这些图片严格按时间顺序排列。你必须利用前置状态、动作瞬间、结果帧和峰值附近帧之间的顺序关系来判断，而不是只看最后一张。"
             "\n必须重点看动作发生后的结果帧，判断："
             "\n1. 后续是否真的取到了被遮挡/被挡住的物体"
             "\n2. 还是只是把前景物体挪开后腾出了空间/完成整理"
@@ -2997,7 +3473,9 @@ class AgentToolbox:
             "\n6. 但如果证据明确显示：当前动作是在为某个具体目标物体腾出某个具体槽位/位置/落点，且后续立刻发生该精确放置，则可以选择更具体的 put/place/fit/slot 类候选。"
             "\n7. 只有当被移动的物体本身被放回/摆正，或证据显示题目动作直接就是为另一个具体物体创造精确落位条件，才选择 put/place/right place 类候选。"
             "\n8. 如果证据仍不够，不要强行高置信收口；必须标记 need_more_evidence=true，并说明还需要看哪个后续动作。"
-            f"\n上下文线索: {scoped_notes}"
+            "\n9. 如果结构化时间线复核已经指出 still ambiguous / needs more evidence，而当前图片没有给出更晚的直接结果，你必须继续要证据，不能只凭宽泛解释收口。"
+            f"\n帧顺序提示: {frame_sequence}"
+            f"\n{context_block}"
             '\n输出 JSON，字段固定为 {"best_index":0,"answer":"","confidence":0.0,"reason":"","losing_index":0,"direct_effect":"","downstream_action":"","need_more_evidence":false,"needed_observation":""}。'
             f"\n问题: {question}"
             f"\n候选对决: {json.dumps(pair_choices, ensure_ascii=False)}"
@@ -3046,6 +3524,11 @@ class AgentToolbox:
             valid_indices=valid_indices[:2],
             result=result,
         )
+        result = self._apply_action_intent_review_guard(
+            mode="pairwise",
+            result=result,
+            context_notes=scoped_notes,
+        )
         return self._apply_action_intent_pairwise_sufficiency(
             question=question,
             result=result,
@@ -3069,14 +3552,21 @@ class AgentToolbox:
                 valid_indices.append(index)
         if len(valid_indices) < 2:
             valid_indices = list(range(len(choices)))
-        selected_paths = self._select_compact_visual_paths(image_paths=image_paths, max_images=8)
+        selected_paths = self._select_action_intent_visual_paths(
+            image_paths=image_paths,
+            max_images=8,
+            context_notes=context_notes,
+        )
         if not selected_paths:
             return self._fallback_rank_choices(question=question, choices=choices, evidence=context_notes, working_memory=[])
         scoped_notes = self._scope_action_intent_context_notes(question=question, image_paths=selected_paths, context_notes=context_notes)
+        frame_sequence = self._describe_action_intent_frame_sequence(selected_paths)
+        context_block = self._build_action_intent_context_block(scoped_notes)
         candidate_choices = [{"index": index, "choice": str(choices[index])} for index in valid_indices]
         prompt = (
             "你在做厨房第一视角视频 why 题的后续用途裁决。"
             "题目问的是执行某个动作的目的，但这个目的不能只从动作瞬间判断，必须看动作之后这个物体/空间被如何使用。"
+            "\n这些图片严格按时间顺序排列。你必须比较动作前、动作瞬间、动作后结果帧，以及可能的峰值附近关键帧，不能只抓一句宽泛描述。"
             "\n请按时间顺序阅读图片，并对每个候选目的分别找支持证据和反证。"
             "\n必须遵守："
             "\n1. 如果候选说称重/测量，必须寻找秤、食材、容器被放到秤上或称量动作的后续证据。"
@@ -3088,7 +3578,9 @@ class AgentToolbox:
             "\n7. 如果图片还没覆盖到真正的后续使用/放回/关闭前结果，不要强行高置信作答；标记 need_more_evidence=true，并说明还需要看什么。"
             "\n8. 如果题目动作本身是 move/transfer/remove/shift 某物，必须区分“当前动作直接腾出的访问/操作条件”和“之后才发生的下游取物/使用”。"
             "\n9. 如果只是先把某物移开，随后才拿起另一个物体，不能自动把那个更晚的取物动作当成当前动作的直接目的；只有当证据明确显示被移动物体本身就是在给那个目标让路，且不存在更直接的 tap/sink/drain/workspace access 解释时，才选择下游取物用途。"
-            f"\n上下文线索: {scoped_notes}"
+            "\n10. 如果结构化时间线复核已经指出 still ambiguous / needs more evidence，而当前图片没有给出更晚的实际使用结果，你必须继续找后续用途证据。"
+            f"\n帧顺序提示: {frame_sequence}"
+            f"\n{context_block}"
             '\n输出 JSON，字段固定为 {"candidate_evidence":[{"index":0,"support":"","contradiction":"","score":0.0}],"best_index":0,"answer":"","confidence":0.0,"decisive_observation":"","reason":"","need_more_evidence":false,"needed_observation":""}。'
             f"\n问题: {question}"
             f"\n候选: {json.dumps(candidate_choices, ensure_ascii=False)}"
@@ -3127,6 +3619,11 @@ class AgentToolbox:
             choices=[str(choice) for choice in choices],
             valid_indices=valid_indices,
             result=result,
+        )
+        result = self._apply_action_intent_review_guard(
+            mode="future_use",
+            result=result,
+            context_notes=scoped_notes,
         )
         return self._apply_action_intent_future_use_sufficiency(
             result=result,
@@ -3863,6 +4360,56 @@ class AgentToolbox:
         if any(term in choice_lc for term in ("weigh", "measure", "scale")):
             if not self._text_has_any(support_text, ("scale", "weigh", "weighed", "measure", "grams", "秤", "称", "克")):
                 gaps.append("missing_measurement_evidence")
+        if self._choice_is_exact_measurement_future_use_purpose(choice):
+            if not self._text_has_any(
+                support_text,
+                (
+                    "placed on the scale",
+                    "put on the scale",
+                    "used next for weighing",
+                    "used for measuring",
+                    "used as a base",
+                    "base for weighing",
+                    "measurement setup",
+                    "immediate weighing use",
+                    "positioned for immediate weighing use",
+                    "weighed next",
+                    "tare",
+                    "tared",
+                    "放到秤上",
+                    "立即用于称量",
+                    "作为称量基底",
+                    "称量基底",
+                    "去称量",
+                ),
+            ):
+                gaps.append("missing_exact_measurement_role_evidence")
+        if self._choice_is_generic_measurement_meta_future_use_purpose(choice):
+            if not self._text_has_any(
+                support_text,
+                (
+                    "display",
+                    "reading",
+                    "readout",
+                    "shows 0",
+                    "shows zero",
+                    "recorded",
+                    "recording",
+                    "app entry",
+                    "entered into the app",
+                    "tare",
+                    "tared",
+                    "zeroed",
+                    "adjusted the scale",
+                    "显示",
+                    "读数",
+                    "归零",
+                    "记录到app",
+                    "记到app",
+                    "调整刻度",
+                ),
+            ):
+                gaps.append("missing_measurement_meta_evidence")
         if any(term in choice_lc for term in ("empty", "pour", "drain")):
             if not self._text_has_any(
                 support_text,
@@ -4049,6 +4596,10 @@ class AgentToolbox:
             return "post-action frames showing the named cup/glass/kettle/bottle actually reaches a fill limit, rather than the tap being switched for another active container"
         if any("fill" in gap for gap in gaps):
             return "post-action frames showing filling with water/liquid and the target container"
+        if any("exact_measurement_role" in gap for gap in gaps):
+            return "post-action frames showing the moved object is directly used for weighing or positioned as the measurement base, rather than only appearing near a scale or generic measurement context"
+        if any("measurement_meta" in gap for gap in gaps):
+            return "post-action frames showing an actual measurement reading, zeroing/tare action, or explicit app/readout update rather than only generic measurement context"
         if any("measurement" in gap for gap in gaps):
             return "post-action frames showing the scale/measurement setup and the object being weighed"
         if any("transfer_or_emptying" in gap for gap in gaps):
@@ -6610,6 +7161,22 @@ class AgentToolbox:
             confidence=confidence,
             reason_text=reason,
         )
+        if not semantic_need:
+            requires_full_choice_recheck = (
+                (
+                    any(token in question_text for token in ("paper towel", "tea towel", "dish cloth", "cloth", "towel", "napkin"))
+                    and any(token in question_text for token in ("<flip ", "<turn ", "<shake ", " flip ", " turn ", " shake "))
+                )
+                or any(token in question_text for token in ("<tap kitchen scale>", "tap kitchen scale"))
+            )
+            if requires_full_choice_recheck:
+                semantic_need, semantic_reason, semantic_window_s, semantic_resolver = action_intent_followup_decision(
+                    question=question,
+                    choices=[str(choice) for choice in choices],
+                    indices=None,
+                    confidence=confidence,
+                    reason_text=reason,
+                )
         if semantic_need:
             if semantic_resolver == "future_use" or semantic_window_s >= 8.0:
                 result["future_window_s"] = max(float(result.get("future_window_s") or 4.0), semantic_window_s)
