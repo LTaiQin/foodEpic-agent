@@ -2035,7 +2035,108 @@ class GraphAgent:
         if any(term in choice_lc for term in ("access", "behind", "reveal", "expose", "拿到后面", "看到后面", "露出", "取到后面")):
             if any(term in support_lc for term in ("reveals the hidden area", "revealed", "hidden area behind", "shows what is behind", "露出后方", "看到后方")):
                 gaps.append("generic_access_direct_effect")
+        gaps.extend(
+            self._action_intent_unresolved_timeline_review_bias_gaps(
+                state=state,
+                candidate_rows=candidate_rows,
+                best_index=best_index,
+            )
+        )
         return list(dict.fromkeys(gaps))
+
+    def _action_intent_unresolved_timeline_review_bias_gaps(
+        self,
+        *,
+        state: AgentState,
+        candidate_rows: list[dict[str, Any]],
+        best_index: int,
+    ) -> list[str]:
+        if not self._action_intent_has_unresolved_timeline_review_gap(state):
+            return []
+        bias = self._action_intent_timeline_review_bias_profile(state)
+        if not bias["has_review"] or not bias["needs_more_evidence"]:
+            return []
+        target_row = next(
+            (
+                row
+                for row in candidate_rows
+                if int(row.get("index", -1)) == best_index
+            ),
+            None,
+        )
+        if target_row is None:
+            return []
+        choices = [str(choice) for choice in getattr(state, "choices", [])]
+        choice_lc = str(target_row.get("choice") or "").lower()
+        support_lc = str(target_row.get("support") or "").lower()
+        contradiction_lc = str(target_row.get("contradiction") or "").lower()
+        combined_lc = f"{support_lc} {contradiction_lc}".strip()
+        categories = selected_choice_categories(choices, [best_index])
+        best_categories = set(categories.get(best_index) or set())
+        gaps: list[str] = []
+        if bias["final_location_unclear"] and (
+            self._action_intent_choice_is_final_placement_candidate(choice_lc)
+            or "final_place_return" in best_categories
+        ):
+            if not self._action_intent_choice_has_explicit_final_placement_evidence(choice_lc, combined_lc):
+                gaps.append("timeline_review_final_location_gap")
+        if bias["next_use_unclear"] and best_categories & {
+            "measure_weigh",
+            "transfer_contents",
+            "serve_consume",
+            "inspect_check",
+            "open_close",
+            "clean_dry",
+            "food_prep",
+            "discard",
+            "final_place_return",
+        }:
+            if not self._action_intent_choice_has_explicit_later_outcome_evidence(choice_lc, best_categories, support_lc):
+                gaps.append("timeline_review_next_use_gap")
+        if bias["revealed_slot_placement"] and any(
+            token in choice_lc
+            for token in ("freed slot", "slot", "put into", "place into", "空位", "槽位", "放进", "归位")
+        ):
+            if not any(
+                token in combined_lc
+                for token in (
+                    "placed into the freed slot",
+                    "put into the freed slot",
+                    "slot becomes the destination",
+                    "destination is the freed slot",
+                    "放进腾出的槽位",
+                    "归位到空位",
+                )
+            ):
+                gaps.append("timeline_review_revealed_slot_gap")
+        if bias["revealed_target_retrieval"] and any(
+            token in choice_lc
+            for token in ("retrieve", "pick up", "take", "hidden", "behind", "取", "拿")
+        ):
+            if not any(
+                token in combined_lc
+                for token in (
+                    "retrieved from behind",
+                    "picked up from behind",
+                    "taken from behind",
+                    "hidden item is picked up",
+                    "hidden jar is taken",
+                    "取出后面的",
+                    "拿到后面的",
+                )
+            ):
+                gaps.append("timeline_review_revealed_target_gap")
+        if (bias["revealed_fixture_enablement"] or bias["hand_free_next_action"]) and (
+            "hand_free_enablement" in best_categories
+            or "open_close" in best_categories
+            or any(
+                token in choice_lc
+                for token in ("turn on", "turn off", "open", "close", "switch on", "switch off", "打开", "关闭", "开启")
+            )
+        ):
+            if not self._action_intent_text_has_direct_positive_evidence(support_lc):
+                gaps.append("timeline_review_hand_free_or_fixture_gap")
+        return gaps
 
     def _action_intent_unresolved_rerank_should_wait_for_more_evidence(
         self,
@@ -2050,6 +2151,17 @@ class GraphAgent:
             return True
         broad_gap = "best_is_unproven_broad_candidate" in semantic_gaps
         unsupported_gap = "candidate_explicitly_lacks_observed_support" in semantic_gaps
+        if any(
+            gap in semantic_gaps
+            for gap in (
+                "timeline_review_final_location_gap",
+                "timeline_review_next_use_gap",
+                "timeline_review_revealed_slot_gap",
+                "timeline_review_revealed_target_gap",
+                "timeline_review_hand_free_or_fixture_gap",
+            )
+        ):
+            return True
         if any(
             gap in semantic_gaps
             for gap in ("generic_hidden_reveal_or_access_direct_effect", "generic_access_direct_effect")
