@@ -8124,6 +8124,25 @@ class GraphAgentPlanner:
                     return item if isinstance(item, dict) else {}
         return {}
 
+    def _action_intent_verifier_blocker_hint(self, state: AgentState) -> str:
+        if not self._is_action_intent_task(state):
+            return ""
+        latest_verification = self._state_latest_verification(state)
+        summary = str(latest_verification.get("summary") or "")
+        match = re.search(r"why_blocker=([a-z_]+)", summary)
+        if match:
+            return str(match.group(1) or "")
+        missing = {
+            str(item)
+            for item in latest_verification.get("missing_evidence_types", [])
+            if isinstance(item, str) and item
+        }
+        if "need_precondition_context" in missing:
+            return "precondition_context"
+        if "need_post_action_evidence" in missing:
+            return "post_action_evidence"
+        return ""
+
     def _used_tools(self, state: AgentState) -> list[str]:
         return [entry.get("tool") for entry in getattr(state, "tool_trace", []) if isinstance(entry, dict)]
 
@@ -8296,13 +8315,83 @@ class GraphAgentPlanner:
         if latest is None:
             return None
         tool_name, payload = latest
-        if not self._action_intent_result_is_close_call_for_recovery(
+        blocker_hint = self._action_intent_verifier_blocker_hint(state)
+        is_close_call = self._action_intent_result_is_close_call_for_recovery(
             state=state,
             tool_name=tool_name,
             payload=payload,
-        ):
+        )
+        requires_blocker_driven_recovery = blocker_hint in {
+            "precondition_context",
+            "post_action_evidence",
+            "future_use_close_call",
+            "pairwise_close_call",
+        }
+        if not is_close_call and not requires_blocker_driven_recovery:
             return None
         if tool_name == "infer_action_intent":
+            if (
+                blocker_hint == "precondition_context"
+                and self._action_intent_needs_precondition_context(state=state, result=payload)
+                and not self._action_intent_has_precondition_frames(state=state, hints=hints)
+            ):
+                precondition = self._build_action_intent_precondition_sampling_decision(
+                    state=state,
+                    hints=hints,
+                    focus="verifier_blocked_precondition_context",
+                )
+                if precondition is not None:
+                    return precondition
+            if blocker_hint in {"post_action_evidence", "future_use_close_call"}:
+                if self._action_intent_followup_attempt_count(state) < self._action_intent_initial_followup_budget(state):
+                    followup = self._build_action_intent_followup_sampling_decision(state=state, hints=hints)
+                    if followup is not None:
+                        return followup
+                transition_probe = self._build_action_intent_transition_probe_decision(
+                    state=state,
+                    hints=hints,
+                    result=payload,
+                    thought="why 题被 verifier 判为缺少动作后决定性证据；先围绕动作尾部后的短窗口主动补关键帧，确认是否真的出现称重、倒空、检查、放回或具体下游使用。",
+                )
+                if transition_probe is not None:
+                    return transition_probe
+                future_use = self._build_action_intent_future_use_resolution_decision(
+                    state=state,
+                    hints=hints,
+                    result=payload,
+                    thought="why 题被 verifier 判为缺少动作后证据后，回到后续用途专用裁决，用更新后的结果帧重新判断真实目的。",
+                )
+                if future_use is not None:
+                    return future_use
+                extra_followup = self._build_action_intent_extra_followup_sampling_decision(
+                    state=state,
+                    hints=hints,
+                    focus="verifier_blocked_post_action_evidence",
+                    window_s=8.5,
+                )
+                if extra_followup is not None:
+                    return extra_followup
+            if blocker_hint == "pairwise_close_call":
+                if self._action_intent_followup_attempt_count(state) < self._action_intent_initial_followup_budget(state):
+                    followup = self._build_action_intent_followup_sampling_decision(state=state, hints=hints)
+                    if followup is not None:
+                        return followup
+                transition_probe = self._build_action_intent_transition_probe_decision(
+                    state=state,
+                    hints=hints,
+                    result=payload,
+                    thought="why 题被 verifier 判为 top-2 后果型 close call；先主动补更近的结果帧，再回到二选一裁决。",
+                )
+                if transition_probe is not None:
+                    return transition_probe
+                pairwise = self._build_action_intent_pairwise_resolution_decision(
+                    state=state,
+                    hints=hints,
+                    result=payload,
+                    thought="why 题被 verifier 判为 pairwise close call；回到 top-2 专用裁决，不允许泛化结果提前收口。",
+                )
+                if pairwise is not None:
+                    return pairwise
             transition_probe = self._build_action_intent_transition_probe_decision(
                 state=state,
                 hints=hints,

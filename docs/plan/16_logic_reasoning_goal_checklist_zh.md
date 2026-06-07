@@ -29,8 +29,8 @@
 ### 16.2.2 当前稳定基线
 
 - 专项回归命令：`pytest -q tests/test_graph_agent.py -k 'action_intent'`
-- 2026-06-07 当前结果：`201 passed, 337 deselected`
-- 相比本轮进入专项时的起点 `107 passed, 300 deselected`，当前阶段性增量为 `+94 passed`
+- 2026-06-07 当前结果：`205 passed, 337 deselected`
+- 相比本轮进入专项时的起点 `107 passed, 300 deselected`，当前阶段性增量为 `+98 passed`
 - 当前执行策略：why 逻辑不再追求“接近完美覆盖”，而是维持“足够可用、回归稳定、无明显结构性退化”的维护态；后续优先级切换到完整 agent 功能闭环与小样本真实验证。
 
 这说明 why 题已经不再是“直接把问题丢给模型猜答案”，而是已经存在完整骨架：
@@ -141,6 +141,18 @@
   - “why 题在 verifier 拦下 close-call finish 后，优先进入 targeted transition probe”
   - “已经存在决定性 future-use 证据时，不会误触发 close-call recovery”
 - 本轮提交：专项回归已更新到 `201 passed`
+- 本轮提交：`verifier` 现在会把 why 阻断原因显式写进 `summary`，例如 `why_blocker=precondition_context / post_action_evidence / future_use_close_call / pairwise_close_call`。这一步的意义不是改输出文案，而是把“证据还不够”细化成“缺动作前触发条件”还是“缺动作后结果证据”还是“top-2 close call 仍未压下去”
+- 本轮提交：`planner` 的 `verifier blocked -> targeted recovery` 已从“只知道被挡住了”升级为“知道为什么被挡住了再选恢复路线”：
+  - `precondition_context`：优先补动作前帧；
+  - `post_action_evidence`：优先补动作后 followup / transition probe；
+  - `future_use_close_call`：优先补动作后决定性结果帧，再回到 `future_use` 专用裁决；
+  - `pairwise_close_call`：优先补更近的结果帧，再回到 `pairwise` 专用裁决
+- 本轮提交：新增 4 条测试分别保护：
+  - verifier 会在 summary 中标出 `precondition_context`
+  - verifier 会在 summary 中标出 `post_action_evidence`
+  - planner 在 `precondition blocker` 下优先补 `precontext`
+  - planner 在 `post-action blocker` 下优先补 `followup`
+- 本轮提交：专项回归已更新到 `205 passed`
 
 ### 16.2.4 当前真正的瓶颈
 
