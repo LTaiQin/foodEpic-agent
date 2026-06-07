@@ -3779,6 +3779,50 @@ class AgentToolbox:
             str(result.get(key) or "")
             for key in ("reason", "direct_effect", "downstream_action")
         ).lower()
+        pure_hand_free_index = next(
+            (
+                index
+                for index in valid_indices
+                if self._choice_is_pure_hand_free_purpose(str(choices[index]))
+            ),
+            None,
+        )
+        exact_hand_target_index = next(
+            (
+                index
+                for index in valid_indices
+                if self._choice_is_exact_hand_free_target_purpose(str(choices[index]))
+            ),
+            None,
+        )
+        if pure_hand_free_index is not None and exact_hand_target_index is not None:
+            best_index = int(result.get("best_index", -1))
+            if best_index == pure_hand_free_index and self._explanation_uses_exact_hand_free_target_chain(explanation):
+                adjusted = dict(result)
+                adjusted["best_index"] = exact_hand_target_index
+                adjusted["answer"] = str(choices[exact_hand_target_index])
+                adjusted["losing_index"] = pure_hand_free_index
+                adjusted["confidence"] = max(0.8, min(0.9, float(result.get("confidence") or 0.0) + 0.04))
+                adjusted["causal_hierarchy_adjusted"] = True
+                adjusted["reason"] = (
+                    f"{result.get('reason') or ''} causal_hierarchy_adjustment: "
+                    "the evidence shows that freeing the hand is only an enablement step and the immediately visible next target is specific, "
+                    "so the direct purpose should be the exact next-target action rather than generic hand-free enablement."
+                ).strip()
+                return adjusted
+            if best_index == exact_hand_target_index and self._explanation_uses_pure_hand_free_chain(explanation):
+                adjusted = dict(result)
+                adjusted["best_index"] = pure_hand_free_index
+                adjusted["answer"] = str(choices[pure_hand_free_index])
+                adjusted["losing_index"] = exact_hand_target_index
+                adjusted["confidence"] = max(0.8, min(0.88, float(result.get("confidence") or 0.0) + 0.03))
+                adjusted["causal_hierarchy_adjusted"] = True
+                adjusted["reason"] = (
+                    f"{result.get('reason') or ''} causal_hierarchy_adjustment: "
+                    "the evidence only establishes generic hand-free enablement while the exact next target remains ambiguous, "
+                    "so the safer direct-purpose reading is freeing the hand rather than committing to a specific next-target action."
+                ).strip()
+                return adjusted
         safety_avoid_index = next(
             (
                 index
@@ -3930,6 +3974,99 @@ class AgentToolbox:
             return True
         return any(token in text for token in ("freed slot", "right place", "proper place", "put the", "place the"))
 
+    def _choice_is_pure_hand_free_purpose(self, choice: str) -> bool:
+        text = str(choice or "").lower()
+        if any(
+            token in text
+            for token in (
+                "pick up",
+                "reach for",
+                "turn on",
+                "turn off",
+                "open",
+                "wash",
+                "rinse",
+                "scrub",
+                "wipe",
+                "clean",
+                "bottle",
+                "tap",
+                "faucet",
+                "microwave",
+                "knife",
+                "spoon",
+                "utensil",
+                "pan",
+                "pot",
+                "beaker",
+                "brush",
+                "washing up liquid",
+            )
+        ):
+            return False
+        return any(
+            token in text
+            for token in (
+                "free up the right hand",
+                "free up the left hand",
+                "free the right hand",
+                "free the left hand",
+                "right hand is free",
+                "left hand is free",
+                "to free up the right hand",
+                "to free up the left hand",
+            )
+        )
+
+    def _choice_is_exact_hand_free_target_purpose(self, choice: str) -> bool:
+        text = str(choice or "").lower()
+        if self._choice_is_pure_hand_free_purpose(text):
+            return False
+        has_action = any(
+            token in text
+            for token in (
+                "pick up",
+                "reach for",
+                "turn on",
+                "turn off",
+                "open",
+                "uncap",
+                "wash",
+                "rinse",
+                "scrub",
+                "wipe",
+                "clean",
+                "use the right hand",
+                "use left hand",
+                "use the left hand",
+                "with right hand",
+                "with left hand",
+            )
+        )
+        has_target = any(
+            token in text
+            for token in (
+                "bottle",
+                "washing up liquid",
+                "tap",
+                "faucet",
+                "microwave",
+                "door",
+                "knife",
+                "spoon",
+                "utensil",
+                "pan",
+                "pot",
+                "beaker",
+                "brush",
+                "board",
+                "cup",
+                "cover",
+                "liquid",
+            )
+        )
+        return has_action and has_target
+
     def _choice_is_safety_avoid_purpose(self, choice: str) -> bool:
         text = str(choice or "").lower()
         return any(
@@ -3991,6 +4128,97 @@ class AgentToolbox:
             )
         )
         return has_hazard and has_direct_management
+
+    def _explanation_uses_exact_hand_free_target_chain(self, explanation: str) -> bool:
+        text = str(explanation or "").lower()
+        has_hand_enablement = any(
+            token in text
+            for token in (
+                "free hand",
+                "freed hand",
+                "right hand",
+                "left hand",
+                "other hand",
+                "while holding",
+                "holding in left hand",
+                "holding in right hand",
+                "freed and immediately",
+            )
+        )
+        has_exact_next_action = any(
+            token in text
+            for token in (
+                "immediately reaches for",
+                "immediately picks up",
+                "picks up the",
+                "pick up the",
+                "turn on the tap",
+                "operate the tap",
+                "open the microwave",
+                "opens the microwave",
+                "wash the",
+                "rinse the",
+                "scrub the",
+                "wipe the",
+                "clean the",
+                "next visible cleaning target",
+                "immediate next target",
+                "target is the",
+            )
+        )
+        has_specific_target = any(
+            token in text
+            for token in (
+                "bottle",
+                "washing-up-liquid",
+                "washing up liquid",
+                "tap",
+                "faucet",
+                "microwave",
+                "knife",
+                "spoon",
+                "utensil",
+                "pan",
+                "pot",
+                "beaker",
+                "brush",
+                "cover",
+                "cup",
+            )
+        )
+        return has_hand_enablement and has_exact_next_action and has_specific_target
+
+    def _explanation_uses_pure_hand_free_chain(self, explanation: str) -> bool:
+        text = str(explanation or "").lower()
+        has_hand_enablement = any(
+            token in text
+            for token in (
+                "free hand",
+                "freed hand",
+                "right hand",
+                "left hand",
+                "other hand",
+                "frees the right hand",
+                "frees the left hand",
+                "freeing the hand",
+                "another manipulation may happen",
+            )
+        )
+        has_ambiguity = any(
+            token in text
+            for token in (
+                "not the more specific next object",
+                "without yet showing a single specific",
+                "exact next target is still ambiguous",
+                "no bottle is directly shown",
+                "no immediate",
+                "yet showing a single specific",
+                "later exact next target is still ambiguous",
+                "does not show a single specific retrieved object",
+            )
+        )
+        lacks_exact_chain = not self._explanation_uses_exact_hand_free_target_chain(text)
+        return has_hand_enablement and has_ambiguity and lacks_exact_chain
 
     def _explanation_uses_exact_reveal_then_take_or_place_chain(self, explanation: str) -> bool:
         text = str(explanation or "").lower()
