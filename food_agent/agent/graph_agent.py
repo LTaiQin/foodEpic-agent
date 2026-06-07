@@ -956,6 +956,15 @@ class GraphAgent:
             contradiction=contradiction_lc,
         ):
             adjusted -= 0.18
+        if self._action_intent_choice_is_generic_workspace_effect_over_exact_path_or_destination(
+            question=question_lc,
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            action_object=action_object,
+            global_context=global_context,
+        ):
+            adjusted -= 0.22
         if self._action_intent_choice_is_direct_space_without_exact_next_use(
             choice=choice_lc,
             support=support_lc,
@@ -1096,6 +1105,15 @@ class GraphAgent:
             global_context=global_context,
         ):
             adjusted += 0.36
+        if self._action_intent_choice_is_exact_pickup_path_enablement(
+            question=question_lc,
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            action_object=action_object,
+            global_context=global_context,
+        ):
+            adjusted += 0.32
         if self._action_intent_choice_is_exact_immediate_downstream_use(
             question=question_lc,
             choice=choice_lc,
@@ -1256,6 +1274,18 @@ class GraphAgent:
             )
         ):
             adjusted -= 0.18
+        if any(
+            token in contradiction_lc
+            for token in (
+                "downstream pickup after the transfer",
+                "rather than the direct purpose of the transfer itself",
+                "later downstream effect",
+                "less specific than option",
+                "只是转移动作之后的下游拿取",
+                "不是当前转移动作的直接目的",
+            )
+        ):
+            adjusted -= 0.2
         if self._action_intent_choice_is_weak_drainage_rearrangement(
             choice=choice_lc,
             support=support_lc,
@@ -1296,6 +1326,15 @@ class GraphAgent:
         if self._choice_is_same_object_active_use(choice, action_object):
             return False
         if self._action_intent_choice_is_exact_immediate_downstream_use(
+            question=question,
+            choice=choice,
+            support=support,
+            contradiction=contradiction,
+            action_object=action_object,
+            global_context=global_context,
+        ):
+            return False
+        if self._action_intent_choice_is_exact_pickup_path_enablement(
             question=question,
             choice=choice,
             support=support,
@@ -2283,6 +2322,81 @@ class GraphAgent:
             )
         )
 
+    def _action_intent_choice_is_generic_workspace_effect_over_exact_path_or_destination(
+        self,
+        *,
+        question: str,
+        choice: str,
+        support: str,
+        contradiction: str,
+        action_object: str,
+        global_context: str,
+    ) -> bool:
+        del question
+        if not any(
+            token in choice
+            for token in (
+                "make space",
+                "make room",
+                "workspace",
+                "serving easier",
+                "wipe down",
+                "begin clearing up",
+                "腾空间",
+                "让开",
+                "更容易盛出",
+                "擦台面",
+            )
+        ):
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        if not self._signal_mentions_action_object(signal_text, action_object):
+            return False
+        has_exact_path_or_destination = any(
+            token in signal_text
+            for token in (
+                "carried directly",
+                "moved directly toward",
+                "to the sink",
+                "moved to the sink",
+                "carry path",
+                "direct carry path",
+                "prepare to pick up",
+                "pick up the plastic colander",
+                "exact pickup path",
+                "specific out-of-the-way setup",
+                "moved out of the way as",
+                "stood upright and moved out of the way",
+                "right hand",
+                "left hand",
+                "while the other hand",
+                "held in the other hand",
+                "直接移到水槽",
+                "准备拿起",
+                "为拿起让路",
+                "明确搬运路径",
+                "具体拿取路径",
+            )
+        )
+        if not has_exact_path_or_destination:
+            return False
+        return any(
+            token in contradiction
+            for token in (
+                "generic workspace effect",
+                "only a generic workspace effect",
+                "does not match the more direct carry path",
+                "less exact than the specific out-of-the-way setup",
+                "broad sense",
+                "secondary",
+                "weaker than the exact",
+                "只是泛化空间效果",
+                "不如直接搬运路径",
+                "不如具体让路设置",
+                "只是宽泛的空间变化",
+            )
+        )
+
     def _action_intent_choice_is_exact_workspace_creation(
         self,
         *,
@@ -2584,6 +2698,10 @@ class GraphAgent:
                 "picked up later",
                 "may be picked up later",
                 "later during cooking",
+                "downstream pickup",
+                "downstream effect",
+                "after the transfer rather than the direct purpose",
+                "rather than the direct purpose of the transfer itself",
                 "speculative",
                 "只是后续可能",
                 "后面才会",
@@ -2751,6 +2869,63 @@ class GraphAgent:
                 "直接下一目标",
                 "具体下一目标",
                 "直接功能目的",
+            )
+        )
+
+    def _action_intent_choice_is_exact_pickup_path_enablement(
+        self,
+        *,
+        question: str,
+        choice: str,
+        support: str,
+        contradiction: str,
+        action_object: str,
+        global_context: str,
+    ) -> bool:
+        if not any(token in question for token in ("move ", "transfer ", "shift ", "push ", "clear ")):
+            return False
+        if not any(
+            token in choice
+            for token in (
+                "out of the way",
+                "prepare to pick up",
+                "clear the way to pick up",
+                "pick up the",
+                "moved out of the way as",
+                "让开以便拿起",
+                "为拿起让路",
+            )
+        ):
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        if not self._signal_mentions_action_object(signal_text, action_object):
+            return False
+        if not any(
+            token in signal_text
+            for token in (
+                "out of the way",
+                "prepare to pick up",
+                "specific out-of-the-way setup",
+                "exact pickup path",
+                "clearing the exact pickup path",
+                "moved out of the way as",
+                "pick up the plastic colander",
+                "pick up the kettle",
+                "right hand",
+                "left hand",
+                "让开以便拿起",
+                "具体拿取路径",
+                "为拿起让路",
+            )
+        ):
+            return False
+        return not any(
+            token in contradiction
+            for token in (
+                "no exact pickup path",
+                "no direct pickup target",
+                "没有明确拿取路径",
+                "没有明确下一拿取目标",
             )
         )
 
@@ -4763,7 +4938,21 @@ class GraphAgent:
                 "后续没有看到明确",
             )
         )
-        return support_signal and (soft_missing or "direct" in support or "直接" in support)
+        direct_enablement_signal = any(
+            token in f"{support} {contradiction}"
+            for token in (
+                "directly enabled",
+                "enabled tap access",
+                "directly enabled tap access",
+                "closer to the tap",
+                "closer to the faucet",
+                "suggesting the transfer directly enabled",
+                "直接使得可以",
+                "更接近水龙头",
+                "直接启用了",
+            )
+        )
+        return support_signal and (soft_missing or "direct" in support or "直接" in support or direct_enablement_signal)
 
     def _action_intent_choice_is_tap_state_switch(
         self,
