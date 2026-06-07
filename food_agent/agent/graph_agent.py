@@ -898,6 +898,13 @@ class GraphAgent:
                 if generic_hand_free_marker:
                     state.add_memory(generic_hand_free_marker)
                     continue
+                generic_access_or_space_marker = self._action_intent_resolution_generic_access_or_space_overclaim_marker(
+                    raw_result=raw_result,
+                    state=state,
+                )
+                if generic_access_or_space_marker:
+                    state.add_memory(generic_access_or_space_marker)
+                    continue
             if self._action_intent_resolution_should_withhold_broad_generic_claim_without_direct_evidence(
                 raw_result=raw_result,
                 state=state,
@@ -1115,6 +1122,195 @@ class GraphAgent:
             "action_intent_resolution_withheld_for_generic_hand_free_enablement=1 "
             f"target={best_target} kind={best_kind}"
         )
+
+    def _action_intent_choice_target_token_and_kind(
+        self,
+        *,
+        choice: str,
+        action_object: str,
+    ) -> tuple[str, str] | None:
+        choice_lc = str(choice or "").strip().lower()
+        action_object_lc = str(action_object or "").strip().lower()
+        action_object_tokens = {token for token in re.split(r"[^a-z0-9]+", action_object_lc) if token}
+        fixtures = {"tap", "faucet", "scale", "sink", "fridge", "drawer", "cupboard", "door", "dishwasher", "rack"}
+        for token in (
+            "whisk",
+            "knife",
+            "fork",
+            "spoon",
+            "spatula",
+            "bottle",
+            "sponge",
+            "brush",
+            "cloth",
+            "towel",
+            "lid",
+            "cover",
+            "bowl",
+            "plate",
+            "tray",
+            "pot",
+            "pan",
+            "saucepan",
+            "cup",
+            "glass",
+            "jar",
+            "colander",
+            "scale",
+            "tap",
+            "faucet",
+            "sink",
+            "fridge",
+            "door",
+            "drawer",
+            "cupboard",
+            "rack",
+            "dishwasher",
+        ):
+            if token not in choice_lc:
+                continue
+            if token in action_object_tokens:
+                continue
+            return token, ("fixture" if token in fixtures else "object")
+        return None
+
+    def _action_intent_resolution_generic_access_or_space_overclaim_marker(
+        self,
+        *,
+        raw_result: dict[str, Any],
+        state: AgentState,
+    ) -> str:
+        index = self._coerce_choice_index(raw_result.get("best_index"), state.choices)
+        if index is None:
+            return ""
+        question = str(getattr(state, "question", "") or "")
+        question_lc = question.lower()
+        best_choice = str(state.choices[index]).strip().lower()
+        action_object = self._action_intent_question_object(question)
+        global_context = " ".join(
+            str(item)
+            for item in list(getattr(state, "evidence_bundle", []))[-24:]
+            + list(getattr(state, "working_memory", []))[-24:]
+            if isinstance(item, str)
+        ).lower()
+        generic_access_patterns = (
+            "access what's behind",
+            "access what is behind",
+            "look what's behind",
+            "see what is behind",
+            "what is behind",
+            "look behind",
+            "see what's behind",
+            "access behind",
+            "to access the area behind",
+            "to access behind",
+            "后面有什么",
+            "看后面",
+            "查看后面",
+        )
+        best_is_generic_access = any(pattern in best_choice for pattern in generic_access_patterns)
+        best_is_generic_space = self._action_intent_choice_is_generic_direct_space_purpose(best_choice)
+        if not best_is_generic_access and not best_is_generic_space:
+            return ""
+        evidence_items = raw_result.get("candidate_evidence")
+        if not isinstance(evidence_items, list):
+            return ""
+        for item in evidence_items:
+            if not isinstance(item, dict):
+                continue
+            candidate_index = self._coerce_choice_index(item.get("index"), state.choices)
+            if candidate_index is None or candidate_index == index:
+                continue
+            try:
+                score = float(item.get("score") or 0.0)
+            except Exception:  # noqa: BLE001
+                score = 0.0
+            if score < 0.18:
+                continue
+            choice = str(state.choices[candidate_index]).lower()
+            support = str(item.get("support") or "").lower()
+            contradiction = str(item.get("contradiction") or "").lower()
+            exact_revealed_target = self._action_intent_choice_is_exact_revealed_target_purpose(
+                question=question_lc,
+                choice=choice,
+                support=support,
+                contradiction=contradiction,
+                action_object=action_object,
+                global_context=global_context,
+            )
+            exact_targeted_placement = self._action_intent_choice_is_exact_downstream_targeted_placement(
+                question=question_lc,
+                choice=choice,
+                support=support,
+                contradiction=contradiction,
+                action_object=action_object,
+                global_context=global_context,
+            )
+            direct_fixture_enablement = self._action_intent_choice_is_direct_fixture_or_workspace_enablement(
+                choice=choice,
+                support=support,
+                contradiction=contradiction,
+            )
+            target = self._action_intent_choice_target_token_and_kind(choice=choice, action_object=action_object)
+            fallback_direct_downstream = False
+            if target is not None:
+                signal_text = f"{support} {contradiction}"
+                if any(
+                    token in choice
+                    for token in (
+                        "take",
+                        "pick up",
+                        "retrieve",
+                        "grab",
+                        "turn on",
+                        "turn off",
+                        "place",
+                        "put",
+                        "insert",
+                        "fit",
+                        "weigh",
+                        "measure",
+                        "wash",
+                        "rinse",
+                        "scrub",
+                        "wipe",
+                        "清洗",
+                        "冲洗",
+                        "拿",
+                        "取",
+                        "放进",
+                        "放到",
+                    )
+                ) and any(
+                    token in signal_text
+                    for token in (
+                        "direct target",
+                        "direct purpose",
+                        "hidden-target retrieval",
+                        "true next target",
+                        "revealed target",
+                        "revealed item",
+                        "rather than only generic access",
+                        "rather than generic access",
+                        "the hidden item is then picked up",
+                        "exact placement",
+                        "the direct purpose is",
+                        "真正目标",
+                        "直接目的",
+                        "后面的目标",
+                    )
+                ):
+                    fallback_direct_downstream = True
+            if not (exact_revealed_target or exact_targeted_placement or direct_fixture_enablement or fallback_direct_downstream):
+                continue
+            if target is None:
+                continue
+            target_name, target_kind = target
+            return (
+                "action_intent_resolution_withheld_for_generic_access_or_space_enablement=1 "
+                f"target={target_name} kind={target_kind}"
+            )
+        return ""
 
     def _action_intent_resolution_should_withhold_state_change_overclaim(
         self,
