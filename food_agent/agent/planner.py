@@ -6895,6 +6895,22 @@ class GraphAgentPlanner:
                 return target, kind
         return None
 
+    def _action_intent_recent_mixed_horizon_later_target_withheld_hint(
+        self,
+        state: AgentState,
+    ) -> tuple[str, str] | None:
+        recent = list(getattr(state, "working_memory", []))[-16:]
+        prefix = "action_intent_resolution_withheld_for_mixed_horizon_later_target=1"
+        for item in reversed(recent):
+            if not isinstance(item, str) or not item.startswith(prefix):
+                continue
+            marker_match = re.search(r"\btarget=(.+?)\s+kind=(object|fixture)\b", item)
+            target = str(marker_match.group(1) or "").strip() if marker_match else ""
+            kind = str(marker_match.group(2) or "").strip() if marker_match else ""
+            if target and kind:
+                return target, kind
+        return None
+
     def _action_intent_recent_unresolved_rerank_withheld_reason(self, state: AgentState) -> str:
         recent = list(getattr(state, "working_memory", []))[-16:]
         for item in reversed(recent):
@@ -7302,6 +7318,59 @@ class GraphAgentPlanner:
         if selected is None:
             return PlannerDecision(
                 thought=f"{thought} 继续重新检索 finalizer 指出的真实后续目标 `{downstream_target}` 的更晚轨迹。",
+                tool="query_object",
+                args={"query": downstream_target, "limit": 24},
+            )
+        _node, start_time, end_time = selected
+        query_time = start_time if abs(end_time - start_time) < 0.25 else (start_time + min(end_time, start_time + 1.2)) / 2
+        return PlannerDecision(
+            thought=thought,
+            tool="query_spatial_context",
+            args={
+                "time_s": query_time,
+                "object_name": downstream_target,
+                "limit": 16 if target_kind == "fixture" else 18,
+            },
+        )
+
+    def _build_action_intent_finalize_withheld_mixed_horizon_later_target_revisit_decision(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        thought: str,
+    ) -> PlannerDecision | None:
+        hint = self._action_intent_recent_mixed_horizon_later_target_withheld_hint(state)
+        if hint is None:
+            return None
+        downstream_target, target_kind = hint
+        nodes = self._latest_action_intent_long_horizon_nodes(state, object_hint=downstream_target)
+        if not nodes:
+            return PlannerDecision(
+                thought=f"{thought} 先定位 mixed-horizon 竞争里更晚结果对应的真实目标 `{downstream_target}` 轨迹。",
+                tool="query_object",
+                args={"query": downstream_target, "limit": 24},
+            )
+        anchor_time = self._latest_action_intent_target_spatial_anchor_time(state)
+        latest_followup_end = self._latest_action_intent_followup_end_time(state)
+        after_time: float | None = None
+        if anchor_time is not None and latest_followup_end is not None:
+            after_time = max(anchor_time, latest_followup_end)
+        elif latest_followup_end is not None:
+            after_time = latest_followup_end
+        else:
+            after_time = anchor_time
+        min_start_time = None if after_time is None else float(after_time) + 0.15
+        selected = self._action_intent_select_long_horizon_node(
+            state=state,
+            hints=hints,
+            nodes=nodes,
+            min_start_time=min_start_time,
+            object_hint=downstream_target,
+        )
+        if selected is None:
+            return PlannerDecision(
+                thought=f"{thought} 继续重新检索 mixed-horizon 竞争里更晚结果对应的真实目标 `{downstream_target}`。",
                 tool="query_object",
                 args={"query": downstream_target, "limit": 24},
             )
@@ -9063,6 +9132,15 @@ class GraphAgentPlanner:
             )
             if finalize_access_or_space_revisit is not None:
                 return finalize_access_or_space_revisit
+            finalize_mixed_horizon_later_target_revisit = (
+                self._build_action_intent_finalize_withheld_mixed_horizon_later_target_revisit_decision(
+                    state=state,
+                    hints=hints,
+                    thought="why 题专用裁决刚被 finalizer 拦下，因为当前只看到了 `check/open` 这类立刻微结果；直接改追 mixed-horizon 竞争里更晚结果对应的真实目标，而不是继续围着动作物体做泛化补帧。",
+                )
+            )
+            if finalize_mixed_horizon_later_target_revisit is not None:
+                return finalize_mixed_horizon_later_target_revisit
             finalize_relocation_or_storage_revisit = (
                 self._build_action_intent_finalize_withheld_generic_relocation_or_storage_revisit_decision(
                     state=state,
@@ -9205,6 +9283,15 @@ class GraphAgentPlanner:
             )
             if finalize_access_or_space_revisit is not None:
                 return finalize_access_or_space_revisit
+            finalize_mixed_horizon_later_target_revisit = (
+                self._build_action_intent_finalize_withheld_mixed_horizon_later_target_revisit_decision(
+                    state=state,
+                    hints=hints,
+                    thought="why 题专用裁决刚被 finalizer 拦下，因为当前仍停留在 `check/open` 这类立刻微结果；优先转去追 mixed-horizon 竞争里更晚结果对应的真实目标，而不是继续围着动作物体做泛化补帧。",
+                )
+            )
+            if finalize_mixed_horizon_later_target_revisit is not None:
+                return finalize_mixed_horizon_later_target_revisit
             finalize_relocation_or_storage_revisit = (
                 self._build_action_intent_finalize_withheld_generic_relocation_or_storage_revisit_decision(
                     state=state,
@@ -12215,6 +12302,15 @@ class GraphAgentPlanner:
                 if precondition is not None:
                     return precondition
             if blocker_hint in {"post_action_evidence", "future_use_close_call"}:
+                finalize_mixed_horizon_later_target_revisit = (
+                    self._build_action_intent_finalize_withheld_mixed_horizon_later_target_revisit_decision(
+                        state=state,
+                        hints=hints,
+                        thought="why 题被 verifier/finalizer 拦下，因为 `check/open` 这类近窗解释还没压过更晚结果；直接追 mixed-horizon 竞争里更晚结果对应的真实目标，而不是继续围着动作物体泛化补帧。",
+                    )
+                )
+                if finalize_mixed_horizon_later_target_revisit is not None:
+                    return finalize_mixed_horizon_later_target_revisit
                 finalize_long_horizon_revisit = self._build_action_intent_finalize_withheld_long_horizon_revisit_decision(
                     state=state,
                     hints=hints,
@@ -12259,6 +12355,15 @@ class GraphAgentPlanner:
                 if extra_followup is not None:
                     return extra_followup
             if blocker_hint == "pairwise_close_call":
+                finalize_mixed_horizon_later_target_revisit = (
+                    self._build_action_intent_finalize_withheld_mixed_horizon_later_target_revisit_decision(
+                        state=state,
+                        hints=hints,
+                        thought="why 题被 verifier/finalizer 拦下，因为 `check/open` 这类近窗解释还没压过更晚结果；直接追 mixed-horizon 竞争里更晚结果对应的真实目标，而不是继续围着动作物体泛化补帧。",
+                    )
+                )
+                if finalize_mixed_horizon_later_target_revisit is not None:
+                    return finalize_mixed_horizon_later_target_revisit
                 finalize_long_horizon_revisit = self._build_action_intent_finalize_withheld_long_horizon_revisit_decision(
                     state=state,
                     hints=hints,
@@ -12327,6 +12432,13 @@ class GraphAgentPlanner:
                 window_s=8.0 if self._action_intent_needs_future_use_evidence(state=state, result=payload) else 6.0,
             )
             return extra_followup
+        finalize_mixed_horizon_later_target_revisit = self._build_action_intent_finalize_withheld_mixed_horizon_later_target_revisit_decision(
+            state=state,
+            hints=hints,
+            thought="why 题专用裁决被 verifier/finalizer 拦下，因为 `check/open` 这类近窗解释还没压过更晚结果；继续追 mixed-horizon 竞争里更晚结果对应的真实目标，优先找真正的后续落点证据。",
+        )
+        if finalize_mixed_horizon_later_target_revisit is not None:
+            return finalize_mixed_horizon_later_target_revisit
         finalize_long_horizon_revisit = self._build_action_intent_finalize_withheld_long_horizon_revisit_decision(
             state=state,
             hints=hints,

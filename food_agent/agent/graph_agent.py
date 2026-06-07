@@ -914,6 +914,15 @@ class GraphAgent:
                 if generic_relocation_or_storage_marker:
                     state.add_memory(generic_relocation_or_storage_marker)
                     continue
+                mixed_horizon_later_target_marker = (
+                    self._action_intent_resolution_mixed_horizon_later_target_marker(
+                        raw_result=raw_result,
+                        state=state,
+                    )
+                )
+                if mixed_horizon_later_target_marker:
+                    state.add_memory(mixed_horizon_later_target_marker)
+                    continue
             if self._action_intent_resolution_should_withhold_broad_generic_claim_without_direct_evidence(
                 raw_result=raw_result,
                 state=state,
@@ -1719,6 +1728,58 @@ class GraphAgent:
         if best_is_immediate:
             return not self._action_intent_choice_has_explicit_immediate_micro_outcome_evidence(best_choice, text)
         return not self._action_intent_choice_has_explicit_later_outcome_evidence(best_choice, best_categories, text)
+
+    def _action_intent_resolution_mixed_horizon_later_target_marker(
+        self,
+        *,
+        raw_result: dict[str, Any],
+        state: AgentState,
+    ) -> str:
+        if not self._action_intent_resolution_should_withhold_mixed_horizon_overclaim(
+            raw_result=raw_result,
+            state=state,
+        ):
+            return ""
+        pair = self._action_intent_resolution_competing_pair(raw_result=raw_result, state=state)
+        if pair is None:
+            return ""
+        best_index, competitor_index = pair
+        choices = [str(choice) for choice in getattr(state, "choices", [])]
+        categories_by_index = selected_choice_categories(choices, [best_index, competitor_index])
+        best_choice = choices[best_index].lower()
+        best_categories = set(categories_by_index.get(best_index) or set())
+        competitor_choice = choices[competitor_index].lower()
+        competitor_categories = set(categories_by_index.get(competitor_index) or set())
+        later_outcome_categories = {
+            "final_place_return",
+            "measure_weigh",
+            "transfer_contents",
+            "serve_consume",
+            "clean_dry",
+            "food_prep",
+            "discard",
+        }
+        if not self._action_intent_choice_is_immediate_micro_outcome_candidate(best_choice, best_categories):
+            return ""
+        if not (competitor_categories & later_outcome_categories):
+            return ""
+        action_object = self._action_intent_question_object(str(getattr(state, "question", "") or ""))
+        target = self._action_intent_choice_target_token_and_kind(choice=competitor_choice, action_object=action_object)
+        if target is None and "measure_weigh" in competitor_categories:
+            target = ("scale", "fixture")
+        if target is None and "final_place_return" in competitor_categories:
+            combined_text = f"{competitor_choice} {raw_result.get('reason') or ''} {raw_result.get('decisive_observation') or ''}".lower()
+            for token in ("fridge", "drawer", "cupboard", "rack", "dishwasher", "shelf"):
+                if token in combined_text:
+                    target = (token, "fixture" if token != "shelf" else "object")
+                    break
+        if target is None:
+            return ""
+        target_name, target_kind = target
+        return (
+            "action_intent_resolution_withheld_for_mixed_horizon_later_target=1 "
+            f"target={target_name} kind={target_kind}"
+        )
 
     def _action_intent_resolution_should_withhold_nonexclusive_concrete_late_anchor_claim(
         self,
