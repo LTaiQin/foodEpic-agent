@@ -905,6 +905,15 @@ class GraphAgent:
                 if generic_access_or_space_marker:
                     state.add_memory(generic_access_or_space_marker)
                     continue
+                generic_relocation_or_storage_marker = (
+                    self._action_intent_resolution_generic_relocation_or_storage_overclaim_marker(
+                        raw_result=raw_result,
+                        state=state,
+                    )
+                )
+                if generic_relocation_or_storage_marker:
+                    state.add_memory(generic_relocation_or_storage_marker)
+                    continue
             if self._action_intent_resolution_should_withhold_broad_generic_claim_without_direct_evidence(
                 raw_result=raw_result,
                 state=state,
@@ -1308,6 +1317,142 @@ class GraphAgent:
             target_name, target_kind = target
             return (
                 "action_intent_resolution_withheld_for_generic_access_or_space_enablement=1 "
+                f"target={target_name} kind={target_kind}"
+            )
+        return ""
+
+    def _action_intent_resolution_generic_relocation_or_storage_overclaim_marker(
+        self,
+        *,
+        raw_result: dict[str, Any],
+        state: AgentState,
+    ) -> str:
+        index = self._coerce_choice_index(raw_result.get("best_index"), state.choices)
+        if index is None:
+            return ""
+        question = str(getattr(state, "question", "") or "")
+        question_lc = question.lower()
+        best_choice = str(state.choices[index]).strip().lower()
+        if not self._action_intent_choice_is_final_placement_candidate(best_choice):
+            return ""
+        evidence_items = raw_result.get("candidate_evidence")
+        if not isinstance(evidence_items, list):
+            return ""
+        action_object = self._action_intent_question_object(question)
+        if not action_object:
+            return ""
+        global_context = " ".join(
+            str(item)
+            for item in list(getattr(state, "evidence_bundle", []))[-24:]
+            + list(getattr(state, "working_memory", []))[-24:]
+            if isinstance(item, str)
+        ).lower()
+        for item in evidence_items:
+            if not isinstance(item, dict):
+                continue
+            candidate_index = self._coerce_choice_index(item.get("index"), state.choices)
+            if candidate_index is None or candidate_index == index:
+                continue
+            try:
+                score = float(item.get("score") or 0.0)
+            except Exception:  # noqa: BLE001
+                score = 0.0
+            if score < 0.18:
+                continue
+            choice = str(state.choices[candidate_index]).strip().lower()
+            support = str(item.get("support") or "").strip().lower()
+            contradiction = str(item.get("contradiction") or "").strip().lower()
+            target_name = ""
+            target_kind = ""
+            if self._choice_is_same_object_active_use(choice, action_object) or self._action_intent_choice_is_direct_same_object_cleaning(
+                choice=choice,
+                support=support,
+                contradiction=contradiction,
+                action_object=action_object,
+                global_context=global_context,
+            ) or self._action_intent_choice_is_direct_same_object_role_use(
+                choice=choice,
+                support=support,
+                contradiction=contradiction,
+                action_object=action_object,
+                global_context=global_context,
+            ) or self._action_intent_choice_is_immediate_reuse_staging(
+                choice=choice,
+                support=support,
+                contradiction=contradiction,
+                action_object=action_object,
+                global_context=global_context,
+            ) or self._action_intent_choice_is_cleaning_tool_specific_target_use(
+                choice=choice,
+                support=support,
+                contradiction=contradiction,
+                action_object=action_object,
+                global_context=global_context,
+            ):
+                target_name = action_object
+                target_kind = "object"
+            elif self._action_intent_choice_is_exact_revealed_target_purpose(
+                question=question_lc,
+                choice=choice,
+                support=support,
+                contradiction=contradiction,
+                action_object=action_object,
+                global_context=global_context,
+            ) or self._action_intent_choice_is_exact_downstream_targeted_placement(
+                question=question_lc,
+                choice=choice,
+                support=support,
+                contradiction=contradiction,
+                action_object=action_object,
+                global_context=global_context,
+            ) or self._action_intent_choice_is_exact_immediate_downstream_use(
+                question=question_lc,
+                choice=choice,
+                support=support,
+                contradiction=contradiction,
+                action_object=action_object,
+                global_context=global_context,
+            ) or self._action_intent_choice_is_direct_fixture_or_workspace_enablement(
+                choice=choice,
+                support=support,
+                contradiction=contradiction,
+            ) or self._action_intent_choice_is_hidden_target_access_or_retrieval(
+                choice=choice,
+                support=support,
+                contradiction=contradiction,
+                global_context=global_context,
+            ):
+                target = self._action_intent_choice_target_token_and_kind(choice=choice, action_object=action_object)
+                if target is not None:
+                    target_name, target_kind = target
+            elif (
+                self._action_intent_choice_target_token_and_kind(choice=choice, action_object=action_object) is not None
+                and any(
+                    token in f"{support} {contradiction}"
+                    for token in (
+                        "direct next target",
+                        "right afterwards",
+                        "immediately afterwards",
+                        "picked up right afterwards",
+                        "picked up immediately afterwards",
+                        "picked up from behind",
+                        "hidden target",
+                        "revealed-target retrieval",
+                        "more specific than a generic put-away",
+                        "more specific than generic relocation",
+                        "真正目标",
+                        "直接下一目标",
+                        "后面目标",
+                    )
+                )
+            ):
+                target = self._action_intent_choice_target_token_and_kind(choice=choice, action_object=action_object)
+                if target is not None:
+                    target_name, target_kind = target
+            if not target_name or not target_kind:
+                continue
+            return (
+                "action_intent_resolution_withheld_for_generic_relocation_or_storage_enablement=1 "
                 f"target={target_name} kind={target_kind}"
             )
         return ""
