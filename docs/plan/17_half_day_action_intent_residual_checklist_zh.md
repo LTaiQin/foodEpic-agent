@@ -17,7 +17,7 @@
 - 已提交进展：`16.49 generic measurement-meta -> exact measurement target`
 - 当前待提交进展：`16.50 pick up phone generic-measure -> exact ingredient record target`
 - 当前专项回归：`pytest -q tests/test_graph_agent.py -k 'action_intent'`
-- 当前已验证结果：`348 passed, 344 deselected`
+- 当前已验证结果：`350 passed, 344 deselected`
 
 ## 17.2 半天执行原则
 
@@ -148,13 +148,13 @@
 - [x] 检查现有 `transport-vs-use` frame selection 和 future-use route。
 - [x] 补“拿起后只是放下/挪动”的测试，防止误判 clean/dry。
 - [x] 补“短暂接触手部”的测试，防止被泛化成 clean counter。
-- [ ] 补“真正擦台面需要 sweep/contact target”的 finish gate。
+- [x] 补“真正擦台面需要 sweep/contact target”的 finish gate。
 
 完成标准：
 
-- [ ] 不再只因纸巾靠近台面就判 clean counter。
-- [ ] 不再只因纸巾被拿起就判 dry。
-- [ ] 需要看到手部接触、表面擦拭、或最终放置链条。
+- [x] 不再只因纸巾靠近台面就判 clean counter。
+- [x] 不再只因纸巾被拿起就判 dry。
+- [x] 需要看到手部接触、表面擦拭、或最终放置链条。
 
 本轮进展：
 
@@ -166,7 +166,11 @@
 - [x] 新增并通过 1 条 Bucket D 反例测试，覆盖 `dish cloth` 只是被暂放到 worktop within reach、但没有 crumbs/spill/visible target 时，不再提前推成 `wipe the worktop`，而是继续 withheld。
 - [x] 补上 `surface wipe` finalizer 反例：即使已经出现 `crumbs / worktop target`，但还没有真正 `wiping stroke / sweep` 时，`wipe the worktop` 仍必须继续 withheld。
 - [x] 新增并通过 1 条 Bucket D 定向测试，覆盖 `dish cloth` 放到 crumbs 旁边、`needed_observation` 仍是“是否真的擦过台面”时，finalizer 不能提前收口到 `wipe the worktop`。
-- [x] 本轮专项回归：`336 passed, 344 deselected`
+- [x] 收口 `clean up the kitchen counter` 这类表面清洁表述在 unresolved rerank 中的残差。此前 `wipe the worktop` 已被 gate 住，但 `clean up the kitchen counter` 仍可能仅凭 `near the counter / touches the counter area / briefly pressed to the surface` 之类弱接触证据提前收口；现在 `missing_surface_wiping_evidence` 已扩到这类 surface-cleanup 候选，并复用 `weak_surface_contact_cleanup_claim` 统一拦截“只有接触、没有 sweep/contact chain”的 overclaim。
+- [x] 新增并通过 2 条 Bucket D 定向测试，分别覆盖：
+  - finalizer 在只有短暂表面接近/接触时，不能直接收口到 `clean up the kitchen counter.`；
+  - unresolved rerank 在没有 `wipe sweep / repeated wiping / clear before-after cleanup result` 时，必须继续 withheld。
+- [x] 本轮专项回归：`350 passed, 344 deselected`
 
 ## 17.8 Residual Bucket E：scale / tare / zero / measurement state-change
 

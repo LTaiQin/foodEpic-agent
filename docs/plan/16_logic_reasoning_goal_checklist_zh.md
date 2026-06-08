@@ -185,6 +185,13 @@
 - 本轮提交：新增并通过 2 条定向测试，分别保护：
   - `receptacle_outcome` 型 why close-call 会在第一次歧义时直接进入 `followup_transition`
   - 普通 `future_use` 型 why 题仍保持原来的初始 `followup`，不会被误改成近窗密采样
+- 本轮提交：Bucket D 的 `surface cleanup` finish gate 继续压实。此前 `wipe the worktop` 已经要求 `crumbs/spill/ready-for-wiping` 一类更具体的 staged-wipe 语义，但 `clean up the kitchen counter` 这类同类表述在 unresolved rerank 中仍可能仅凭“接近台面/短暂接触台面”而过早收口。本轮改为：
+  - `missing_surface_wiping_evidence` 不再只覆盖字面上的 `wipe ... worktop/counter`，而是扩到所有 `clean/wipe + surface/counter/worktop` 的表面清洁类候选；
+  - `weak_surface_contact_cleanup_claim` 也接入 unresolved semantic gap，若证据只有 `touches the counter area / brief press / nearby messy spot`，但没有 `wipe sweep / repeated wiping / clear before-after cleanup result`，则 unresolved rerank 必须继续 withheld。
+- 本轮提交：新增并通过 2 条 Bucket D 定向测试，分别覆盖：
+  - finalizer 在 `paper towel` 只有短暂靠近/接触台面时，不能直接收口到 `clean up the kitchen counter.`；
+  - unresolved rerank 在只有 `surface proximity/contact`、没有 `sweep/contact chain` 时，不能把 `clean up the kitchen counter.` 当成最终答案。
+- 本轮提交：专项回归已更新到 `350 passed, 344 deselected`
 - 本轮提交：why 题的首次主动关键帧前移继续扩展到两类高频歧义：
   - `tap kitchen scale / press button / push switch` 这类 `state_change / open-close vs measure-use` 题，不再一上来稀疏补 8 秒长窗；现在会先围绕动作尾部后的 2 到 4 秒做 `followup_transition` 密采样，优先确认显示是否开机、归零、变化或出现其它决定性状态改变
   - `pick up tea towel / paper towel / cloth` 这类 `transport-vs-use` 题，当模型已经明确承认“要看动作后是拿去擦手/擦台面，还是只是放下/挪开”时，会先补动作后近窗关键帧，再决定是否需要回补 `precontext`；也就是说，agent 会先验证真实使用链，而不是默认先回头找前置状态

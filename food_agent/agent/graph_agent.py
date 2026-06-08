@@ -2974,6 +2974,9 @@ class GraphAgent:
         if self._action_intent_text_has_negative_evidence(context_lc) and has_modal_generic_support:
             gaps.append("candidate_explicitly_lacks_observed_support")
         has_direct_positive_support = self._action_intent_text_has_direct_positive_evidence(support_lc)
+        question_lc = str(getattr(state, "question", "") or "").lower()
+        action_object = self._action_intent_question_object(question_lc)
+        global_context = self._action_intent_scoped_global_context(state).lower()
         if "dry" in choice_lc and "hand" in choice_lc:
             if (
                 has_modal_generic_support
@@ -3024,7 +3027,18 @@ class GraphAgent:
                 )
             ):
                 gaps.append("exact_workspace_without_exact_use")
-        if "wipe" in choice_lc and any(term in choice_lc for term in ("surface", "counter", "worktop", "table", "台面", "桌")):
+        if (
+            any(term in choice_lc for term in ("wipe", "clean", "擦", "清洁"))
+            and any(term in choice_lc for term in ("surface", "counter", "countertop", "worktop", "table", "台面", "桌"))
+        ):
+            if self._action_intent_choice_is_weak_surface_contact_cleanup_claim(
+                choice=choice_lc,
+                support=support_lc,
+                contradiction=str(target_row.get("contradiction") or "").lower(),
+                action_object=action_object,
+                global_context=global_context,
+            ):
+                gaps.append("missing_surface_wiping_evidence")
             if any(term in support_lc for term in ("not yet shown", "no wiping motion", "未显示", "还未显示", "尚未显示")):
                 gaps.append("missing_surface_wiping_evidence")
             if (
@@ -4689,6 +4703,8 @@ class GraphAgent:
         has_surface_contact_only = any(
             token in support_lc
             for token in (
+                "touches the counter area",
+                "touches the counter surface",
                 "contact with the counter area",
                 "contact with the counter",
                 "moved across/onto the countertop",
@@ -4708,6 +4724,7 @@ class GraphAgent:
         has_missing_cleaning_result = any(
             token in contradiction_lc
             for token in (
+                "no wipe sweep",
                 "no extended wiping motion",
                 "no visible spill",
                 "no visible residue",
