@@ -164,7 +164,9 @@
 - [x] 新增并通过 1 条定向测试，覆盖 `pick up paper towel` 后证据明确指向双手擦拭时，不再停在 `dry hand`，而会提升到 `wipe both hands`。
 - [x] 收紧 `surface_wipe_preparation`：此前 `non-storage` 很容易把“只是暂放在台面上”提前翻成 `wipe the worktop`；现在除了“不是收纳”，还必须出现 `crumbs / spill / surface target / ready for wiping / next visible cleaning target` 这类更具体的台面目标或 staged-wipe 信号。
 - [x] 新增并通过 1 条 Bucket D 反例测试，覆盖 `dish cloth` 只是被暂放到 worktop within reach、但没有 crumbs/spill/visible target 时，不再提前推成 `wipe the worktop`，而是继续 withheld。
-- [x] 本轮专项回归：`335 passed, 344 deselected`
+- [x] 补上 `surface wipe` finalizer 反例：即使已经出现 `crumbs / worktop target`，但还没有真正 `wiping stroke / sweep` 时，`wipe the worktop` 仍必须继续 withheld。
+- [x] 新增并通过 1 条 Bucket D 定向测试，覆盖 `dish cloth` 放到 crumbs 旁边、`needed_observation` 仍是“是否真的擦过台面”时，finalizer 不能提前收口到 `wipe the worktop`。
+- [x] 本轮专项回归：`336 passed, 344 deselected`
 
 ## 17.8 Residual Bucket E：scale / tare / zero / measurement state-change
 
