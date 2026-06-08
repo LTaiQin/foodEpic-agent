@@ -10941,6 +10941,47 @@ class GraphAgentPlanner:
             )
         if isinstance(last_result, dict) and last_tool.get("tool") == "rank_choices_from_state" and last_result.get("best_index") is not None:
             if self._action_intent_text_fallback_ready(state):
+                latest_resolution = self._latest_action_intent_resolution_payload(state)
+                latest_action_intent_result = latest_resolution[1] if latest_resolution is not None else {}
+                latest_needed_observation = str(latest_action_intent_result.get("needed_observation") or "").lower()
+                if (
+                    self._is_action_intent_task(state)
+                    and isinstance(latest_action_intent_result, dict)
+                    and any(
+                        isinstance(item, str)
+                        and item.startswith("action_intent_resolution_withheld_for_missing_state_change_prereq=1")
+                        for item in list(getattr(state, "working_memory", []))[-12:]
+                    )
+                    and (
+                        self._action_intent_resolution_should_backfill_precondition(
+                            state=state,
+                            hints=hints,
+                            result=latest_action_intent_result,
+                        )
+                        or any(
+                            marker in latest_needed_observation
+                            for marker in (
+                                "before the tap",
+                                "already on",
+                                "scale was already on",
+                                "container was already on the scale",
+                                "container already on the scale",
+                                "container on the scale before the tap",
+                                "bowl already on the scale",
+                            )
+                        )
+                    )
+                ):
+                    precondition = self._build_action_intent_precondition_sampling_decision(
+                        state=state,
+                        hints=hints,
+                        focus=str(
+                            latest_action_intent_result.get("needed_observation")
+                            or "textual_fallback_missing_state_change_prereq"
+                        ),
+                    )
+                    if precondition is not None:
+                        return precondition
                 if (
                     self._is_action_intent_task(state)
                     and any(

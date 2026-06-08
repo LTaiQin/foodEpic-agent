@@ -270,6 +270,14 @@
 - 本轮提交：新增并通过 1 条定向测试，覆盖：
   - `flip orange cloth` 的 close-call 在 repeated failure 之后，即使已经退到 textual fallback，也仍优先围绕动作尾部补 `followup_transition`，而不是退回泛化补帧。
 - 本轮提交：专项回归维持 `368 passed, 344 deselected`
+- 本轮提交：再补一条 repeated textual fallback 的对称性缺口：`missing_state_change_prereq`。此前 `tap kitchen scale` 这类题在 verifier-blocked 路径上已经会优先回补 `precontext`，但如果随后连续视觉失败并退到 `need_alternative_evidence_path + rank_choices_from_state`，planner 仍可能被短时序 `inspect_visual_evidence` 或其它 generic fallback 抢走，继续盯动作后而不是动作前状态。
+- 本轮改为：
+  - 只要最近 working memory 里仍保留 `action_intent_resolution_withheld_for_missing_state_change_prereq=1`；
+  - 且最近 action-intent 专用裁决仍明确要求回补 precondition；
+  - 那么在 textual fallback 恢复入口，也继续优先走 `precontext`，而不是退回 generic raw fallback。
+- 本轮提交：新增并通过 1 条定向测试，覆盖：
+  - `tap kitchen scale` 的 textual fallback 在 repeated failure 后，仍优先补 `precontext` 去确认“tap 前是否已开机/是否已有容器”，而不是继续盯动作后短窗。
+- 本轮提交：专项回归已进一步提升到 `370 passed, 344 deselected`
   - `pick up pot` 时若证据已经明确写出 `brought to the sink and tilted to pour`，则 `to empty the water.` 会压过弱 `to check the boiling water.`。
 - 本轮提交：同时回归通过 3 条关键保护：
   - `check label vs put back` 的 later-target marker 仍会在“尚未看清是否回冰箱”时继续 withheld；

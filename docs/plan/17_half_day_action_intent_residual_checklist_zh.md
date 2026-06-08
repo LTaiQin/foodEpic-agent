@@ -58,6 +58,12 @@
   - 说明真正缺的是动作尾部后的近窗直接结果，而不是泛化长窗；
   - 但 repeated vision failure 后如果系统退到 `need_alternative_evidence_path + rank_choices_from_state`，planner 仍可能回到 generic `recover_frames/segment`，没有继续沿 `followup_transition` 查最关键的即时结果。
 - [x] 当前最新专项回归：`368 passed, 344 deselected`
+- [x] 新 residual bucket：`textual fallback drops precondition recovery back to generic post-action review`
+- [x] 代表 case：
+  - `graph_agent` / verifier 已经明确写出 `action_intent_resolution_withheld_for_missing_state_change_prereq=1`；
+  - 说明真正缺的是动作前状态，例如 `tap 前是否已开机 / 是否已有容器`；
+  - 但 repeated vision failure 后如果系统退到 `need_alternative_evidence_path + rank_choices_from_state`，planner 仍可能继续看动作后短窗，而不是持续优先回补 `precontext`。
+- [x] 当前最新专项回归：`368 passed, 344 deselected`
 
 ## 17.2 半天执行原则
 
@@ -196,6 +202,14 @@
 - [x] 新增并通过 1 条定向测试，覆盖：
   - `flip orange cloth` 的 close-call 在 repeated failure 后退到 textual fallback 时，仍优先补 `followup_transition`，而不是 generic raw fallback。
 - [x] 本轮专项回归：`368 passed, 344 deselected`
+- [x] 收口 `textual fallback drops precondition recovery back to generic post-action review`。此前 `missing_state_change_prereq` 已经能在 verifier-blocked 路径上稳定触发 `precontext`，但 repeated vision failure 之后如果退到 `need_alternative_evidence_path + rank_choices_from_state`，planner 仍可能继续看动作后短窗或短时序复核，漏掉真正决定 `turn on` vs `zero out` 的动作前状态。
+- [x] 现在 textual fallback 的恢复入口也对齐：
+  - 只要最近 working memory 里仍有 `action_intent_resolution_withheld_for_missing_state_change_prereq=1`；
+  - 且最近专用裁决仍明确要求回补 precondition；
+  - 就继续优先走 `precontext`，而不是退回 generic post-action review。
+- [x] 新增并通过 1 条定向测试，覆盖：
+  - `tap kitchen scale` 的 textual fallback 在 repeated failure 后，仍优先补 `precontext` 去确认“tap 前是否已开机/是否已有容器”，而不是继续看动作后短窗。
+- [x] 本轮专项回归：`370 passed, 344 deselected`
 
 补充进展：
 
