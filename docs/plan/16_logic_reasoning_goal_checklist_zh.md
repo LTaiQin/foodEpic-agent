@@ -212,6 +212,18 @@
   - `tap kitchen scale` 无 tool trace 时，首次补证据优先进入 `followup_transition`
   - `tap kitchen scale` 在首次 `infer_action_intent` 仍不确定时，也会直接进入近窗 `followup_transition`
   - `pick up tea towel` 的 `transport-vs-use` close-call 会在第一次歧义时优先补动作后近窗关键帧，而不会先被 `precontext` 截走
+- 本轮提交：Bucket F 的最后一条 later-outcome 残差已正式收口。此前系统已经能挡住弱 `check label / check boiling / check contents` 的过早定答，也能在 close-call 下写出 `fridge/sink/plate` later-target marker 去追更晚证据；但如果证据里已经直接出现 `placed back into the fridge`、`tilted to pour into the sink` 这类明确 later outcome，系统仍更偏向继续 withheld，而不是直接翻到真实 later candidate。本轮改为：
+  - finalizer 新增 `explicit later outcome over weak inspection` override：若 top 候选只是弱 inspection，且自身没有直接 inspection chain，但竞争项已经给出显式 later outcome，则直接翻到 later candidate；
+  - unresolved rerank 同步新增同类 override，但只作用于真正的 inspection mixed-horizon 题，不作用于 `move/transfer` 这类“下游拿取不是当前直接目的”的题，避免误伤已有 Bucket C/B 逻辑；
+  - later outcome 证据还额外要求是“已经发生”的结果，不接受 `could/may/not yet visible` 这类推测式表述，因此原有 `check label vs put back`、`check boiling vs empty` close-call 仍保持 withheld 并继续追更晚节点。
+- 本轮提交：新增并通过 2 条 Bucket F 定向测试，分别覆盖：
+  - `take bottle` 时若证据已经明确写出 `placed back into the fridge`，则 `to put the bottle back in the fridge.` 会压过弱 `to check the label.`；
+  - `pick up pot` 时若证据已经明确写出 `brought to the sink and tilted to pour`，则 `to empty the water.` 会压过弱 `to check the boiling water.`。
+- 本轮提交：同时回归通过 3 条关键保护：
+  - `check label vs put back` 的 later-target marker 仍会在“尚未看清是否回冰箱”时继续 withheld；
+  - `check boiling vs empty` 的 weak-inspection close-call 仍会在“还没看清是否真的倒向 sink”时继续 withheld；
+  - 中文 `transfer` 场景下“后续拿起海绵”仍不会被误翻成当前动作的直接目的。
+- 本轮提交：专项回归已更新到 `355 passed, 344 deselected`
 - 本轮提交：同时收紧了 `transport-vs-use` 的前移触发门槛。只有模型已经显式承认 `need_more_evidence / ambiguity / whether X or Y` 时，才会抢先看近窗后果；普通高置信但只是泛化“暂时看不清”的 towel/cloth 题仍保持原有 `precontext` 路线，不会被误伤
 - 本轮提交：why 初始化阶段的取帧策略也不再一刀切。过去只要还没有当前题时间窗帧，`planner` 就会统一先抽 `segment`；现在对于一开始就属于 `strict visual disambiguation` 的 why 题，会直接走 `initial transition probe`，先围绕动作尾部和后续短窗口抽更密的关键帧，而不是先看一组静态动作片段
 - 本轮提交：这一步当前先覆盖：

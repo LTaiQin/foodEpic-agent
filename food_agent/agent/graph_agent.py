@@ -898,6 +898,12 @@ class GraphAgent:
                 state.add_memory("action_intent_resolution_withheld_for_weak_surface_wiping_evidence=1")
                 continue
             elif self._action_intent_resolution_should_withhold_weak_cooking_inspection_claim(raw_result=raw_result, state=state):
+                inspection_later_override = self._action_intent_resolution_explicit_later_outcome_override(
+                    raw_result=raw_result,
+                    state=state,
+                )
+                if inspection_later_override is not None:
+                    return inspection_later_override
                 mixed_horizon_later_target_marker = (
                     self._action_intent_resolution_mixed_horizon_later_target_marker(
                         raw_result=raw_result,
@@ -957,6 +963,12 @@ class GraphAgent:
                 if generic_relocation_or_storage_marker:
                     state.add_memory(generic_relocation_or_storage_marker)
                     continue
+                inspection_later_override = self._action_intent_resolution_explicit_later_outcome_override(
+                    raw_result=raw_result,
+                    state=state,
+                )
+                if inspection_later_override is not None:
+                    return inspection_later_override
                 mixed_horizon_later_target_marker = (
                     self._action_intent_resolution_mixed_horizon_later_target_marker(
                         raw_result=raw_result,
@@ -2066,6 +2078,107 @@ class GraphAgent:
             f"target={target_name} kind={target_kind}"
         )
 
+    def _action_intent_resolution_explicit_later_outcome_override(
+        self,
+        *,
+        raw_result: dict[str, Any],
+        state: AgentState,
+    ) -> tuple[int, str, float] | None:
+        choices = [str(choice) for choice in getattr(state, "choices", [])]
+        best_index = self._coerce_choice_index(raw_result.get("best_index"), state.choices)
+        if best_index is None:
+            return None
+        question = str(getattr(state, "question", "") or "").lower()
+        if any(token in question for token in ("move ", "transfer ", "shift ", "remove ", "clear ")):
+            return None
+        action_object = self._action_intent_question_object(question)
+        candidate_indices = [best_index]
+        for item in raw_result.get("candidate_evidence") or []:
+            if not isinstance(item, dict):
+                continue
+            index = self._coerce_choice_index(item.get("index"), state.choices)
+            if index is not None:
+                candidate_indices.append(index)
+        categories_by_index = selected_choice_categories(choices, candidate_indices)
+        best_choice = choices[best_index].lower()
+        best_text = " ".join(
+            str(raw_result.get(key) or "")
+            for key in ("reason", "decisive_observation", "needed_observation")
+        ).lower()
+        global_context = self._action_intent_scoped_global_context(state).lower()
+        best_is_inspection = self._action_intent_choice_is_direct_same_object_inspection_or_alignment(
+            choice=best_choice,
+            support=best_text,
+            contradiction="",
+            action_object=action_object,
+            global_context=global_context,
+        ) or self._action_intent_choice_is_brief_cooking_inspection_over_disposal(
+            choice=best_choice,
+            support=best_text,
+            contradiction="",
+            action_object=action_object,
+            global_context=global_context,
+        )
+        if not best_is_inspection and self._action_intent_choice_is_immediate_micro_outcome_candidate(
+            best_choice,
+            set(categories_by_index.get(best_index) or set()),
+        ):
+            best_is_inspection = True
+        if not best_is_inspection and any(
+            token in best_choice
+            for token in (
+                "check the boiling water",
+                "check the contents",
+                "check the consistency",
+                "see if it is cooked",
+                "see whether the pasta is done",
+            )
+        ):
+            best_is_inspection = True
+        if not best_is_inspection:
+            return None
+        if self._action_intent_choice_has_explicit_immediate_micro_outcome_evidence(best_choice, best_text):
+            return None
+        later_candidates: list[tuple[float, int, str]] = []
+        for item in raw_result.get("candidate_evidence") or []:
+            if not isinstance(item, dict):
+                continue
+            index = self._coerce_choice_index(item.get("index"), state.choices)
+            if index is None or index == best_index:
+                continue
+            choice = choices[index].lower()
+            categories = set(categories_by_index.get(index) or set())
+            evidence_text = f"{str(item.get('support') or '').lower()} {str(item.get('contradiction') or '').lower()}"
+            if not self._action_intent_choice_has_explicit_later_outcome_evidence(choice, categories, evidence_text):
+                continue
+            if any(
+                token in evidence_text
+                for token in (
+                    "could still",
+                    "could be",
+                    "may still",
+                    "may be",
+                    "might still",
+                    "might be",
+                    "not yet visible",
+                    "still not visible",
+                    "尚未看清",
+                    "可能会",
+                    "还可能",
+                )
+            ):
+                continue
+            candidate_score = self._coerce_confidence(item.get("score"), default=0.0)
+            later_candidates.append((candidate_score, index, choices[index]))
+        if not later_candidates:
+            return None
+        later_candidates.sort(key=lambda item: (-item[0], item[1]))
+        alt_score, alt_index, alt_choice = later_candidates[0]
+        best_confidence = self._coerce_confidence(raw_result.get("confidence"), default=0.78)
+        if best_confidence > alt_score + 0.4 and best_confidence >= 0.9:
+            return None
+        return alt_index, alt_choice, min(max(0.52 + max(alt_score, 0.0) * 0.3, 0.52), 0.78)
+
     def _action_intent_resolution_should_withhold_nonexclusive_concrete_late_anchor_claim(
         self,
         *,
@@ -2923,6 +3036,17 @@ class GraphAgent:
                 f"action_intent_record_target_override_best_index={record_target_override[0]} score={best_score:.2f}"
             )
             return record_target_override
+        inspection_later_outcome_override = self._override_weak_inspection_with_explicit_later_outcome_candidate(
+            state=state,
+            candidate_rows=candidate_rows,
+            unresolved_best_index=best_index,
+            unresolved_best_score=best_score,
+        )
+        if inspection_later_outcome_override is not None:
+            state.add_memory(
+                f"action_intent_inspection_later_outcome_override_best_index={inspection_later_outcome_override[0]} score={best_score:.2f}"
+            )
+            return inspection_later_outcome_override
         second_score = ranked[1][0] if len(ranked) >= 2 else 0.0
         semantic_gaps = self._action_intent_unresolved_semantic_gaps(
             state=state,
@@ -3490,6 +3614,35 @@ class GraphAgent:
                     "放上秤",
                     "称量",
                     "用于称",
+                )
+            )
+        if "transfer_contents" in categories or "serve_consume" in categories or any(
+            token in choice_lc
+            for token in ("empty", "pour", "drain", "serve", "tip out", "倒", "盛", "沥干")
+        ):
+            return any(
+                token in text_lc
+                for token in (
+                    "tilted to pour",
+                    "tilted toward the sink",
+                    "brought to the sink",
+                    "emptied into the sink",
+                    "poured into the sink",
+                    "pour the water out",
+                    "pour out",
+                    "empties the water",
+                    "emptied the water",
+                    "drained",
+                    "carried over the plate",
+                    "carried over the bowl",
+                    "served onto the plate",
+                    "served into the bowl",
+                    "倾倒到水槽",
+                    "拿到水槽边倒",
+                    "倒出",
+                    "倒水",
+                    "盛到盘子里",
+                    "盛到碗里",
                 )
             )
         return self._action_intent_text_has_direct_positive_evidence(text_lc)
@@ -4987,6 +5140,106 @@ class GraphAgent:
         exact_candidates.sort(key=lambda item: (-item[0], item[1]))
         alt_score, alt_index, alt_choice = exact_candidates[0]
         return alt_index, alt_choice, min(max(0.44 + max(alt_score, 0.0) * 0.42, 0.44), 0.72)
+
+    def _override_weak_inspection_with_explicit_later_outcome_candidate(
+        self,
+        *,
+        state: AgentState,
+        candidate_rows: list[dict[str, Any]],
+        unresolved_best_index: int,
+        unresolved_best_score: float,
+    ) -> tuple[int, str, float] | None:
+        choices = [str(choice) for choice in getattr(state, "choices", [])]
+        if not (0 <= unresolved_best_index < len(choices)):
+            return None
+        question = str(getattr(state, "question", "") or "").lower()
+        if any(token in question for token in ("move ", "transfer ", "shift ", "remove ", "clear ")):
+            return None
+        action_object = self._action_intent_question_object(question)
+        categories_by_index = selected_choice_categories(
+            choices,
+            [int(row.get("index", -1)) for row in candidate_rows if isinstance(row, dict)],
+        )
+        best_row = next((row for row in candidate_rows if int(row.get("index", -1)) == unresolved_best_index), None)
+        if best_row is None:
+            return None
+        best_choice = choices[unresolved_best_index].lower()
+        best_support = str(best_row.get("support") or "").lower()
+        best_contradiction = str(best_row.get("contradiction") or "").lower()
+        global_context = self._action_intent_scoped_global_context(state).lower()
+        best_categories = set(categories_by_index.get(unresolved_best_index) or set())
+        best_is_inspection = self._action_intent_choice_is_direct_same_object_inspection_or_alignment(
+            choice=best_choice,
+            support=best_support,
+            contradiction=best_contradiction,
+            action_object=action_object,
+            global_context=global_context,
+        ) or self._action_intent_choice_is_brief_cooking_inspection_over_disposal(
+            choice=best_choice,
+            support=best_support,
+            contradiction=best_contradiction,
+            action_object=action_object,
+            global_context=global_context,
+        )
+        if not best_is_inspection and self._action_intent_choice_is_immediate_micro_outcome_candidate(best_choice, best_categories):
+            best_is_inspection = True
+        if not best_is_inspection and any(
+            token in best_choice
+            for token in (
+                "check the boiling water",
+                "check the contents",
+                "check the consistency",
+                "see if it is cooked",
+                "see whether the pasta is done",
+            )
+        ):
+            best_is_inspection = True
+        if not best_is_inspection:
+            return None
+        if self._action_intent_choice_has_explicit_immediate_micro_outcome_evidence(
+            best_choice,
+            f"{best_support} {best_contradiction}",
+        ):
+            return None
+        later_candidates: list[tuple[float, int, str]] = []
+        for row in candidate_rows:
+            index = int(row.get("index", -1))
+            if index == unresolved_best_index or not (0 <= index < len(choices)):
+                continue
+            choice = choices[index].lower()
+            categories = set(categories_by_index.get(index) or set())
+            evidence_text = f"{str(row.get('support') or '').lower()} {str(row.get('contradiction') or '').lower()}"
+            if not self._action_intent_choice_has_explicit_later_outcome_evidence(choice, categories, evidence_text):
+                continue
+            if any(
+                token in evidence_text
+                for token in (
+                    "could still",
+                    "could be",
+                    "may still",
+                    "may be",
+                    "might still",
+                    "might be",
+                    "not yet visible",
+                    "still not visible",
+                    "尚未看清",
+                    "可能会",
+                    "还可能",
+                )
+            ):
+                continue
+            adjusted_score = float(row.get("adjusted_score") or 0.0)
+            if adjusted_score < 0.12:
+                continue
+            later_candidates.append((adjusted_score, index, choices[index]))
+        if not later_candidates:
+            return None
+        later_candidates.sort(key=lambda item: (-item[0], item[1]))
+        alt_score, alt_index, alt_choice = later_candidates[0]
+        if unresolved_best_score > alt_score + 0.22 and unresolved_best_score >= 0.8:
+            return None
+        confidence = min(max(0.48 + max(alt_score, 0.0) * 0.38, 0.48), 0.76)
+        return alt_index, alt_choice, confidence
 
     def _action_intent_question_object(self, question: str) -> str:
         match = re.search(r"<([^>]+)>", str(question or "").lower())

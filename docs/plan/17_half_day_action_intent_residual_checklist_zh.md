@@ -251,7 +251,7 @@
 
 - [x] 不把“标签朝外/可见”直接当成 check label。
 - [x] 不把“短暂看锅”直接当成 check boiling，除非有停留/查看链。
-- [ ] 如果后续倒出、归位或使用发生，应该能覆盖 inspection 误判。
+- [x] 如果后续倒出、归位或使用发生，应该能覆盖 inspection 误判。
 
 本轮进展：
 
@@ -275,7 +275,14 @@
 - [x] 新增并通过 2 条 Bucket F 定向测试，分别覆盖：
   - `lift frying pan` 时 `check the contents of the pan` vs `serve the vegetables` 的 finalizer close-call，会同时写入 `target=plate` later-target marker 和明确的 `needed_observation`；
   - planner 在只有 `working_memory` 里的 `plate-serving` inspection marker 时，也会直接利用该 marker 进入 relation revisit，优先去看 frying pan 是否真的被带到 plate 上方。
-- [x] 本轮专项回归：`347 passed, 344 deselected`
+- [x] 收口 `inspection` 在“later outcome 已经明确发生”时仍只会 withheld、不会直接翻正的最后缺口。此前系统已经能在 `label vs put back`、`check boiling vs empty` close-call 中继续追更晚目标，但当证据里已经直接出现 `placed back into the fridge`、`tilted to pour into the sink` 这类明确 later outcome 时，仍缺少一条稳定的正向翻正链。本轮改为：
+  - finalizer 新增 `explicit later outcome over weak inspection` override：若 top 候选只是弱 `check label / check boiling / check contents`，且自身没有明确 inspection chain，但竞争项已经给出显式 later outcome，则直接翻到 later candidate；
+  - unresolved rerank 同步新增同类 override，但仅限真正的 inspection mixed-horizon 题，不作用于 `move/transfer` 这类“下游拿取不是当前直接目的”的题；
+  - later outcome 证据同时要求是“已经发生”的结果，不接受 `could/may/not yet visible` 这类推测式表述，保留原有 close-call withheld 行为。
+- [x] 新增并通过 2 条 Bucket F 定向测试，分别覆盖：
+  - `take bottle` 时若证据已经明确写出 `placed back into the fridge`，则 `to put the bottle back in the fridge.` 会压过弱 `to check the label.`；
+  - `pick up pot` 时若证据已经明确写出 `brought to the sink and tilted to pour`，则 `to empty the water.` 会压过弱 `to check the boiling water.`。
+- [x] 本轮专项回归：`355 passed, 344 deselected`
 
 ## 17.10 半天验收命令
 
@@ -295,14 +302,14 @@ pytest -q tests/test_graph_agent.py -k 'pairwise and action_intent'
 
 半天结束前必须记录：
 
-- [ ] 当前 `action_intent` 通过数量。
+- [x] 当前 `action_intent` 通过数量。
 - [x] 当前 `action_intent` 通过数量。
 - [ ] 新增了哪些 residual bucket。
 - [ ] 哪些 bucket 已提交。
 - [ ] 哪些 bucket 还没做。
 - [ ] 是否存在未提交但已验证通过的改动。
 - [x] 是否存在未提交但已验证通过的改动。
-- [ ] 是否存在失败测试或已知回归风险。
+- [x] 是否存在失败测试或已知回归风险。
 
 ## 17.11 半天结束时的交付物
 
