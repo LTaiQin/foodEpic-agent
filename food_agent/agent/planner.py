@@ -6291,6 +6291,16 @@ class GraphAgentPlanner:
     ) -> bool:
         if not self._is_action_intent_task(state):
             return False
+        recent_finalize_marker = self._action_intent_recent_later_outcome_finalize_withheld_marker(state)
+        if recent_finalize_marker in {
+            "action_intent_resolution_withheld_for_nonexclusive_concrete_late_anchor=1",
+            "action_intent_resolution_withheld_for_timeline_review_bias_gap=1",
+            "action_intent_resolution_withheld_for_workspace_or_final_placement_claim=1",
+            "action_intent_resolution_withheld_for_generic_hand_free_enablement=1",
+            "action_intent_resolution_withheld_for_generic_access_or_space_enablement=1",
+            "action_intent_resolution_withheld_for_generic_relocation_or_storage_enablement=1",
+        }:
+            return True
         if self._action_intent_followup_attempt_count(state) < 1 and not self._latest_action_intent_timeline_review(state):
             return False
         bias_profile = self._action_intent_timeline_review_bias_profile(state)
@@ -6358,6 +6368,9 @@ class GraphAgentPlanner:
             return True
         recent_finalize_marker = self._action_intent_recent_later_outcome_finalize_withheld_marker(state)
         if recent_finalize_marker in {
+            "action_intent_resolution_withheld_for_nonexclusive_concrete_late_anchor=1",
+            "action_intent_resolution_withheld_for_timeline_review_bias_gap=1",
+            "action_intent_resolution_withheld_for_workspace_or_final_placement_claim=1",
             "action_intent_resolution_withheld_for_generic_hand_free_enablement=1",
             "action_intent_resolution_withheld_for_generic_access_or_space_enablement=1",
             "action_intent_resolution_withheld_for_generic_relocation_or_storage_enablement=1",
@@ -10989,6 +11002,22 @@ class GraphAgentPlanner:
                     )
                     if finalize_hand_free_revisit is not None:
                         return finalize_hand_free_revisit
+                    weak_late_anchor_revisit = self._build_action_intent_weak_late_anchor_revisit_decision(
+                        state=state,
+                        hints=hints,
+                        result=latest_action_intent_result,
+                        thought="why 题 repeated textual fallback 前，当前只停留在晚锚点的弱邻近/手持证据；继续沿更晚节点向后追，再决定是否允许收口。",
+                    )
+                    if weak_late_anchor_revisit is not None:
+                        return weak_late_anchor_revisit
+                    nonexclusive_concrete_late_anchor_revisit = self._build_action_intent_nonexclusive_concrete_late_anchor_revisit_decision(
+                        state=state,
+                        hints=hints,
+                        result=latest_action_intent_result,
+                        thought="why 题 repeated textual fallback 前，当前虽然出现了更具体的晚锚点描述，但本质上仍只是非排他中间态；继续沿更晚节点向后追，而不是先退回 generic visual review。",
+                    )
+                    if nonexclusive_concrete_late_anchor_revisit is not None:
+                        return nonexclusive_concrete_late_anchor_revisit
                 if (
                     self._is_action_intent_task(state)
                     and isinstance(latest_action_intent_result, dict)

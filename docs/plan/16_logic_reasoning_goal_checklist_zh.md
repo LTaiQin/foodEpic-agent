@@ -293,6 +293,14 @@
 - 本轮提交：新增并通过 1 条定向测试，覆盖：
   - `move bottle` 的 textual fallback 在 repeated failure 后，如果 finalizer 已经写出 `generic relocation/storage -> target=jar`，则会直接跳到 `jar` 的更晚节点，而不是停在早窗 reveal 片段。
 - 本轮提交：专项回归已进一步提升到 `372 passed, 344 deselected`
+- 本轮提交：继续补 `repeated textual fallback` 的 late-anchor 对称性。此前 `nonexclusive_concrete_late_anchor`、`timeline_review_bias_gap`、`workspace_or_final_placement_claim` 这类“已经知道当前只是晚锚点中间态”的 withheld marker，在 infer/future-use/specialized recovery 路径里已经会继续追更晚节点；但 repeated vision failure 后一旦退到 `rank_choices_from_state`，planner 仍可能直接退回 generic resample，或者虽然进入 long-horizon revisit 却停在过早节点。
+- 本轮改为：
+  - textual fallback 入口也接入 `weak_late_anchor / nonexclusive_concrete_late_anchor` 的专门 revisit；
+  - 同时把 `nonexclusive_concrete_late_anchor / timeline_review_bias_gap / workspace_or_final_placement_claim` 一并接入 long-horizon 的 `prefer latest` 偏置；
+  - 因而这类“只是放在附近/标签刚露出来/还没形成排他结果”的 close-call，在 textual fallback 下也会继续追更晚节点，而不会退回 generic resample 或停在早窗中间态。
+- 本轮提交：新增并通过 1 条定向测试，覆盖：
+  - `move bowl` 的 textual fallback 在 repeated failure 后，如果已经写入 `nonexclusive_concrete_late_anchor` marker，则会直接跳到 `bowl` 的更晚节点，而不是回到 generic 稀疏补帧或停在早窗邻近片段。
+- 本轮提交：专项回归已进一步提升到 `373 passed, 344 deselected`
   - `pick up pot` 时若证据已经明确写出 `brought to the sink and tilted to pour`，则 `to empty the water.` 会压过弱 `to check the boiling water.`。
 - 本轮提交：同时回归通过 3 条关键保护：
   - `check label vs put back` 的 later-target marker 仍会在“尚未看清是否回冰箱”时继续 withheld；

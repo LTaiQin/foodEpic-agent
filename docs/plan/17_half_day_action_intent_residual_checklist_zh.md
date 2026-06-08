@@ -75,6 +75,11 @@
   - finalizer 已经明确写出 `generic access / generic relocation / generic hand-free` 不是结论，并给出了真实 downstream target；
   - 但 repeated vision failure 后如果系统退到 `need_alternative_evidence_path + rank_choices_from_state`，planner 虽然可能开始追这个目标，却仍容易停在过早的 reveal/intermediate 节点，而不是直接跳到更晚、更有判别力的节点。
 - [x] 当前最新专项回归：`372 passed, 344 deselected`
+- [x] 新 residual bucket：`textual fallback drops late-anchor withheld markers back to generic resample or early node`
+- [x] 代表 case：
+  - finalizer 或 unresolved 流程已经明确写出 `nonexclusive_concrete_late_anchor / timeline_review_bias_gap / workspace_or_final_placement_claim`，说明当前只是“标签露出来了 / 放在附近了 / 空间更开阔了”的中间态；
+  - 但 repeated vision failure 后如果系统退到 `need_alternative_evidence_path + rank_choices_from_state`，planner 仍可能直接退回 generic 稀疏补帧，或者虽然进入 long-horizon revisit 却停在过早节点，而不是继续跳到更晚、更有判别力的节点。
+- [x] 当前最新专项回归：`373 passed, 344 deselected`
 
 ## 17.2 半天执行原则
 
@@ -236,6 +241,14 @@
 - [x] 新增并通过 1 条定向测试，覆盖：
   - `move bottle` 的 textual fallback 在 repeated failure 后，如果 finalizer 已经写出 `generic relocation/storage -> target=jar`，就直接跳到 `jar` 的更晚节点，而不是停在早窗 reveal 片段。
 - [x] 本轮专项回归：`372 passed, 344 deselected`
+- [x] 收口 `textual fallback drops late-anchor withheld markers back to generic resample or early node`。此前 repeated vision failure 之后如果退到 `need_alternative_evidence_path + rank_choices_from_state`，即使系统已经写入 `nonexclusive_concrete_late_anchor / timeline_review_bias_gap / workspace_or_final_placement_claim` 这类“当前仍只是晚锚点中间态”的 marker，planner 仍可能直接退回 generic 稀疏补帧，或者虽然进入 long-horizon revisit 却停在过早节点。
+- [x] 现在 textual fallback 的恢复入口继续对齐：
+  - 先读取最近的 late-anchor / timeline-gap / workspace-final-placement marker；
+  - 直接复用 `weak_late_anchor / nonexclusive_concrete_late_anchor` 的专门 revisit；
+  - 同时对这三类 marker 启用 `prefer latest long-horizon node` 偏置，避免停在早窗中间节点。
+- [x] 新增并通过 1 条定向测试，覆盖：
+  - `move bowl` 的 textual fallback 在 repeated failure 后，如果已经写入 `nonexclusive_concrete_late_anchor` marker，则会直接跳到 `bowl` 的更晚节点，而不是回到 generic 稀疏补帧或停在早窗邻近片段。
+- [x] 本轮专项回归：`373 passed, 344 deselected`
 
 补充进展：
 
