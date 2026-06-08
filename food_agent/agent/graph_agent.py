@@ -3225,6 +3225,35 @@ class GraphAgent:
         if any(term in choice_lc for term in ("access", "behind", "reveal", "expose", "拿到后面", "看到后面", "露出", "取到后面")):
             if any(term in support_lc for term in ("reveals the hidden area", "revealed", "hidden area behind", "shows what is behind", "露出后方", "看到后方")):
                 gaps.append("generic_access_direct_effect")
+        if self._action_intent_choice_is_generic_direct_space_purpose(choice_lc):
+            if any(
+                term in context_lc
+                for term in (
+                    "behind",
+                    "reveals",
+                    "revealed",
+                    "hidden area",
+                    "hidden item",
+                    "item behind",
+                    "underneath",
+                    "后面",
+                    "下面",
+                    "露出",
+                    "挪开后",
+                )
+            ) and any(
+                term in context_lc
+                for term in (
+                    "no hidden item is then picked up",
+                    "no item behind is actually taken",
+                    "no actual hidden item is retrieved",
+                    "no concrete next target is shown",
+                    "direct next target remains unclear",
+                    "没有实际取出",
+                    "没有明确下一目标",
+                )
+            ):
+                gaps.append("generic_make_space_hidden_target_still_speculative")
         gaps.extend(
             self._action_intent_unresolved_timeline_review_bias_gaps(
                 state=state,
@@ -3350,6 +3379,7 @@ class GraphAgent:
                 "timeline_review_revealed_target_gap",
                 "timeline_review_hand_free_or_fixture_gap",
                 "exact_workspace_without_exact_use",
+                "generic_make_space_hidden_target_still_speculative",
             )
         ):
             return True
@@ -4656,18 +4686,37 @@ class GraphAgent:
         if best_row is None:
             return None
         best_choice = str(best_row.get("choice") or "").lower()
+        best_support = str(best_row.get("support") or "").lower()
+        best_contradiction = str(best_row.get("contradiction") or "").lower()
         global_context = " ".join(
             str(item)
             for item in list(getattr(state, "evidence_bundle", []))[-24:]
             + list(getattr(state, "working_memory", []))[-24:]
             if isinstance(item, str)
         ).lower()
-        if not self._action_intent_choice_is_generic_hidden_reveal_or_access(
+        best_is_generic_hidden_access = self._action_intent_choice_is_generic_hidden_reveal_or_access(
             choice=best_choice,
-            support=str(best_row.get("support") or "").lower(),
-            contradiction=str(best_row.get("contradiction") or "").lower(),
+            support=best_support,
+            contradiction=best_contradiction,
             global_context=global_context,
-        ):
+        )
+        best_is_generic_make_space_with_reveal = any(
+            token in best_choice
+            for token in (
+                "make space",
+                "make some space",
+                "create space",
+                "free up space",
+                "make room",
+                "clear the way",
+                "out of the way",
+                "move out of the way",
+                "腾空间",
+                "腾出空间",
+                "让开",
+            )
+        )
+        if not (best_is_generic_hidden_access or best_is_generic_make_space_with_reveal):
             return None
         action_object = self._action_intent_question_object(question)
         exact_candidates: list[tuple[float, int, str]] = []
@@ -7201,6 +7250,11 @@ class GraphAgent:
                 "moved aside to access",
                 "moved aside to retrieve",
                 "clear the way to pick up",
+                "hidden spice jar",
+                "spice jar behind",
+                "becomes reachable and is taken",
+                "is taken right afterwards",
+                "specific hidden item is then taken",
                 "needed tool",
                 "red curry paste behind",
                 "后面的目标",

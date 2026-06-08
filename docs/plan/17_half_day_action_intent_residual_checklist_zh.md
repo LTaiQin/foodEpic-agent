@@ -122,7 +122,7 @@
 待做：
 
 - [x] 检查 `needed_observation` target revisit、reveal subtype、workspace/final placement gate。
-- [ ] 补 `make space` vs `take hidden X` 的更多泛化测试。
+- [x] 补 `make space` vs `take hidden X` 的更多泛化测试。
 - [x] 补 `make space` vs `place Y into freed slot` 的目标追证测试。
 - [x] 补 `move object` 后只看到空间变化但没看到下游动作时不能 finish。
 
@@ -140,7 +140,14 @@
 - [x] 本轮专项回归：`330 passed, 344 deselected`
 - [x] 收口 `make space on shelf/worktop` 的 exact-workspace overclaim。现在 `shelf/worktop/counter` 会进入 specific-space-target 路径；若证据只显示 broad workspace effect 而没有确切下游 use/destination，则 unresolved rerank 会写入 `exact_workspace_without_exact_use` 并继续等待证据。
 - [x] 这一收口同时保留了更合理的 generic fallback：例如 `shelf layout` 变化但没有 hidden-target retrieval 时，允许回退到 generic access；而仅有 `worktop becomes more open` 这类宽泛变化时，会继续 withheld。
-- [x] 当前专项回归已提升到 `332 passed, 344 deselected`
+- [x] 收口 `generic make space` vs `take hidden X` 的 reveal 泛化缺口。此前 `generic access -> hidden retrieval` 已有 override，但如果 top 候选仍是 `to make space on the shelf`，即使竞争项已经明确写出“hidden spice jar behind it becomes reachable and is taken right afterwards”，系统也可能停在 broad room-making；本轮改为：
+  - `generic hidden access -> exact revealed target` 的 override 同时覆盖 `generic make space + reveal` 这类 best 候选；
+  - 只要 exact candidate 已经形成明确 `hidden item / item behind / becomes reachable and is taken right afterwards` 链条，就允许把 broad make-space 翻正成 hidden retrieval；
+  - 如果 reveal 真实存在、但 hidden target 仍未被取出，则继续保留更合理的 `generic access` fallback，不会误翻到 exact hidden retrieval。
+- [x] 新增并通过 2 条 Bucket C 定向测试，分别覆盖：
+  - `move bottle` 时 `to make space on the shelf.` 会被明确的 `take the hidden spice jar behind it` 压过；
+  - 如果只是 reveal 了 behind area、但 hidden spice jar 仍只是 speculative，则不会误翻到 exact hidden retrieval，而会回退到 `to access what's behind the bottle.`。
+- [x] 当前专项回归已提升到 `357 passed, 344 deselected`
 
 ## 17.7 Residual Bucket D：towel / cloth / paper towel 的 transport-vs-use
 

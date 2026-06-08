@@ -224,6 +224,14 @@
   - `check boiling vs empty` 的 weak-inspection close-call 仍会在“还没看清是否真的倒向 sink”时继续 withheld；
   - 中文 `transfer` 场景下“后续拿起海绵”仍不会被误翻成当前动作的直接目的。
 - 本轮提交：专项回归已更新到 `355 passed, 344 deselected`
+- 本轮提交：Bucket C 剩余的 `make space vs take hidden X` 泛化缺口也已正式收口。此前 `generic access -> hidden retrieval` 已有 override，但如果 top 候选仍停在 `to make space on the shelf` 这类 broad room-making，而竞争项已经明确写出“hidden spice jar behind it becomes reachable and is taken right afterwards”，系统仍可能不翻正。本轮改为：
+  - `generic hidden access -> exact revealed target` 的 override 现在同时覆盖 `generic make space + reveal` 这类 best 候选；
+  - 只要 exact candidate 已经形成明确的 `hidden item / item behind / becomes reachable and is taken right afterwards` 链条，就允许把 broad make-space 翻成 hidden retrieval；
+  - 若 reveal 虽存在，但 hidden target 仍未被取出，则继续保留更合理的 `generic access` fallback，不会误翻到 exact hidden retrieval。
+- 本轮提交：新增并通过 2 条 Bucket C 定向测试，分别覆盖：
+  - `move bottle` 时 `to make space on the shelf.` 会被明确的 `take the hidden spice jar behind it` 压过；
+  - 如果只是 reveal 了 behind area、但 hidden spice jar 仍只是 speculative，则不会误翻到 exact hidden retrieval，而会回退到 `to access what's behind the bottle.`。
+- 本轮提交：专项回归已进一步提升到 `357 passed, 344 deselected`
 - 本轮提交：同时收紧了 `transport-vs-use` 的前移触发门槛。只有模型已经显式承认 `need_more_evidence / ambiguity / whether X or Y` 时，才会抢先看近窗后果；普通高置信但只是泛化“暂时看不清”的 towel/cloth 题仍保持原有 `precontext` 路线，不会被误伤
 - 本轮提交：why 初始化阶段的取帧策略也不再一刀切。过去只要还没有当前题时间窗帧，`planner` 就会统一先抽 `segment`；现在对于一开始就属于 `strict visual disambiguation` 的 why 题，会直接走 `initial transition probe`，先围绕动作尾部和后续短窗口抽更密的关键帧，而不是先看一组静态动作片段
 - 本轮提交：这一步当前先覆盖：
