@@ -124,6 +124,11 @@
   - 同时收紧 `explicit single-hand drying` 与 `generic hand-wiping -> single-hand drying` override：如果证据已经明确说“不是单手，而是双手”，就不再把答案翻回 `dry hand`。
 - 本轮提交：新增并通过 1 条 Bucket D 定向测试，覆盖 `pick up paper towel` 后证据明确指向“双手擦拭”时，系统不再停在 `dry hand`，而会提升到 `wipe both hands`。
 - 本轮提交：专项回归已更新到 `334 passed, 344 deselected`
+- 本轮提交：Bucket D 的 `surface_wipe_preparation` 继续收紧。此前只要 towel/cloth 被放到 worktop 且伴随“不是收纳、以后可能还会用”的 non-storage 信号，就可能把 `wipe the worktop` 提前翻出来；这会把“只是暂放在台面上”误读成准备擦台面。本轮改为：
+  - `non-storage` 不再单独构成 `surface wipe preparation`；
+  - 除了“不是收纳”，还必须出现 `crumbs / spill / surface target / ready for wiping / next visible cleaning target` 这类更具体的台面目标或 staged-wipe 信号，才允许把答案翻到 `wipe the worktop`。
+- 本轮提交：新增并通过 1 条 Bucket D 反例测试，覆盖 `dish cloth` 只是被暂放到 worktop within reach、但没有 crumbs/spill/visible target 时，不再提前推成 `wipe the worktop`，而是继续 withheld。
+- 本轮提交：专项回归已更新到 `335 passed, 344 deselected`
 - 本轮提交：why 题在首次 `infer_action_intent` 就暴露 `receptacle_outcome` 近窗歧义时，不再机械地先走一轮泛化 `followup`。现在会直接围绕动作尾部触发 `followup_transition`，主动去找“是否真的掉回 sink/pan/bowl/container”的决定性关键帧；同时这条路径会压过误触发的 `precontext`，避免 `flip cloth / shake / tap / tilt` 一类题被无关前置状态采样截走
 - 本轮提交：新增并通过 2 条定向测试，分别保护：
   - `receptacle_outcome` 型 why close-call 会在第一次歧义时直接进入 `followup_transition`

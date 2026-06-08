@@ -146,7 +146,7 @@
 待做：
 
 - [x] 检查现有 `transport-vs-use` frame selection 和 future-use route。
-- [ ] 补“拿起后只是放下/挪动”的测试，防止误判 clean/dry。
+- [x] 补“拿起后只是放下/挪动”的测试，防止误判 clean/dry。
 - [x] 补“短暂接触手部”的测试，防止被泛化成 clean counter。
 - [ ] 补“真正擦台面需要 sweep/contact target”的 finish gate。
 
@@ -162,7 +162,9 @@
 - [x] 新增 `explicit both-hands wiping` 规则：若证据明确出现 `brought to both hands / both hands are wiped`，则 `wipe both hands` 获得更强加分。
 - [x] 同时收紧 `single-hand drying` 相关 override：如果证据已经明确说“不是单手，而是双手”，就不再把答案翻回 `dry hand`。
 - [x] 新增并通过 1 条定向测试，覆盖 `pick up paper towel` 后证据明确指向双手擦拭时，不再停在 `dry hand`，而会提升到 `wipe both hands`。
-- [x] 本轮专项回归：`334 passed, 344 deselected`
+- [x] 收紧 `surface_wipe_preparation`：此前 `non-storage` 很容易把“只是暂放在台面上”提前翻成 `wipe the worktop`；现在除了“不是收纳”，还必须出现 `crumbs / spill / surface target / ready for wiping / next visible cleaning target` 这类更具体的台面目标或 staged-wipe 信号。
+- [x] 新增并通过 1 条 Bucket D 反例测试，覆盖 `dish cloth` 只是被暂放到 worktop within reach、但没有 crumbs/spill/visible target 时，不再提前推成 `wipe the worktop`，而是继续 withheld。
+- [x] 本轮专项回归：`335 passed, 344 deselected`
 
 ## 17.8 Residual Bucket E：scale / tare / zero / measurement state-change
 

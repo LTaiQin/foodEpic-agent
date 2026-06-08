@@ -7327,7 +7327,33 @@ class GraphAgent:
                 "稍后继续使用",
             )
         )
-        return has_explicit_preparation_signal or has_nonstorage_signal
+        if has_explicit_preparation_signal:
+            return True
+        if not has_nonstorage_signal:
+            return False
+        # Non-storage alone is not enough for surface wiping. There still needs
+        # to be some surface-specific target or staged wipe context.
+        return any(
+            token in signal_text
+            for token in (
+                "counter surface",
+                "worktop target",
+                "surface target",
+                "next visible cleaning target",
+                "ready for wiping",
+                "compatible with preparing to wipe",
+                "staged for wiping",
+                "beside crumbs",
+                "next to a visible spill",
+                "crumbs",
+                "spill",
+                "mess on the counter",
+                "台面目标",
+                "准备擦",
+                "碎屑",
+                "污渍",
+            )
+        )
 
     def _action_intent_choice_is_temporary_relocation_not_storage(
         self,
