@@ -3064,6 +3064,32 @@ class GraphAgent:
                 for term in ("zero", "tare", "reset", "returns to 0", "container on the scale", "归零", "去皮", "回到0", "放到秤上")
             ):
                 gaps.append("missing_zero_out_measurement_evidence")
+        if self._action_intent_choice_is_generic_measurement_meta_purpose(choice_lc):
+            if not any(
+                term in context_lc
+                for term in (
+                    "reading",
+                    "check the reading",
+                    "tare",
+                    "zero",
+                    "returns to 0",
+                    "display changes",
+                    "display turns on",
+                    "screen lights",
+                    "update is entered",
+                    "records the measurement",
+                    "读数",
+                    "归零",
+                    "去皮",
+                    "显示变化",
+                    "记录读数",
+                    "录入",
+                )
+            ):
+                gaps.append("missing_measurement_meta_evidence")
+        if self._action_intent_choice_is_exact_measurement_role_purpose(choice_lc):
+            if not self._action_intent_support_has_exact_measurement_role_evidence(context_lc):
+                gaps.append("missing_exact_measurement_role_evidence")
         if self._action_intent_unresolved_candidate_spans_mixed_horizon(state=state, candidate_rows=candidate_rows, best_index=best_index):
             categories = selected_choice_categories([str(choice) for choice in getattr(state, "choices", [])], [best_index])
             best_categories = set(categories.get(best_index) or set())
@@ -3240,6 +3266,8 @@ class GraphAgent:
                     & {
                         "candidate_explicitly_lacks_observed_support",
                         "missing_surface_wiping_evidence",
+                        "missing_measurement_meta_evidence",
+                        "missing_exact_measurement_role_evidence",
                         "missing_dry_hands_evidence",
                         "missing_simple_relocation_evidence",
                         "missing_immediate_micro_outcome_evidence",
@@ -3266,6 +3294,8 @@ class GraphAgent:
                         "missing_surface_wiping_evidence" in gaps
                         and "generic_access_direct_effect" not in gaps
                     )
+                    or "missing_measurement_meta_evidence" in gaps
+                    or "missing_exact_measurement_role_evidence" in gaps
                 )
                 for gaps in top_gap_sets
             ):
@@ -4432,6 +4462,10 @@ class GraphAgent:
                     + list(getattr(state, "working_memory", []))[-24:]
                     if isinstance(item, str)
                 ).lower(),
+            ):
+                continue
+            if any(token in choice for token in ("measure", "weigh", "称量", "称重")) and not self._action_intent_support_has_exact_measurement_role_evidence(
+                f"{support} {contradiction}"
             ):
                 continue
             if adjusted_score < 0.12:
@@ -6163,6 +6197,27 @@ class GraphAgent:
         )
         if not has_immediacy:
             return False
+        if any(token in choice for token in ("measure", "weigh", "称量", "称重")):
+            return any(
+                token in signal_text
+                for token in (
+                    "measure the cheese",
+                    "weigh the cheese",
+                    "cheese is placed on the scale",
+                    "ingredient is placed on the scale",
+                    "used to weigh",
+                    "used for weighing",
+                    "exact weighing step",
+                    "exact cheese-on-scale moment",
+                    "on the scale in the immediate next step",
+                    "put on the scale",
+                    "placed on the scale",
+                    "放到秤上",
+                    "称奶酪",
+                    "称量奶酪",
+                    "用于称量",
+                )
+            )
         return any(
             token in signal_text
             for token in (
@@ -7455,6 +7510,96 @@ class GraphAgent:
                 "拿起洗洁精瓶",
             )
         )
+
+    def _action_intent_choice_is_generic_measurement_meta_purpose(self, choice: str) -> bool:
+        text = str(choice or "").strip().lower()
+        return any(
+            token in text
+            for token in (
+                "adjust the measurements",
+                "adjust measurements",
+                "adjust the scale",
+                "record measurements",
+                "record the measurements",
+                "read the measurements",
+                "check the reading",
+                "measurement reading",
+                "调整刻度",
+                "记录读数",
+                "看读数",
+            )
+        )
+
+    def _action_intent_choice_is_exact_measurement_role_purpose(self, choice: str) -> bool:
+        text = str(choice or "").strip().lower()
+        if self._action_intent_choice_is_generic_measurement_meta_purpose(choice):
+            return False
+        return any(
+            token in text
+            for token in (
+                "measure the",
+                "weigh the",
+                "weigh more ingredients",
+                "measure more ingredients",
+                "base to weigh",
+                "base for weighing",
+                "used as a base",
+                "as a base to weigh",
+                "as a base for weighing",
+                "on the scale",
+                "measure ingredients",
+                "weigh ingredients",
+                "称量",
+                "称重",
+                "作为称量基底",
+            )
+        )
+
+    def _action_intent_support_has_exact_measurement_role_evidence(self, text: str) -> bool:
+        lowered = str(text or "").lower()
+        if self._action_intent_text_has_negative_evidence(lowered):
+            return False
+        has_measurement_target = any(
+            token in lowered
+            for token in (
+                "measure the cheese",
+                "weigh the cheese",
+                "measure the ingredient",
+                "weigh the ingredient",
+                "measure the ingredients",
+                "weigh the ingredients",
+                "used to weigh",
+                "used for weighing",
+                "used as a base",
+                "as a base to weigh",
+                "as a base for weighing",
+                "as a base for weighing more ingredients",
+                "measuring the cheese",
+                "weighing the cheese",
+                "称奶酪",
+                "称量奶酪",
+                "称量食材",
+                "用于称量",
+            )
+        )
+        has_scale_use_chain = any(
+            token in lowered
+            for token in (
+                "put on the scale",
+                "placed on the scale",
+                "ingredient is placed on the scale",
+                "cheese is placed on the scale",
+                "immediate next step",
+                "immediate next use",
+                "exact weighing step",
+                "cheese-on-scale moment",
+                "on the scale in the immediate next step",
+                "放到秤上",
+                "下一步称量",
+                "立刻用于称量",
+            )
+        )
+        return has_measurement_target and has_scale_use_chain
 
     def _action_intent_choice_is_surface_wipe_preparation(
         self,

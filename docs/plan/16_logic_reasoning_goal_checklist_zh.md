@@ -192,6 +192,19 @@
   - finalizer 在 `paper towel` 只有短暂靠近/接触台面时，不能直接收口到 `clean up the kitchen counter.`；
   - unresolved rerank 在只有 `surface proximity/contact`、没有 `sweep/contact chain` 时，不能把 `clean up the kitchen counter.` 当成最终答案。
 - 本轮提交：专项回归已更新到 `350 passed, 344 deselected`
+- 本轮提交：Bucket E 的 `measurement-meta vs exact measurement role` 又补了一层 unresolved gate。此前 finalizer 已能挡住 `adjust/read measurements` 的 broad overclaim，但 unresolved rerank 在一些 close-call 下仍可能把弱 `measurement context` 直接翻成 `measure the cheese / base for weighing` 之类 exact role，即使还没看到 `reading/tare/display-change`，也没看到真正的 `ingredient on scale / used for weighing` 链条。本轮改为：
+  - `graph_agent` 新增 measurement-role sufficiency helper，明确区分：
+    - broad `adjust/read/record measurements`
+    - exact `measure/weigh/use as a base`
+  - unresolved semantic gaps 新增：
+    - `missing_measurement_meta_evidence`
+    - `missing_exact_measurement_role_evidence`
+  - exact measurement role 的 unresolved override 现在也要求更具体的 weighing-use 证据，不再仅凭“could later be used to measure”一类宽泛 close-call 提前翻正。
+- 本轮提交：新增并通过 1 条 Bucket E 定向反例测试，覆盖 `pick up scale` 时 broad measurement-meta 与 exact measurement role 都仍只是 speculative 的 close-call；现在 unresolved rerank 会继续 withheld，而不是提前翻到 `measure the cheese`。
+- 本轮提交：同时保留并复核通过 2 条原有正例：
+  - `measure the cheese` 在确有 immediate weighing-use 证据时仍可翻正；
+  - `use the bowl as a base to weigh more ingredients` 这类 measurement-base setup 仍能正常收口。
+- 本轮提交：专项回归已进一步提升到 `353 passed, 344 deselected`
 - 本轮提交：why 题的首次主动关键帧前移继续扩展到两类高频歧义：
   - `tap kitchen scale / press button / push switch` 这类 `state_change / open-close vs measure-use` 题，不再一上来稀疏补 8 秒长窗；现在会先围绕动作尾部后的 2 到 4 秒做 `followup_transition` 密采样，优先确认显示是否开机、归零、变化或出现其它决定性状态改变
   - `pick up tea towel / paper towel / cloth` 这类 `transport-vs-use` 题，当模型已经明确承认“要看动作后是拿去擦手/擦台面，还是只是放下/挪开”时，会先补动作后近窗关键帧，再决定是否需要回补 `precontext`；也就是说，agent 会先验证真实使用链，而不是默认先回头找前置状态

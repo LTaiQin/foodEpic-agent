@@ -17,7 +17,7 @@
 - 已提交进展：`16.49 generic measurement-meta -> exact measurement target`
 - 当前待提交进展：`Bucket A multiple exact phone-record targets -> prefer most evidence-starved exact target`
 - 当前专项回归：`pytest -q tests/test_graph_agent.py -k 'action_intent'`
-- 当前已验证结果：`352 passed, 344 deselected`
+- 当前已验证结果：`353 passed, 344 deselected`
 
 ## 17.2 半天执行原则
 
@@ -204,9 +204,9 @@
 
 完成标准：
 
-- [ ] 只看到显示为 0 不能直接判 zero out。
-- [ ] 没有动作前显示状态时，必须补 precontext 或 transition frames。
-- [ ] 没有食材上秤证据时，不能把 broad measurement 当作最终答案。
+- [x] 只看到显示为 0 不能直接判 zero out。
+- [x] 没有动作前显示状态时，必须补 precontext 或 transition frames。
+- [x] 没有食材上秤证据时，不能把 broad measurement 当作最终答案。
 
 本轮进展：
 
@@ -222,7 +222,12 @@
 - [x] 新增并通过 1 条 Bucket E 定向测试，覆盖 `resolve_action_intent_pairwise` 已明确“需要看动作前显示状态/容器前提”时，planner 会优先采样 `fine_grained_why_recognition_precontext`，而不是继续回到 `pairwise`。
 - [x] 收口 `zero out with container` 在 pairwise 缺少 container precondition 时的恢复顺序缺口。此前 `pairwise` 路径即使已经明确写出“要看 tap 前容器是否已在秤上”，也可能先退回 generic extra-followup，再去补真正决定性的 precontext；现在这条路径与 verifier-blocked 恢复链对齐，优先回采 `precontext`，只有 precontext 仍不足时才追加更长 followup。
 - [x] 新增并通过 1 条 Bucket E 定向测试，覆盖 `tap kitchen scale` 的 `zero out with container` pairwise close-call：当 `needed_observation` 明示“容器是否在 tap 前已在秤上”时，planner 会先走 `fine_grained_why_recognition_precontext`，而不是先补 generic `followup_ext1`。
-- [x] 本轮专项回归：`348 passed, 344 deselected`
+- [x] 补上 `measurement-meta vs exact measurement role` 的 unresolved-rerank 边界。此前 finalizer 已能挡住 `adjust/read measurements` 的 broad overclaim，但 unresolved rerank 在一些 close-call 下仍可能把弱 `measurement context` 直接翻成 `measure the cheese / base for weighing` 这类 exact role，即使还没看到 `reading/tare/display-change`，也没看到真正的 `ingredient on scale / used for weighing` 链条。现在 `graph_agent` 新增 measurement-role sufficiency helper，并在 unresolved semantic gaps 里补上 `missing_measurement_meta_evidence` 与 `missing_exact_measurement_role_evidence`，防止 broad/speculative measurement close-call 提前收口。
+- [x] 新增并通过 1 条 Bucket E 定向反例测试，覆盖 `pick up scale` 时 broad measurement-meta 与 exact measurement role 都仍只是 speculative 的 unresolved close-call；现在系统会继续 withheld，而不是提前翻到 `measure the cheese`。
+- [x] 同时复核通过 2 条原有正例：
+  - `measure the cheese` 在确有 immediate weighing-use 证据时仍可翻正；
+  - `use the bowl as a base to weigh more ingredients` 这类 measurement-base setup 仍能正常收口。
+- [x] 本轮专项回归：`353 passed, 344 deselected`
 
 ## 17.9 Residual Bucket F：inspection / check / read label 与 later outcome
 
