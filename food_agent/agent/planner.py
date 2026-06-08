@@ -10624,6 +10624,24 @@ class GraphAgentPlanner:
                     )
                     if extra_followup is not None:
                         return extra_followup
+            if not self._action_intent_resolution_payload_is_ready_to_finish(state=state, payload=last_result):
+                recovered = self._build_action_intent_specialized_recovery_decision(
+                    state=state,
+                    hints=hints,
+                    thought="why 题二选一裁决仍明确承认证据不够，不能直接结束；先恢复当前题时间窗关键帧或专用判断，再继续追决定性结果证据。",
+                )
+                if recovered is not None:
+                    return recovered
+                return PlannerDecision(
+                    thought="why 题二选一裁决仍明确承认证据不够，当前又没有可直接复用的时间锚点；退回当前题动作片段重抽，而不是直接结束。",
+                    tool="sample_sparse_frames",
+                    args={
+                        "start_time": None,
+                        "end_time": None,
+                        "sample_count": 4,
+                        "tag": f"{state.task_family}_segment",
+                    },
+                )
             best_index = int(last_result["best_index"])
             return PlannerDecision(
                 thought="why 题二选一裁决已完成，直接结束。",
@@ -10816,6 +10834,24 @@ class GraphAgentPlanner:
                     )
                     if extra_followup is not None:
                         return extra_followup
+            if not self._action_intent_resolution_payload_is_ready_to_finish(state=state, payload=last_result):
+                recovered = self._build_action_intent_specialized_recovery_decision(
+                    state=state,
+                    hints=hints,
+                    thought="why 题后续用途裁决仍明确承认证据不够，不能直接结束；先恢复当前题时间窗关键帧或专用判断，再继续追决定性动作后证据。",
+                )
+                if recovered is not None:
+                    return recovered
+                return PlannerDecision(
+                    thought="why 题后续用途裁决仍明确承认证据不够，当前又没有可直接复用的时间锚点；退回当前题动作片段重抽，而不是直接结束。",
+                    tool="sample_sparse_frames",
+                    args={
+                        "start_time": None,
+                        "end_time": None,
+                        "sample_count": 4,
+                        "tag": f"{state.task_family}_segment",
+                    },
+                )
             best_index = int(last_result["best_index"])
             return PlannerDecision(
                 thought="why 题后续用途证据裁决已完成，直接结束。",
@@ -13619,6 +13655,30 @@ class GraphAgentPlanner:
             )
             for item in recent_memory
         ):
+            return False
+        return True
+
+    def _action_intent_resolution_payload_is_ready_to_finish(
+        self,
+        *,
+        state: AgentState,
+        payload: dict[str, Any],
+    ) -> bool:
+        if not self._is_action_intent_task(state) or not isinstance(payload, dict):
+            return False
+        if payload.get("best_index") is None:
+            return False
+        if any(
+            bool(payload.get(key))
+            for key in (
+                "need_future_evidence",
+                "need_more_evidence",
+                "needs_more_evidence",
+            )
+        ):
+            return False
+        needed_observation = str(payload.get("needed_observation") or "").strip()
+        if needed_observation:
             return False
         return True
 

@@ -237,6 +237,14 @@
   - `take bottle` 在旧成功结果仍明确要求“确认是否 later put back into the fridge”时，后续 pairwise 失败不能直接 finish 到 `to open the bottle.`；
   - `place lid` 在旧成功结果已经形成闭合链条时，后续 pairwise 失败仍可安全复用该结果直接 finish。
 - 本轮提交：专项回归已进一步提升到 `363 passed, 344 deselected`
+- 本轮提交：继续收口一个相邻的 planner fallback 残差：`resolution need-more-evidence fallback finishes without anchors`。此前即使 `resolve_action_intent_pairwise / future_use` 自己已经明确返回 `need_more_evidence=True`，只要当前没有 `times/input_times` 可供继续恢复，planner 仍可能直接落到“专用裁决已完成，直接结束”这条 finish 分支。
+- 本轮改为：
+  - 若 `pairwise / future_use` payload 本身仍带 `need_more_evidence / need_future_evidence / needed_observation`，则一律视为“未闭合结果”，不能直接 finish；
+  - 即使当前缺少时间锚点、`specialized recovery` 暂时构不出更具体的 followup，也先退回当前题 `segment` 重抽，而不是让未闭合专用裁决直接收口。
+- 本轮提交：新增并通过 2 条定向测试，分别覆盖：
+  - `resolve_action_intent_pairwise` 在 `need_more_evidence=True` 且没有时间 hints 时，不再直接 finish，而是回到 `fine_grained_why_recognition_segment` 重抽；
+  - `resolve_action_intent_future_use` 在同类条件下也不再直接 finish，而是同样回到当前题 `segment` 重抽。
+- 本轮提交：专项回归已进一步提升到 `365 passed, 344 deselected`
   - `pick up pot` 时若证据已经明确写出 `brought to the sink and tilted to pour`，则 `to empty the water.` 会压过弱 `to check the boiling water.`。
 - 本轮提交：同时回归通过 3 条关键保护：
   - `check label vs put back` 的 later-target marker 仍会在“尚未看清是否回冰箱”时继续 withheld；

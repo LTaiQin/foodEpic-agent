@@ -33,6 +33,12 @@
   - 之后 `resolve_action_intent_pairwise / future_use` 因工具失败中断；
   - planner 不能因为“有一个旧 best_index”就直接 finish，而必须继续沿已有的 mixed-horizon / later-target 恢复链追证据。
 - [x] 当前最新专项回归：`363 passed, 344 deselected`
+- [x] 新 residual bucket：`resolution need-more-evidence fallback finishes without anchors`
+- [x] 代表 case：
+  - `resolve_action_intent_pairwise / future_use` 自己已经明确写出 `need_more_evidence=True`；
+  - 但当前又缺少 `times / input_times`，导致恢复链暂时构不出更具体的 followup；
+  - planner 不能因此把这个未闭合结果直接 `finish`，而必须至少回到当前题 `segment` 重抽。
+- [x] 当前最新专项回归：`365 passed, 344 deselected`
 
 ## 17.2 半天执行原则
 
@@ -138,6 +144,14 @@
   - `take bottle` 的旧成功结果仍要求确认是否 later put back into the fridge 时，pairwise 失败不能直接 finish 到 `to open the bottle.`；
   - `place lid` 的旧成功结果已经形成闭合链条时，pairwise 失败仍可安全 finish。
 - [x] 本轮专项回归：`363 passed, 344 deselected`
+- [x] 收口 `resolution need-more-evidence fallback finishes without anchors`。此前 `resolve_action_intent_pairwise / future_use` 即使已经明确返回 `need_more_evidence=True`，只要当前没有 `times / input_times` 之类恢复锚点，planner 仍可能直接落到“专用裁决已完成，直接结束”。这和 why 专项要求的延迟定答能力冲突，因为它会把明确未闭合的专用裁决结果提前收口。
+- [x] 现在对 `pairwise / future_use` 的 finish gate 再收紧一层：
+  - 只要 payload 仍带 `need_more_evidence / need_future_evidence / needed_observation`，就视为未闭合；
+  - 即使此时 `specialized recovery` 一时构不出更具体的 followup，也先回到当前题 `segment` 重抽，而不是直接 finish。
+- [x] 新增并通过 2 条定向测试，覆盖：
+  - `resolve_action_intent_pairwise` 在 `need_more_evidence=True` 且没有时间 hints 时，回到 `fine_grained_why_recognition_segment` 重抽；
+  - `resolve_action_intent_future_use` 在同类条件下也回到当前题 `segment` 重抽，而不直接结束。
+- [x] 本轮专项回归：`365 passed, 344 deselected`
 
 补充进展：
 
@@ -379,7 +393,8 @@ pytest -q tests/test_graph_agent.py -k 'pairwise and action_intent'
 
 - 当前专项回归命令：`pytest -q tests/test_graph_agent.py -k 'action_intent'`
 - 当前稳定结果：`363 passed, 344 deselected`
-- 相比进入本轮半天专项时文档记录的 `353 passed, 344 deselected`，本阶段净增：`+10 passed`
+- 当前稳定结果：`365 passed, 344 deselected`
+- 相比进入本轮半天专项时文档记录的 `353 passed, 344 deselected`，本阶段净增：`+12 passed`
 
 ### 本阶段已完成的 bucket
 
