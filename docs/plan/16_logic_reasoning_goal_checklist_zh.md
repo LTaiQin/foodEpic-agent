@@ -278,6 +278,13 @@
 - 本轮提交：新增并通过 1 条定向测试，覆盖：
   - `tap kitchen scale` 的 textual fallback 在 repeated failure 后，仍优先补 `precontext` 去确认“tap 前是否已开机/是否已有容器”，而不是继续盯动作后短窗。
 - 本轮提交：专项回归已进一步提升到 `370 passed, 344 deselected`
+- 本轮提交：再补第三类 repeated textual fallback 的对称性缺口：`needed_observation already names the real target/relation`。此前如果专用裁决已经把歧义收敛到“是否回 fridge / 是否放到 scale / 是否 carried over plate”这类明确目标或关系，但随后连续视觉失败并退到 `rank_choices_from_state`，planner 仍可能先做 generic `inspect_visual_evidence`，而不是直接进入 target/relation revisit。
+- 本轮改为：
+  - 在 textual fallback 入口，优先读取最近 action-intent 专用裁决里的 `needed_observation`；
+  - 若已经能从中解析出明确的 relation hint 或 target hint，就直接进入已有的 relation/target revisit 恢复链，不再先退回 generic visual review。
+- 本轮提交：新增并通过 1 条定向测试，覆盖：
+  - `take bottle` 的 textual fallback 在 repeated failure 后，如果 `needed_observation` 已经明确收敛到“是先读标签还是回 fridge”，就直接继续追 `bottle -> fridge` 的更晚证据，而不是先做 generic 短时序复核。
+- 本轮提交：专项回归已进一步提升到 `371 passed, 344 deselected`
   - `pick up pot` 时若证据已经明确写出 `brought to the sink and tilted to pour`，则 `to empty the water.` 会压过弱 `to check the boiling water.`。
 - 本轮提交：同时回归通过 3 条关键保护：
   - `check label vs put back` 的 later-target marker 仍会在“尚未看清是否回冰箱”时继续 withheld；

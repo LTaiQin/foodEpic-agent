@@ -64,6 +64,12 @@
   - 说明真正缺的是动作前状态，例如 `tap 前是否已开机 / 是否已有容器`；
   - 但 repeated vision failure 后如果系统退到 `need_alternative_evidence_path + rank_choices_from_state`，planner 仍可能继续看动作后短窗，而不是持续优先回补 `precontext`。
 - [x] 当前最新专项回归：`368 passed, 344 deselected`
+- [x] 新 residual bucket：`textual fallback drops explicit needed-observation target/relation back to generic visual review`
+- [x] 代表 case：
+  - `needed_observation` 已经明确点名了判别目标或关系，例如“是否 returned to the fridge / placed onto the scale / carried over the plate”；
+  - 说明真正缺的是更晚的 target/relation 证据，而不是 generic frame summary；
+  - 但 repeated vision failure 后如果系统退到 `need_alternative_evidence_path + rank_choices_from_state`，planner 仍可能先做 `inspect_visual_evidence`，没有直接进入已有的 target/relation revisit 恢复链。
+- [x] 当前最新专项回归：`370 passed, 344 deselected`
 
 ## 17.2 半天执行原则
 
@@ -210,6 +216,13 @@
 - [x] 新增并通过 1 条定向测试，覆盖：
   - `tap kitchen scale` 的 textual fallback 在 repeated failure 后，仍优先补 `precontext` 去确认“tap 前是否已开机/是否已有容器”，而不是继续看动作后短窗。
 - [x] 本轮专项回归：`370 passed, 344 deselected`
+- [x] 收口 `textual fallback drops explicit needed-observation target/relation back to generic visual review`。此前 repeated vision failure 之后如果退到 `need_alternative_evidence_path + rank_choices_from_state`，即使最近 action-intent 专用裁决已经把歧义收敛到 `fridge / scale / plate` 这类明确 target/relation，planner 仍可能先做 generic `inspect_visual_evidence`，没有直接复用已有的 target/relation revisit 恢复链。
+- [x] 现在 textual fallback 的恢复入口继续对齐：
+  - 先读取最近专用裁决里的 `needed_observation`；
+  - 如果已经能解析出明确 relation hint 或 target hint，就直接进入 relation/target revisit，而不是先退回 generic visual review。
+- [x] 新增并通过 1 条定向测试，覆盖：
+  - `take bottle` 的 textual fallback 在 repeated failure 后，如果 `needed_observation` 已经明确收敛到“是先读标签还是回 fridge”，就直接继续追 `bottle -> fridge` 的更晚证据。
+- [x] 本轮专项回归：`371 passed, 344 deselected`
 
 补充进展：
 

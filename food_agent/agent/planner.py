@@ -10944,6 +10944,23 @@ class GraphAgentPlanner:
                 latest_resolution = self._latest_action_intent_resolution_payload(state)
                 latest_action_intent_result = latest_resolution[1] if latest_resolution is not None else {}
                 latest_needed_observation = str(latest_action_intent_result.get("needed_observation") or "").lower()
+                if self._is_action_intent_task(state) and isinstance(latest_action_intent_result, dict):
+                    needed_observation_relation_revisit = self._build_action_intent_needed_observation_relation_revisit_decision(
+                        state=state,
+                        hints=hints,
+                        result=latest_action_intent_result,
+                        thought="why 题 repeated textual fallback 前，`needed_observation` 已经明确收敛到某个关系型判别证据；直接追动作物体与目标之间是否真的形成 `on/into/over/returned` 这类关系，而不是先退回 generic visual review。",
+                    )
+                    if needed_observation_relation_revisit is not None:
+                        return needed_observation_relation_revisit
+                    needed_observation_target_revisit = self._build_action_intent_needed_observation_target_revisit_decision(
+                        state=state,
+                        hints=hints,
+                        result=latest_action_intent_result,
+                        thought="why 题 repeated textual fallback 前，`needed_observation` 已经明确点名了判别目标/位置；直接去追该目标的更晚证据，而不是先退回 generic visual review。",
+                    )
+                    if needed_observation_target_revisit is not None:
+                        return needed_observation_target_revisit
                 if (
                     self._is_action_intent_task(state)
                     and isinstance(latest_action_intent_result, dict)
