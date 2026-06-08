@@ -3549,6 +3549,14 @@ class GraphAgent:
             global_context=global_context,
         ):
             adjusted += 0.3
+        if self._action_intent_choice_is_explicit_both_hands_wiping_goal(
+            choice=choice_lc,
+            support=support_lc,
+            contradiction=contradiction_lc,
+            action_object=action_object,
+            global_context=global_context,
+        ):
+            adjusted += 0.38
         if self._action_intent_choice_is_direct_disposal_path(
             choice=choice_lc,
             support=support_lc,
@@ -4290,6 +4298,20 @@ class GraphAgent:
             if "dry hand" not in choice and "dry hands" not in choice:
                 continue
             signal_text = f"{support} {contradiction}"
+            if any(
+                token in signal_text
+                for token in (
+                    "brought to both hands",
+                    "both hands are wiped",
+                    "wipes both hands",
+                    "used on both hands",
+                    "both hands rather than",
+                    "not limited to one hand",
+                    "双手",
+                    "不是单手",
+                )
+            ):
+                continue
             if not any(
                 token in signal_text
                 for token in (
@@ -7448,6 +7470,18 @@ class GraphAgent:
         )
         if has_positive_hand_drying:
             return False
+        if any(
+            token in signal_text
+            for token in (
+                "not limited to one hand",
+                "both hands rather than",
+                "both hands are wiped",
+                "brought to both hands",
+                "双手",
+                "不是单手",
+            )
+        ):
+            return True
         return any(
             token in signal_text
             for token in (
@@ -7519,6 +7553,55 @@ class GraphAgent:
                 "擦干双手",
                 "洗手后",
                 "湿手",
+            )
+        )
+
+    def _action_intent_choice_is_explicit_both_hands_wiping_goal(
+        self,
+        *,
+        choice: str,
+        support: str,
+        contradiction: str,
+        action_object: str,
+        global_context: str,
+    ) -> bool:
+        if not any(
+            token in action_object
+            for token in ("cloth", "towel", "tea towel", "dish cloth", "napkin", "paper towel")
+        ):
+            return False
+        if not any(
+            token in choice
+            for token in ("wipe both hands", "wipe hands", "dry both hands", "双手", "擦双手")
+        ):
+            return False
+        signal_text = f"{support} {contradiction} {global_context}"
+        if any(
+            token in signal_text
+            for token in (
+                "do not clearly show both hands",
+                "not clearly show both hands",
+                "single-hand specificity is stronger",
+                "brief dry/wipe of a hand",
+                "only one hand being dried",
+                "没有明确双手",
+                "更像单手",
+                "只擦一只手",
+            )
+        ):
+            return False
+        return any(
+            token in signal_text
+            for token in (
+                "brought to both hands",
+                "both hands are wiped",
+                "wipes both hands",
+                "used on both hands",
+                "toward both hands",
+                "hands are wiped dry",
+                "双手",
+                "擦干双手",
+                "双手都",
             )
         )
 

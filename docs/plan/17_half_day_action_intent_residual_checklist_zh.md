@@ -145,9 +145,9 @@
 
 待做：
 
-- [ ] 检查现有 `transport-vs-use` frame selection 和 future-use route。
+- [x] 检查现有 `transport-vs-use` frame selection 和 future-use route。
 - [ ] 补“拿起后只是放下/挪动”的测试，防止误判 clean/dry。
-- [ ] 补“短暂接触手部”的测试，防止被泛化成 clean counter。
+- [x] 补“短暂接触手部”的测试，防止被泛化成 clean counter。
 - [ ] 补“真正擦台面需要 sweep/contact target”的 finish gate。
 
 完成标准：
@@ -155,6 +155,14 @@
 - [ ] 不再只因纸巾靠近台面就判 clean counter。
 - [ ] 不再只因纸巾被拿起就判 dry。
 - [ ] 需要看到手部接触、表面擦拭、或最终放置链条。
+
+本轮进展：
+
+- [x] 收口 `dry hand` vs `wipe both hands` 的一条高频细粒度残差。此前 unresolved rerank 已能把 hand-contact 从 `clean counter` 拉回 hand-use，但对于“明确是双手擦拭”与“更弱的单手 dry hand”之间还缺少对称区分。
+- [x] 新增 `explicit both-hands wiping` 规则：若证据明确出现 `brought to both hands / both hands are wiped`，则 `wipe both hands` 获得更强加分。
+- [x] 同时收紧 `single-hand drying` 相关 override：如果证据已经明确说“不是单手，而是双手”，就不再把答案翻回 `dry hand`。
+- [x] 新增并通过 1 条定向测试，覆盖 `pick up paper towel` 后证据明确指向双手擦拭时，不再停在 `dry hand`，而会提升到 `wipe both hands`。
+- [x] 本轮专项回归：`334 passed, 344 deselected`
 
 ## 17.8 Residual Bucket E：scale / tare / zero / measurement state-change
 
