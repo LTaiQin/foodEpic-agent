@@ -7464,16 +7464,26 @@ class GraphAgentPlanner:
         if latest is None:
             return ""
         _tool_name, payload = latest
-        best_index = self._coerce_choice_index(payload.get("best_index"), getattr(state, "choices", []))
+        choices = [str(choice) for choice in getattr(state, "choices", [])]
+        best_index = self._coerce_choice_index(payload.get("best_index"), choices)
         if best_index is None:
             return ""
-        choice = str(getattr(state, "choices", [])[best_index])
         action_object = self._action_intent_question_object_hint(state)
         fixture_only = {"slot", "rack", "sink", "tap", "faucet", "fridge", "door", "drawer", "cupboard", "dishwasher"}
-        for token in self._action_intent_choice_target_object_candidates(choice=choice, action_object=action_object):
-            if token in fixture_only:
+        candidate_indices: list[int] = [best_index]
+        competitor_index = self._action_intent_competing_candidate_index(payload, state)
+        if competitor_index is not None and competitor_index != best_index:
+            candidate_indices.append(competitor_index)
+        seen: set[str] = set()
+        for index in candidate_indices:
+            if index < 0 or index >= len(choices):
                 continue
-            return token
+            choice = choices[index]
+            for token in self._action_intent_choice_target_object_candidates(choice=choice, action_object=action_object):
+                if token in fixture_only or token in seen:
+                    continue
+                seen.add(token)
+                return token
         return ""
 
     def _action_intent_unresolved_rerank_downstream_fixture_hint(self, state: AgentState) -> str:
@@ -8856,6 +8866,29 @@ class GraphAgentPlanner:
                 tool="query_object",
                 args={"query": downstream_target, "limit": 24},
             )
+        later_selected = None
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            start_raw = node.get("start_time")
+            end_raw = node.get("end_time")
+            if start_raw is None:
+                continue
+            try:
+                start_time = float(start_raw)
+            except Exception:  # noqa: BLE001
+                continue
+            try:
+                end_time = float(end_raw) if end_raw is not None else start_time
+            except Exception:  # noqa: BLE001
+                end_time = start_time
+            if end_time < start_time:
+                end_time = start_time
+            if min_start_time is not None and start_time < min_start_time:
+                continue
+            later_selected = (node, start_time, end_time)
+        if later_selected is not None:
+            selected = later_selected
         _node, start_time, end_time = selected
         query_time = start_time if abs(end_time - start_time) < 0.25 else (start_time + min(end_time, start_time + 1.2)) / 2
         return PlannerDecision(
@@ -11087,6 +11120,13 @@ class GraphAgentPlanner:
                             tool=hand_free_target_revisit.tool,
                             args=hand_free_target_revisit.args,
                         )
+                    unresolved_rerank_downstream_target_revisit = self._build_action_intent_unresolved_rerank_downstream_target_revisit_decision(
+                        state=state,
+                        hints=hints,
+                        thought="why 题 repeated textual fallback 前，unresolved rerank 已指出 revealed-target / freed-slot 的真正下游目标还没被确认；优先追那个下游对象，而不是先退回 generic visual review。",
+                    )
+                    if unresolved_rerank_downstream_target_revisit is not None:
+                        return unresolved_rerank_downstream_target_revisit
                 if (
                     self._is_action_intent_task(state)
                     and isinstance(latest_action_intent_result, dict)

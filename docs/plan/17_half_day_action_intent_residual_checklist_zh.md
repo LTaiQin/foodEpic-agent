@@ -95,6 +95,11 @@
   - system 已经收敛到 `free one hand` 这类 generic hand-free 中间态与 `turn on the tap / use object next` 这类更具体下游动作之间的 close-call；
   - 但 repeated vision failure 后如果系统退到 `need_alternative_evidence_path + rank_choices_from_state`，planner 仍会先做 generic `inspect_visual_evidence`，没有直接复用 hand-free downstream revisit 去追真实下游 fixture/object。
 - [x] 当前最新专项回归：`377 passed, 344 deselected`
+- [x] 新 residual bucket：`textual fallback drops revealed-target downstream object revisit back to generic visual review`
+- [x] 代表 case：
+  - system 已经收敛到 `access what's behind` 这类 reveal 中间态与 `take the hidden target` 这类更具体下游对象之间的 close-call；
+  - 但 repeated vision failure 后如果系统退到 `need_alternative_evidence_path + rank_choices_from_state`，planner 仍会先做 generic `inspect_visual_evidence`，没有直接复用 downstream object revisit 去追真实 hidden target。
+- [x] 当前最新专项回归：`378 passed, 344 deselected`
 
 ## 17.2 半天执行原则
 
@@ -287,6 +292,13 @@
 - [x] 新增并通过 1 条定向测试，覆盖：
   - `put down knife` 的 textual fallback 在 repeated failure 后，如果 close-call 已经收敛到 `free one hand` vs `turn on the tap`，则会直接追 `tap` 的更晚节点。
 - [x] 本轮专项回归：`377 passed, 344 deselected`
+- [x] 收口 `textual fallback drops revealed-target downstream object revisit back to generic visual review`。此前 repeated vision failure 之后如果退到 `need_alternative_evidence_path + rank_choices_from_state`，即使系统已经收敛到 `access what's behind` vs `take the hidden target` 这类 close-call，planner 仍会先做 generic `inspect_visual_evidence`，没有直接复用 downstream object revisit。
+- [x] 现在 textual fallback 的恢复入口继续对齐：
+  - 直接复用 `revealed-target / freed-slot` 的 downstream object revisit；
+  - 同时对 object 目标启用“优先更晚节点”偏置，避免停在 reveal 初现的早窗节点。
+- [x] 新增并通过 1 条定向测试，覆盖：
+  - `move bottle` 的 textual fallback 在 repeated failure 后，如果 close-call 已经收敛到 `access what's behind` vs `take the hidden spice jar`，则会直接追 `jar` 的更晚节点。
+- [x] 本轮专项回归：`378 passed, 344 deselected`
 
 补充进展：
 
