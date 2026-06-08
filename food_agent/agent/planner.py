@@ -2406,6 +2406,24 @@ class GraphAgentPlanner:
             unique_targets.append((target, "object"))
         if len(unique_targets) == 1:
             return unique_targets[0]
+        if len(unique_targets) > 1:
+            text_lc = text
+            reason_lc = self._action_intent_result_support_text(result) if isinstance(result, dict) else ""
+            revealed_slot_terms = (
+                "freed slot",
+                "free slot",
+                "sink slot",
+                "specific freed slot",
+                "target position",
+                "placed into the freed slot",
+                "put into the freed slot",
+                "placed into the sink",
+                "put into the sink",
+            )
+            if any(term in text_lc or term in reason_lc for term in revealed_slot_terms):
+                for target, kind in unique_targets:
+                    if kind == "object":
+                        return target, kind
         return None
 
     def _action_intent_needed_observation_relation_hint(
@@ -2421,6 +2439,11 @@ class GraphAgentPlanner:
             return None
         text = self._action_intent_needed_observation_text(state=state, result=result)
         if not text:
+            return None
+        if (
+            target_hint[1] == "object"
+            and any(marker in text for marker in ("freed slot", "free slot", "sink slot", "target position"))
+        ):
             return None
         relation_matches: list[str] = []
         relation_specs = (
@@ -7162,49 +7185,52 @@ class GraphAgentPlanner:
     def _action_intent_choice_target_object_candidates(self, *, choice: str, action_object: str) -> list[str]:
         choice_lc = str(choice or "").lower()
         action_object_tokens = {token for token in re.split(r"[^a-z0-9]+", str(action_object or "").lower()) if token}
-        target_tokens = [
-            token
-            for token in (
-                "whisk",
-                "knife",
-                "fork",
-                "spoon",
-                "spatula",
-                "bottle",
-                "sponge",
-                "brush",
-                "cloth",
-                "towel",
-                "lid",
-                "cover",
-                "bowl",
-                "plate",
-                "tray",
-                "pot",
-                "pan",
-                "saucepan",
-                "cup",
-                "glass",
-                "jar",
-                "colander",
-                "container",
-                "bin",
-                "scale",
-                "tap",
-                "faucet",
-                "sink",
-                "hob",
-                "microwave",
-                "oven",
-                "fridge",
-                "door",
-                "drawer",
-                "cupboard",
-                "rack",
-                "dishwasher",
-            )
-            if token in choice_lc and token not in action_object_tokens
-        ]
+        vocabulary = (
+            "saucepan",
+            "spatula",
+            "microwave",
+            "dishwasher",
+            "cupboard",
+            "container",
+            "colander",
+            "faucet",
+            "whisk",
+            "knife",
+            "spoon",
+            "bottle",
+            "sponge",
+            "brush",
+            "cloth",
+            "towel",
+            "cover",
+            "bowl",
+            "plate",
+            "tray",
+            "glass",
+            "scale",
+            "fridge",
+            "drawer",
+            "fork",
+            "rack",
+            "door",
+            "sink",
+            "oven",
+            "hob",
+            "jar",
+            "lid",
+            "bin",
+            "cup",
+            "pot",
+            "pan",
+            "tap",
+        )
+        target_tokens = []
+        for token in vocabulary:
+            if token in action_object_tokens:
+                continue
+            if not re.search(rf"(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])", choice_lc):
+                continue
+            target_tokens.append(token)
         seen: set[str] = set()
         ordered: list[str] = []
         for token in target_tokens:

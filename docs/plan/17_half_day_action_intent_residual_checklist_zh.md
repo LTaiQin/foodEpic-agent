@@ -17,7 +17,7 @@
 - 已提交进展：`16.49 generic measurement-meta -> exact measurement target`
 - 当前待提交进展：`16.50 pick up phone generic-measure -> exact ingredient record target`
 - 当前专项回归：`pytest -q tests/test_graph_agent.py -k 'action_intent'`
-- 当前已验证结果：`327 passed, 344 deselected`
+- 当前已验证结果：`330 passed, 344 deselected`
 
 ## 17.2 半天执行原则
 
@@ -102,15 +102,23 @@
 
 待做：
 
-- [ ] 检查 `needed_observation` target revisit、reveal subtype、workspace/final placement gate。
+- [x] 检查 `needed_observation` target revisit、reveal subtype、workspace/final placement gate。
 - [ ] 补 `make space` vs `take hidden X` 的更多泛化测试。
-- [ ] 补 `make space` vs `place Y into freed slot` 的目标追证测试。
+- [x] 补 `make space` vs `place Y into freed slot` 的目标追证测试。
 - [ ] 补 `move object` 后只看到空间变化但没看到下游动作时不能 finish。
 
 完成标准：
 
+- [x] `revealed slot / sink slot` 这类“双目标文本”不再因为同时出现对象和槽位而丢失追证目标；planner 会优先追真正要被放入的 downstream object。
 - [ ] 只有看到 hidden target 被取出、slot 被使用、或后续目标动作发生，才允许具体候选收口。
 - [ ] 如果只是空间变大，继续追证据。
+
+本轮进展：
+
+- [x] 修复 `needed_observation` 在 `put X into the freed slot / sink slot` 语境下的双目标歧义。此前对象与槽位同时出现时，planner 可能不追任何精确目标，或被 relation-revisit 抢回动作物体；现在会优先追真正的 downstream object。
+- [x] 修复 `choice target` 词项抽取中的子串误命中，避免 `saucepan -> pan` 这类目标追歪。
+- [x] 新增 2 条定向测试覆盖 `blue cup -> freed slot` 与 `saucepan -> sink slot`。
+- [x] 本轮专项回归：`330 passed, 344 deselected`
 
 ## 17.7 Residual Bucket D：towel / cloth / paper towel 的 transport-vs-use
 
@@ -205,10 +213,12 @@ pytest -q tests/test_graph_agent.py -k 'pairwise and action_intent'
 半天结束前必须记录：
 
 - [ ] 当前 `action_intent` 通过数量。
+- [x] 当前 `action_intent` 通过数量。
 - [ ] 新增了哪些 residual bucket。
 - [ ] 哪些 bucket 已提交。
 - [ ] 哪些 bucket 还没做。
 - [ ] 是否存在未提交但已验证通过的改动。
+- [x] 是否存在未提交但已验证通过的改动。
 - [ ] 是否存在失败测试或已知回归风险。
 
 ## 17.11 半天结束时的交付物

@@ -100,6 +100,14 @@
 - 本轮提交：why 题 textual fallback 的输入证据改为当前题/当前时窗 scoped evidence，不再把无关 session summary、旧时窗观测、planner/verifier 噪声直接喂给 `rank_choices_from_state`
 - 本轮提交：why 题 repeated visual failure 的恢复顺序改为 `specialized resolution > textual fallback`，当前题已有足够原始帧时先走 `future_use/pairwise` 专用裁决
 - 本轮提交：`future_use` toolbox hierarchy 补上 same-object residue-release，高频 `tap/shake/tilt/hit` 动作在专用裁决层优先翻正到“残余内容物掉回原容器/锅/碗/水槽”
+- 本轮提交：Bucket C 的 `revealed slot / sink slot` 追证逻辑继续收紧。此前 `needed_observation` 若同时点名“被放入的对象”和“freed slot / sink slot”这类槽位，planner 容易因为目标不唯一而放弃精确追证，或者被 relation-revisit 抢先带回动作物体，停在“空间被腾出来了”的宽泛解释。本轮改为：
+  - 对 `placed/put into the freed slot`、`put into the sink slot` 这类文本，优先把“将被放入的对象”当成真正的 downstream target；
+  - 同类场景下先跳过 relation-revisit，避免 planner 围着动作物体和槽位关系打转，而是直接去追下游对象在更晚时刻是否真的进入该位置；
+  - `choice target` 抽取改为更稳的边界匹配和长词优先，避免 `saucepan -> pan` 这类子串误命中把目标追歪。
+- 本轮提交：新增并通过 2 条 Bucket C 定向测试，分别保护：
+  - `move mug -> blue cup into freed slot` 时会优先追 `cup` 的后续轨迹，而不是卡在 `cup + slot` 的双目标歧义里；
+  - `move colander -> saucepan into sink slot` 时会优先追 `saucepan` 的后续轨迹，而不是回到 `colander / sink` 关系或被 `pan` 子串误匹配带偏。
+- 本轮提交：专项回归已更新到 `330 passed, 344 deselected`
 - 本轮提交：why 题在首次 `infer_action_intent` 就暴露 `receptacle_outcome` 近窗歧义时，不再机械地先走一轮泛化 `followup`。现在会直接围绕动作尾部触发 `followup_transition`，主动去找“是否真的掉回 sink/pan/bowl/container”的决定性关键帧；同时这条路径会压过误触发的 `precontext`，避免 `flip cloth / shake / tap / tilt` 一类题被无关前置状态采样截走
 - 本轮提交：新增并通过 2 条定向测试，分别保护：
   - `receptacle_outcome` 型 why close-call 会在第一次歧义时直接进入 `followup_transition`
