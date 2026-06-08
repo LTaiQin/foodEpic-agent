@@ -7776,9 +7776,9 @@ class GraphAgentPlanner:
     def _action_intent_choice_record_target_hint(self, choice: str) -> str:
         text = str(choice or "").strip().lower()
         patterns = (
-            r"(?:nutritional\s+value|nutrition(?:al)?\s+value|value)\s+of\s+the\s+([a-z0-9][a-z0-9 -]*)",
-            r"(?:measurements?|entry|entries|record|update|log)\s+of\s+the\s+([a-z0-9][a-z0-9 -]*)",
-            r"for\s+the\s+([a-z0-9][a-z0-9 -]*)",
+            r"(?:nutritional\s+value|nutrition(?:al)?\s+value|value)\s+of\s+(?:the\s+)?([a-z0-9][a-z0-9 -]*)",
+            r"(?:measurements?|entry|entries|record|update|log)\s+of\s+(?:the\s+)?([a-z0-9][a-z0-9 -]*)",
+            r"for\s+(?:the\s+)?([a-z0-9][a-z0-9 -]*)",
         )
         for pattern in patterns:
             match = re.search(pattern, text)
@@ -11018,6 +11018,36 @@ class GraphAgentPlanner:
                     )
                     if nonexclusive_concrete_late_anchor_revisit is not None:
                         return nonexclusive_concrete_late_anchor_revisit
+                    measurement_target_revisit = self._build_action_intent_verifier_blocked_measurement_target_revisit_decision(
+                        state=state,
+                        hints=hints,
+                        result=latest_action_intent_result,
+                        blocker_hint="future_use_close_call",
+                    )
+                    if measurement_target_revisit is not None:
+                        return PlannerDecision(
+                            thought=(
+                                "why 题 repeated textual fallback 前，当前已经收敛到 generic measurement-meta vs exact weighing target 的冲突；"
+                                "直接追 `scale`/称量目标的更晚证据，而不是先退回 generic visual review。"
+                            ),
+                            tool=measurement_target_revisit.tool,
+                            args=measurement_target_revisit.args,
+                        )
+                    phone_record_target_revisit = self._build_action_intent_verifier_blocked_phone_record_target_revisit_decision(
+                        state=state,
+                        hints=hints,
+                        result=latest_action_intent_result,
+                        blocker_hint="future_use_close_call",
+                    )
+                    if phone_record_target_revisit is not None:
+                        return PlannerDecision(
+                            thought=(
+                                "why 题 repeated textual fallback 前，当前已经收敛到 generic phone-measure vs exact ingredient record target 的冲突；"
+                                "直接追具体记录目标的更晚证据，而不是先退回 generic visual review。"
+                            ),
+                            tool=phone_record_target_revisit.tool,
+                            args=phone_record_target_revisit.args,
+                        )
                 if (
                     self._is_action_intent_task(state)
                     and isinstance(latest_action_intent_result, dict)

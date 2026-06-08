@@ -80,6 +80,11 @@
   - finalizer 或 unresolved 流程已经明确写出 `nonexclusive_concrete_late_anchor / timeline_review_bias_gap / workspace_or_final_placement_claim`，说明当前只是“标签露出来了 / 放在附近了 / 空间更开阔了”的中间态；
   - 但 repeated vision failure 后如果系统退到 `need_alternative_evidence_path + rank_choices_from_state`，planner 仍可能直接退回 generic 稀疏补帧，或者虽然进入 long-horizon revisit 却停在过早节点，而不是继续跳到更晚、更有判别力的节点。
 - [x] 当前最新专项回归：`373 passed, 344 deselected`
+- [x] 新 residual bucket：`textual fallback drops measurement / phone-record specialized target revisit back to generic visual review`
+- [x] 代表 case：
+  - system 已经收敛到 `generic measurement-meta vs exact weighing target`，或 `generic phone-measure vs exact ingredient record target`；
+  - 但 repeated vision failure 后如果系统退到 `need_alternative_evidence_path + rank_choices_from_state`，planner 仍会先做 generic `inspect_visual_evidence`，没有直接复用 specialized target revisit 去追 `scale` 或具体 ingredient target。
+- [x] 当前最新专项回归：`375 passed, 344 deselected`
 
 ## 17.2 半天执行原则
 
@@ -249,6 +254,15 @@
 - [x] 新增并通过 1 条定向测试，覆盖：
   - `move bowl` 的 textual fallback 在 repeated failure 后，如果已经写入 `nonexclusive_concrete_late_anchor` marker，则会直接跳到 `bowl` 的更晚节点，而不是回到 generic 稀疏补帧或停在早窗邻近片段。
 - [x] 本轮专项回归：`373 passed, 344 deselected`
+- [x] 收口 `textual fallback drops measurement / phone-record specialized target revisit back to generic visual review`。此前 repeated vision failure 之后如果退到 `need_alternative_evidence_path + rank_choices_from_state`，即使系统已经收敛到 `generic measurement-meta vs exact weighing target` 或 `generic phone-measure vs exact ingredient record target`，planner 仍会先做 generic `inspect_visual_evidence`，没有直接复用已有的 `scale / ingredient target` specialized revisit。
+- [x] 现在 textual fallback 的恢复入口继续对齐：
+  - 对 `measurement` close-call，直接复用 `measurement target revisit`；
+  - 对 `phone-record` close-call，直接复用 `phone record target revisit`；
+  - 同时补强 exact ingredient record target 的文本抽取规则，支持 `of broccoli / for broccoli` 这类常见表达，不再局限 `of the broccoli`。
+- [x] 新增并通过 2 条定向测试，分别覆盖：
+  - `pick up scale` 的 textual fallback 在 repeated failure 后，会优先追 `scale` / weighing target；
+  - `pick up phone` 的 textual fallback 在 repeated failure 后，会优先追 `broccoli` 这类 exact ingredient record target。
+- [x] 本轮专项回归：`375 passed, 344 deselected`
 
 补充进展：
 

@@ -301,6 +301,14 @@
 - 本轮提交：新增并通过 1 条定向测试，覆盖：
   - `move bowl` 的 textual fallback 在 repeated failure 后，如果已经写入 `nonexclusive_concrete_late_anchor` marker，则会直接跳到 `bowl` 的更晚节点，而不是回到 generic 稀疏补帧或停在早窗邻近片段。
 - 本轮提交：专项回归已进一步提升到 `373 passed, 344 deselected`
+- 本轮提交：继续补 `repeated textual fallback` 下的 `measurement / phone-record exact target` 对称性。此前 `generic measurement-meta -> exact weighing target` 与 `generic phone-measure -> exact ingredient record target` 这两类 specialized revisit，在 `verifier-blocked` 路径里已经会直接追 `scale` 或具体 ingredient target；但 repeated vision failure 后一旦退到 `rank_choices_from_state`，planner 仍会先回到 generic `inspect_visual_evidence`，没有复用这些更强的 specialized target revisit。
+- 本轮改为：
+  - textual fallback 入口也接入 `measurement target revisit` 与 `phone record target revisit`；
+  - 同时把 ingredient record target 的文本抽取规则从只接受 `of the X` 扩到也支持常见的 `of X / for X` 表达，避免像 `record the nutritional value of broccoli` 这类真实措辞漏触发。
+- 本轮提交：新增并通过 2 条定向测试，分别覆盖：
+  - `pick up scale` 的 textual fallback 在 repeated failure 后，会优先追 `scale` / weighing target，而不是先退回 generic visual review；
+  - `pick up phone` 的 textual fallback 在 repeated failure 后，会优先追 `broccoli` 这类 exact ingredient record target，而不是先退回 generic visual review。
+- 本轮提交：专项回归已进一步提升到 `375 passed, 344 deselected`
   - `pick up pot` 时若证据已经明确写出 `brought to the sink and tilted to pour`，则 `to empty the water.` 会压过弱 `to check the boiling water.`。
 - 本轮提交：同时回归通过 3 条关键保护：
   - `check label vs put back` 的 later-target marker 仍会在“尚未看清是否回冰箱”时继续 withheld；
