@@ -142,6 +142,11 @@
   - `need_disambiguating_evidence` / `need_alternative_evidence_path` 恢复入口现在会读取最新的 `resolve_action_intent_pairwise / future_use` payload，而不是只看旧的 `infer_action_intent`；
   - 若最近已经写入 `action_intent_resolution_withheld_for_missing_state_change_prereq=1`，且 `needed_observation` 明示 `before the tap / already lit / already on / container already on the scale`，planner 会优先补 `precontext`，不再继续在动作后结果帧里打转。
 - 本轮提交：新增并通过 1 条 Bucket E 定向测试，覆盖 `resolve_action_intent_pairwise` 已明确“需要看动作前显示状态/容器前提”时，planner 会优先采样 `fine_grained_why_recognition_precontext`，而不是继续回到 `pairwise`。
+- 本轮提交：Bucket F 开始收口 `check boiling / check contents` 的 weak inspection overclaim。此前 `resolve_action_intent_future_use` 若直接给出 `check the boiling water / check the contents / check the consistency`，只要锅具里“似乎还有液体/内容物”就可能被 deterministic finalizer 直接收口，即使没有 `brief inspection / stays near hob / no tilt / no pouring / no serving destination` 这类 inspection chain。本轮新增 `weak cooking inspection` finish gate：
+  - 对 `pot/pan/saucepan/frying pan/bowl` 这类 cooking vessel，若 top 候选属于 `check boiling / check contents / check consistency / see if done`；
+  - 但 `reason + decisive_observation + needed_observation` 里没有形成 `brief cooking inspection over disposal` 的强链条；
+  - 则直接写入 `action_intent_resolution_withheld_for_weak_cooking_inspection_evidence=1` 并继续 withheld。
+- 本轮提交：新增并通过 1 条 Bucket F 定向测试，覆盖“只有 `pot is lifted while it still seems to contain hot water`、没有 `brief inspection / no tilt / stays near hob` 链条”时，finalizer 不能直接收口到 `to check the boiling water.`。
 - 本轮提交：专项回归已更新到 `337 passed, 344 deselected`
 - 本轮提交：why 题在首次 `infer_action_intent` 就暴露 `receptacle_outcome` 近窗歧义时，不再机械地先走一轮泛化 `followup`。现在会直接围绕动作尾部触发 `followup_transition`，主动去找“是否真的掉回 sink/pan/bowl/container”的决定性关键帧；同时这条路径会压过误触发的 `precontext`，避免 `flip cloth / shake / tap / tilt` 一类题被无关前置状态采样截走
 - 本轮提交：新增并通过 2 条定向测试，分别保护：

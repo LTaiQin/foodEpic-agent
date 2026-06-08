@@ -897,6 +897,9 @@ class GraphAgent:
             elif self._action_intent_resolution_should_withhold_weak_surface_wiping_claim(raw_result=raw_result, state=state):
                 state.add_memory("action_intent_resolution_withheld_for_weak_surface_wiping_evidence=1")
                 continue
+            elif self._action_intent_resolution_should_withhold_weak_cooking_inspection_claim(raw_result=raw_result, state=state):
+                state.add_memory("action_intent_resolution_withheld_for_weak_cooking_inspection_evidence=1")
+                continue
             elif self._action_intent_resolution_should_withhold_weak_relocation_or_residue_claim(raw_result=raw_result, state=state):
                 state.add_memory("action_intent_resolution_withheld_for_missing_direct_outcome_evidence=1")
                 continue
@@ -1718,6 +1721,52 @@ class GraphAgent:
                 ):
                     return True
         return False
+
+    def _action_intent_resolution_should_withhold_weak_cooking_inspection_claim(
+        self,
+        *,
+        raw_result: dict[str, Any],
+        state: AgentState,
+    ) -> bool:
+        question = str(getattr(state, "question", "") or "").lower()
+        action_object = self._action_intent_question_object(question)
+        if not any(token in action_object for token in ("pot", "pan", "saucepan", "frying pan", "bowl")):
+            return False
+        index = self._coerce_choice_index(raw_result.get("best_index"), state.choices)
+        if index is None:
+            return False
+        choice_lc = str(state.choices[index]).lower()
+        if not any(
+            token in choice_lc
+            for token in (
+                "check the boiling water",
+                "check the contents",
+                "check the consistency",
+                "see if it is cooked",
+                "see whether the pasta is done",
+                "boiling",
+                "contents",
+                "consistency",
+                "done",
+                "熟了",
+                "沸腾",
+                "内容物",
+            )
+        ):
+            return False
+        text = " ".join(
+            str(raw_result.get(key) or "")
+            for key in ("reason", "decisive_observation", "needed_observation")
+        ).lower()
+        if self._action_intent_text_has_negative_evidence(text):
+            return True
+        return not self._action_intent_choice_is_brief_cooking_inspection_over_disposal(
+            choice=choice_lc,
+            support=text,
+            contradiction="",
+            action_object=action_object,
+            global_context="",
+        )
 
     def _action_intent_resolution_should_withhold_broad_generic_claim_without_direct_evidence(
         self,

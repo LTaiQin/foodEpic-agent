@@ -220,16 +220,23 @@
 
 待做：
 
-- [ ] 补 `label visible` 但没有 reading chain 时不能 finish。
+- [x] 补 `label visible` 但没有 reading chain 时不能 finish。
 - [ ] 补 `check label` vs `put back` 的混合窗口追证。
 - [ ] 补 `check contents` vs `pour/empty/serve` 的 later outcome 追证。
 - [ ] 将 inspection 的 needed evidence 写得更明确，指导 planner 查后续帧。
 
 完成标准：
 
-- [ ] 不把“标签朝外/可见”直接当成 check label。
-- [ ] 不把“短暂看锅”直接当成 check boiling，除非有停留/查看链。
+- [x] 不把“标签朝外/可见”直接当成 check label。
+- [x] 不把“短暂看锅”直接当成 check boiling，除非有停留/查看链。
 - [ ] 如果后续倒出、归位或使用发生，应该能覆盖 inspection 误判。
+
+本轮进展：
+
+- [x] 确认并保留 `label visible` 的现有 finalizer gate。当前 `check label` 只有在出现更明确的 reading chain 时才允许 finish；仅有 `label faces the camera / label is visible while held` 时，会继续 withheld，不会把“标签可见”直接当成 `check the label`。
+- [x] 收口 `weak cooking inspection` 的 finalizer 缺口。此前 `resolve_action_intent_future_use` 若直接给出 `check the boiling water / check the contents / check the consistency`，只要锅具里“似乎还有液体/内容物”就可能被 deterministic finalizer 直接收口，即使没有 `brief inspection / stays near hob / no tilt / no pouring / no serving destination` 这类 inspection chain。
+- [x] 新增 `weak cooking inspection` finish gate：对于 `pot/pan/saucepan/frying pan/bowl` 这类 cooking vessel，若 top 候选是 `check boiling / check contents / check consistency / see if done`，但 `reason + decisive_observation + needed_observation` 里没有形成 `brief cooking inspection over disposal` 的强链条，则直接 withheld。
+- [x] 新增并通过 1 条 Bucket F 定向测试，覆盖“只有 `pot is lifted while it still seems to contain hot water`、没有 `brief inspection / no tilt / stays near hob` 链条”时，finalizer 不能直接收口到 `to check the boiling water.`。
 
 ## 17.10 半天验收命令
 
