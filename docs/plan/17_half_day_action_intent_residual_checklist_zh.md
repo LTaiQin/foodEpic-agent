@@ -184,7 +184,7 @@
 
 - [x] 检查 `tap scale` state-change 现有 gate。
 - [ ] 补 `zero out with container` 必须看到 container precondition。
-- [ ] 补 `turn on` vs `zero out` 必须看动作前显示状态。
+- [x] 补 `turn on` vs `zero out` 必须看动作前显示状态。
 - [x] 补 `adjust measurements` vs `weigh ingredient` 必须继续追 ingredient-on-scale 证据。
 
 完成标准：
@@ -200,6 +200,11 @@
 - [x] 同时补上 why 题 structured best-index fallback 的通用保护：只要已经写入 `action_intent_resolution_withheld_for_*` marker，就不允许后续 fallback 再把答案从旧的 `best_index` memory 里捞回来。
 - [x] 新增并通过 1 条 Bucket E 定向测试，覆盖 `pick up scale` 后只有“scale remains near ingredient area”的宽泛 measurement 语义、但没有 `reading/tare` 明确信号时，finalizer 不能直接收口到 `adjust the measurements.`。
 - [x] 新增并通过 1 条 Bucket E 回归保护测试，覆盖 `tap kitchen scale` 在缺少动作前开机状态/容器前提时，即使 working memory 里残留旧的 `action_intent_best_index=zero out`，structured fallback 也不会把被 finalizer withheld 的 `zero out` 再回填出来。
+- [x] 收口 `missing_state_change_prereq -> precontext backfill` 的恢复缺口。此前 `tap kitchen scale` 虽然在 finalizer 已能识别“缺少动作前开机/容器前提”，但 planner 的 open-question / verifier-blocked recovery 仍可能继续回到 pairwise 或 followup，漏掉真正决定 `turn on` vs `zero out` 的前置状态。本轮改为：
+  - `action_intent_needs_precondition_context` 现在把 `tap scale` 这类 `open_close + measure_weigh` 的 state-change 冲突也视为 precondition-dependent；
+  - `planner` 在 `need_disambiguating_evidence` / `need_alternative_evidence_path` 下，若最近出现 `action_intent_resolution_withheld_for_missing_state_change_prereq=1`，会直接读取最新的 `pairwise/future_use` payload，并优先回采 `precontext`；
+  - `tap kitchen scale` 的 backfill 还新增了更明确的 fast-path：只要 `needed_observation` 明示 `before the tap / already lit / already on / container already on the scale`，就不再继续盲目补动作后帧。
+- [x] 新增并通过 1 条 Bucket E 定向测试，覆盖 `resolve_action_intent_pairwise` 已明确“需要看动作前显示状态/容器前提”时，planner 会优先采样 `fine_grained_why_recognition_precontext`，而不是继续回到 `pairwise`。
 - [x] 本轮专项回归：`337 passed, 344 deselected`
 
 ## 17.9 Residual Bucket F：inspection / check / read label 与 later outcome

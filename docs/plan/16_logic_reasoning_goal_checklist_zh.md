@@ -137,6 +137,11 @@
   - 同时补上 why 题 structured best-index fallback 的通用保护：只要已经写入 `action_intent_resolution_withheld_for_*` marker，就不允许后续 fallback 再把答案从旧的 `best_index` memory 里捞回来。
 - 本轮提交：新增并通过 1 条 Bucket E 定向测试，覆盖 `pick up scale` 后只有“scale remains near ingredient area”的宽泛 measurement 语义、但没有 `reading/tare` 明确信号时，finalizer 不能直接收口到 `adjust the measurements.`。
 - 本轮提交：再补 1 条 Bucket E 回归保护测试，显式锁住 `tap kitchen scale -> zero out` 的 `missing_state_change_prereq` 与 structured fallback 的交互边界。现在即使 working memory 里还残留旧的 `action_intent_best_index=zero out`，只要 finalizer 已经写入 `action_intent_resolution_withheld_for_missing_state_change_prereq=1`，后续 fallback 也不会把该答案捞回。
+- 本轮提交：Bucket E 的 `turn on` vs `zero out` 再补 1 个真实实现缺口。此前 finalizer 已能识别 `tap kitchen scale` 在缺少“动作前已开机 / 容器已在秤上”前提时不能直接收口，但 planner 的恢复路径仍可能继续回到 pairwise / followup，只盯动作后读数变化，漏掉真正决定性的信息。本轮改为：
+  - `action_intent_needs_precondition_context` 不再只覆盖 `clean_dry / safety_avoid`，同时把 `tap scale` 这类 `open_close + measure_weigh` 的 state-change 冲突也视为 precondition-dependent；
+  - `need_disambiguating_evidence` / `need_alternative_evidence_path` 恢复入口现在会读取最新的 `resolve_action_intent_pairwise / future_use` payload，而不是只看旧的 `infer_action_intent`；
+  - 若最近已经写入 `action_intent_resolution_withheld_for_missing_state_change_prereq=1`，且 `needed_observation` 明示 `before the tap / already lit / already on / container already on the scale`，planner 会优先补 `precontext`，不再继续在动作后结果帧里打转。
+- 本轮提交：新增并通过 1 条 Bucket E 定向测试，覆盖 `resolve_action_intent_pairwise` 已明确“需要看动作前显示状态/容器前提”时，planner 会优先采样 `fine_grained_why_recognition_precontext`，而不是继续回到 `pairwise`。
 - 本轮提交：专项回归已更新到 `337 passed, 344 deselected`
 - 本轮提交：why 题在首次 `infer_action_intent` 就暴露 `receptacle_outcome` 近窗歧义时，不再机械地先走一轮泛化 `followup`。现在会直接围绕动作尾部触发 `followup_transition`，主动去找“是否真的掉回 sink/pan/bowl/container”的决定性关键帧；同时这条路径会压过误触发的 `precontext`，避免 `flip cloth / shake / tap / tilt` 一类题被无关前置状态采样截走
 - 本轮提交：新增并通过 2 条定向测试，分别保护：

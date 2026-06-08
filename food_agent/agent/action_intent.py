@@ -536,4 +536,9 @@ def action_intent_needs_precondition_context(
         return True
     if "safety_avoid" in active_categories:
         return True
+    if _question_requires_state_change_evidence(question) and {
+        "open_close",
+        "measure_weigh",
+    }.issubset(active_categories):
+        return True
     return False
