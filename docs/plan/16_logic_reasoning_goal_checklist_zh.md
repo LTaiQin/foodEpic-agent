@@ -218,6 +218,17 @@
   - later outcome 证据还额外要求是“已经发生”的结果，不接受 `could/may/not yet visible` 这类推测式表述，因此原有 `check label vs put back`、`check boiling vs empty` close-call 仍保持 withheld 并继续追更晚节点。
 - 本轮提交：新增并通过 2 条 Bucket F 定向测试，分别覆盖：
   - `take bottle` 时若证据已经明确写出 `placed back into the fridge`，则 `to put the bottle back in the fridge.` 会压过弱 `to check the label.`；
+- 本轮提交：收口一类新的 unresolved-rerank 残差 `immediate micro-outcome overclaim`。此前当 close-call 同时存在“立即微结果”和“更晚下游用途”时，系统已经能把 `open bottle / turn on scale` 之类候选提到最高分，但若证据里缺少真正的即时结果链，仍可能在 rerank 阶段过早收口；本轮改为：
+  - unresolved semantic gap 保留 `missing_immediate_micro_outcome_evidence`，用于拦截 `opening could happen next / could later be tipped` 这类纯推测式近窗与远窗候选；
+  - 但显式补强 immediate micro-outcome 的正证据识别，允许 `free to uncap/open immediately`、`reaches to the scale and turns it on` 这类已经形成即时动作链的候选继续收口；
+  - 同时修复一个真实的字符串残差：`breadcrumbs` 中的子串 `read` 之前会误触发“读标签/读日期”分支，导致 `uncap/open` 的即时证据被提前短路；现在阅读类匹配改为真正的 `read the / read label / read date / 读取标签` 等短语，不再被食材名误伤。
+- 本轮提交：新增并通过 2 条定向测试，分别覆盖：
+  - `take bottle` 时若只有 `opening could happen next`、`cap opening itself is not visible yet`，则 `to open the bottle.` 必须继续 withheld；
+  - 一旦证据明确出现 `cap is visibly loosened/opened while held in hand`，则 `to open the bottle.` 仍可正常收口。
+- 本轮提交：同时复核通过 2 条原有正例：
+  - `transfer cup of breadcrumbs` 时，`free hand -> uncap/open same object immediately` 仍会压过 later `weigh breadcrumbs`；
+  - `move tray` 时，`reveal scale -> immediately turn on the scale` 仍会压过 generic `access the scale behind the tray`。
+- 本轮提交：专项回归已更新到 `361 passed, 344 deselected`
   - `pick up pot` 时若证据已经明确写出 `brought to the sink and tilted to pour`，则 `to empty the water.` 会压过弱 `to check the boiling water.`。
 - 本轮提交：同时回归通过 3 条关键保护：
   - `check label vs put back` 的 later-target marker 仍会在“尚未看清是否回冰箱”时继续 withheld；

@@ -19,6 +19,15 @@
 - 当前专项回归：`pytest -q tests/test_graph_agent.py -k 'action_intent'`
 - 当前已验证结果：`353 passed, 344 deselected`
 
+最新进展补充：
+
+- [x] 新 residual bucket：`immediate micro-outcome overclaim`
+- [x] 代表 case：
+  - `take bottle` 时 `to open the bottle.` 只有 `opening could happen next`、`cap opening itself is not visible yet`，不能提前收口；
+  - `transfer cup of breadcrumbs` 时如果证据已经形成 `free hand -> uncap/open same object immediately`，则不能被后续 `weigh breadcrumbs` 反向压回 withheld。
+- [x] 这轮没有新增大机制，只收紧 `graph_agent` unresolved rerank 的即时微结果证据边界，并修复一个真实字符串残差：`breadcrumbs` 中的 `read` 子串此前会误触发阅读类分支，导致 `uncap/open` 证据被提前短路。
+- [x] 当前最新专项回归：`361 passed, 344 deselected`
+
 ## 17.2 半天执行原则
 
 - [ ] 每轮先定位一个 residual bucket，再改代码。
@@ -96,6 +105,22 @@
 - [x] mixed-horizon later-target 落到 fixture 时，优先选更晚的 fixture 轨迹，不再停在最早出现的同名节点。
 - [x] 新增并通过 1 条定向测试，覆盖 `same-object cap action` 仍出现在 `reason` 里时，`open/uncap` vs `weigh later` 仍会继续追 `scale`。
 - [x] 本轮专项回归：`333 passed, 344 deselected`
+- [x] 继续收口 `immediate micro-outcome overclaim`。此前 unresolved rerank 新增 `missing_immediate_micro_outcome_evidence` 后，已经能拦住“只说 opening could happen next”这类弱 close-call，但会误伤两类本应保留的 exact chain：
+  - `same-object hand-free -> uncap/open immediately`
+  - `revealed fixture -> immediately turn it on`
+- [x] 本轮把即时微结果的正证据识别补强到：
+  - `free to uncap/open`
+  - `uncap/open ... immediately`
+  - `reaches to the scale and turns it on`
+  - `immediately afterwards ... turns it on`
+- [x] 同时修复阅读类短语匹配的子串误判，避免 `breadcrumbs` 中的 `read` 把 `uncap/open` 候选错误拉进 `check label/read date` 分支。
+- [x] 新增并通过 2 条定向测试，覆盖：
+  - `opening could happen next` 但 opening 不可见时继续 withheld；
+  - opening 明确可见时 `to open the bottle.` 仍可正常收口。
+- [x] 同时复核通过 2 条原有正例：
+  - `free hand same-object open over later scale use`
+  - `exact revealed fixture enablement over generic access`
+- [x] 本轮专项回归：`361 passed, 344 deselected`
 
 补充进展：
 

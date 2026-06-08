@@ -3380,6 +3380,7 @@ class GraphAgent:
                 "timeline_review_hand_free_or_fixture_gap",
                 "exact_workspace_without_exact_use",
                 "generic_make_space_hidden_target_still_speculative",
+                "missing_immediate_micro_outcome_evidence",
             )
         ):
             return True
@@ -3450,6 +3451,7 @@ class GraphAgent:
                     )
                     or "missing_measurement_meta_evidence" in gaps
                     or "missing_exact_measurement_role_evidence" in gaps
+                    or "missing_immediate_micro_outcome_evidence" in gaps
                 )
                 for gaps in top_gap_sets
             ):
@@ -3548,7 +3550,27 @@ class GraphAgent:
     def _action_intent_choice_has_explicit_immediate_micro_outcome_evidence(self, choice: str, text: str) -> bool:
         choice_lc = str(choice or "").lower()
         text_lc = str(text or "").lower()
-        if any(token in choice_lc for token in ("label", "date", "expiry", "expiration", "best before", "use by", "sell by", "read", "标签", "日期", "保质期", "读")):
+        if any(
+            token in choice_lc
+            for token in (
+                "label",
+                "date",
+                "expiry",
+                "expiration",
+                "best before",
+                "use by",
+                "sell by",
+                "read the",
+                "read label",
+                "read date",
+                "标签",
+                "日期",
+                "保质期",
+                "读取",
+                "读标签",
+                "读日期",
+            )
+        ):
             return any(
                 token in text_lc
                 for token in (
@@ -3576,6 +3598,18 @@ class GraphAgent:
                     "opened",
                     "opens",
                     "opening the jar",
+                    "open the cup immediately",
+                    "open the bottle immediately",
+                    "uncap the cup immediately",
+                    "uncap the bottle immediately",
+                    "uncap/open the cup immediately",
+                    "uncap/open the bottle immediately",
+                    "uncap/open the",
+                    "free to uncap/open",
+                    "other hand is free to uncap",
+                    "other hand is free to open",
+                    "free to open the",
+                    "free to uncap the",
                     "lid removed",
                     "cap removed",
                     "unscrewed",
@@ -3593,6 +3627,10 @@ class GraphAgent:
                     "screen lights",
                     "powered on",
                     "turned on",
+                    "turns it on",
+                    "turns on the scale",
+                    "reaches to the scale and turns it on",
+                    "immediately afterwards the hand reaches to the scale and turns it on",
                     "亮起",
                     "开机",
                     "显示屏亮",
