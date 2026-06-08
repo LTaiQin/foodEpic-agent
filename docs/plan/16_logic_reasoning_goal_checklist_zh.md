@@ -245,6 +245,14 @@
   - `resolve_action_intent_pairwise` 在 `need_more_evidence=True` 且没有时间 hints 时，不再直接 finish，而是回到 `fine_grained_why_recognition_segment` 重抽；
   - `resolve_action_intent_future_use` 在同类条件下也不再直接 finish，而是同样回到当前题 `segment` 重抽。
 - 本轮提交：专项回归已进一步提升到 `365 passed, 344 deselected`
+- 本轮提交：继续收口同一条 planner fallback 主线上的第三个残差：`unresolved infer_action_intent falls back to text rank without anchors`。此前如果 `infer_action_intent` 本身已经明确写出 `need_future_evidence=True`，但当前又没有 `times/input_times`、也暂时构不出更具体的 followup / pairwise / future-use 恢复链，planner 会先退到 `rank_choices_from_state`，下一轮再进一步掉到泛化 `query_time`。这会把 why 专项中“未闭合的专用动作目的判断”降级成文本聚合收口。
+- 本轮改为：
+  - 只要 `infer_action_intent` payload 仍带 `need_future_evidence / need_more_evidence / needed_observation`，就视为未闭合结果，不允许退到 `rank_choices_from_state`；
+  - 在当前缺少恢复锚点时，也先回到当前题 `segment` 重抽，而不是先降到文本聚合或下一轮泛化 `query_time`。
+- 本轮提交：新增并通过 2 条定向测试，分别覆盖：
+  - 未闭合 `infer_action_intent` 在没有时间 hints 时，不再退 `rank_choices_from_state`，而是回到 `fine_grained_why_recognition_segment` 重抽；
+  - 已闭合 `infer_action_intent` 在无其它恢复路径时，仍保持当前稳定行为，可直接 finish。
+- 本轮提交：专项回归已进一步提升到 `367 passed, 344 deselected`
   - `pick up pot` 时若证据已经明确写出 `brought to the sink and tilted to pour`，则 `to empty the water.` 会压过弱 `to check the boiling water.`。
 - 本轮提交：同时回归通过 3 条关键保护：
   - `check label vs put back` 的 later-target marker 仍会在“尚未看清是否回冰箱”时继续 withheld；

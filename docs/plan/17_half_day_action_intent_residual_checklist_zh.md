@@ -39,6 +39,12 @@
   - 但当前又缺少 `times / input_times`，导致恢复链暂时构不出更具体的 followup；
   - planner 不能因此把这个未闭合结果直接 `finish`，而必须至少回到当前题 `segment` 重抽。
 - [x] 当前最新专项回归：`365 passed, 344 deselected`
+- [x] 新 residual bucket：`unresolved infer_action_intent falls back to text rank without anchors`
+- [x] 代表 case：
+  - `infer_action_intent` 自己已经明确写出 `need_future_evidence=True`；
+  - 但当前又没有 `times / input_times`，也暂时构不出更具体的 followup / pairwise / future-use 恢复链；
+  - planner 不能因此先退 `rank_choices_from_state`，更不能下一轮继续掉到泛化 `query_time`，而必须留在 why 专用恢复链中继续重抽当前题 `segment`。
+- [x] 当前最新专项回归：`367 passed, 344 deselected`
 
 ## 17.2 半天执行原则
 
@@ -152,6 +158,14 @@
   - `resolve_action_intent_pairwise` 在 `need_more_evidence=True` 且没有时间 hints 时，回到 `fine_grained_why_recognition_segment` 重抽；
   - `resolve_action_intent_future_use` 在同类条件下也回到当前题 `segment` 重抽，而不直接结束。
 - [x] 本轮专项回归：`365 passed, 344 deselected`
+- [x] 收口 `unresolved infer_action_intent falls back to text rank without anchors`。此前即使 `infer_action_intent` 自己已经明确返回 `need_future_evidence=True`，只要当前没有 `times / input_times`、也暂时构不出后续专用恢复动作，planner 仍会先退到 `rank_choices_from_state`。这会把 why 专项里明确未闭合的专用动作目的判断降级为文本聚合，再在下一轮继续掉到泛化 `query_time`。
+- [x] 现在对 `infer_action_intent` 的文本 fallback gate 也收紧：
+  - 只要 payload 仍带 `need_future_evidence / need_more_evidence / needed_observation`，就不允许退 `rank_choices_from_state`；
+  - 在缺少恢复锚点时，也先回到当前题 `segment` 重抽，保持在 why 专用恢复链中。
+- [x] 新增并通过 2 条定向测试，覆盖：
+  - 未闭合 `infer_action_intent` 在没有时间 hints 时，不再退 `rank_choices_from_state`，而是回到 `fine_grained_why_recognition_segment`；
+  - 已闭合 `infer_action_intent` 在无其它恢复路径时，保持当前稳定行为，仍可直接 finish。
+- [x] 本轮专项回归：`367 passed, 344 deselected`
 
 补充进展：
 
@@ -393,8 +407,8 @@ pytest -q tests/test_graph_agent.py -k 'pairwise and action_intent'
 
 - 当前专项回归命令：`pytest -q tests/test_graph_agent.py -k 'action_intent'`
 - 当前稳定结果：`363 passed, 344 deselected`
-- 当前稳定结果：`365 passed, 344 deselected`
-- 相比进入本轮半天专项时文档记录的 `353 passed, 344 deselected`，本阶段净增：`+12 passed`
+- 当前稳定结果：`367 passed, 344 deselected`
+- 相比进入本轮半天专项时文档记录的 `353 passed, 344 deselected`，本阶段净增：`+14 passed`
 
 ### 本阶段已完成的 bucket
 

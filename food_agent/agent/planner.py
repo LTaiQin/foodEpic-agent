@@ -10083,6 +10083,27 @@ class GraphAgentPlanner:
                 )
                 if pairwise is not None:
                     return pairwise
+                if not self._action_intent_intent_payload_is_ready_to_fall_back_to_text_rank(
+                    state=state,
+                    payload=last_result,
+                ):
+                    recovered = self._build_action_intent_specialized_recovery_decision(
+                        state=state,
+                        hints=hints,
+                        thought="why 题当前专用动作目的判断自己仍承认证据未闭合，不能直接退回文本聚合评分；先恢复当前题时间窗关键帧或专用判断，再继续追后续证据。",
+                    )
+                    if recovered is not None:
+                        return recovered
+                    return PlannerDecision(
+                        thought="why 题当前专用动作目的判断仍未闭合，当前又缺少可直接复用的恢复锚点；先回到当前题动作片段重抽，而不是退回文本聚合收口。",
+                        tool="sample_sparse_frames",
+                        args={
+                            "start_time": None,
+                            "end_time": None,
+                            "sample_count": 4,
+                            "tag": f"{state.task_family}_segment",
+                        },
+                    )
                 return PlannerDecision(
                     thought="why 题已补过一轮动作后结果帧，仍有歧义；改为基于累计证据做聚合评分收口。",
                     tool="rank_choices_from_state",
@@ -13659,6 +13680,30 @@ class GraphAgentPlanner:
         return True
 
     def _action_intent_resolution_payload_is_ready_to_finish(
+        self,
+        *,
+        state: AgentState,
+        payload: dict[str, Any],
+    ) -> bool:
+        if not self._is_action_intent_task(state) or not isinstance(payload, dict):
+            return False
+        if payload.get("best_index") is None:
+            return False
+        if any(
+            bool(payload.get(key))
+            for key in (
+                "need_future_evidence",
+                "need_more_evidence",
+                "needs_more_evidence",
+            )
+        ):
+            return False
+        needed_observation = str(payload.get("needed_observation") or "").strip()
+        if needed_observation:
+            return False
+        return True
+
+    def _action_intent_intent_payload_is_ready_to_fall_back_to_text_rank(
         self,
         *,
         state: AgentState,
