@@ -10427,6 +10427,18 @@ class GraphAgentPlanner:
             )
             if needed_observation_target_revisit is not None:
                 return needed_observation_target_revisit
+            if self._action_intent_resolution_should_backfill_precondition(
+                state=state,
+                hints=hints,
+                result=last_result,
+            ):
+                precondition = self._build_action_intent_precondition_sampling_decision(
+                    state=state,
+                    hints=hints,
+                    focus=str(last_result.get("needed_observation") or "precondition_before_pairwise_followup"),
+                )
+                if precondition is not None:
+                    return precondition
             if any(
                 isinstance(item, str)
                 and item.startswith("action_intent_resolution_withheld_for_missing_state_change_prereq=1")
@@ -10440,18 +10452,6 @@ class GraphAgentPlanner:
                 )
                 if extra_followup is not None:
                     return extra_followup
-            if self._action_intent_resolution_should_backfill_precondition(
-                state=state,
-                hints=hints,
-                result=last_result,
-            ):
-                precondition = self._build_action_intent_precondition_sampling_decision(
-                    state=state,
-                    hints=hints,
-                    focus=str(last_result.get("needed_observation") or "precondition_before_pairwise_followup"),
-                )
-                if precondition is not None:
-                    return precondition
             finalize_access_or_space_revisit = self._build_action_intent_finalize_withheld_generic_access_or_space_revisit_decision(
                 state=state,
                 hints=hints,

@@ -175,7 +175,12 @@
 - 本轮提交：新增并通过 2 条 Bucket F 定向测试，分别保护：
   - `lift frying pan` 时 `check the contents of the pan` vs `serve the vegetables` 的 finalizer close-call；
   - planner 在只有 `working_memory` 里的 `plate-serving` inspection marker 时，也会直接进入 relation revisit。
-- 本轮提交：专项回归已更新到 `347 passed, 344 deselected`
+- 本轮提交：Bucket E 的 `zero out with container` 再补 1 个恢复顺序缺口。此前 finalizer 已经能识别“缺少 container precondition / already-on precondition”并写入 `action_intent_resolution_withheld_for_missing_state_change_prereq=1`，verifier-blocked 恢复链也会优先补 `precontext`；但 `pairwise` 路径在 `need_more_evidence` 场景下仍可能先退回 generic extra-followup，再去补真正决定性的 precontext，导致“容器是否已在 tap 前放到秤上”这类关键前提被后置。本轮改为：
+  - `planner` 在 `resolve_action_intent_pairwise` 的恢复链里，若已经命中 `missing_state_change_prereq` 且 `needed_observation` 直接点名 `container already on the scale / before the tap` 一类前提，就先调用 `precondition_sampling`；
+  - 只有 precontext 仍不足或未命中该前提时，才退回更泛化的 `followup_ext1` 补帧。
+- 本轮提交：新增并通过 1 条 Bucket E 定向测试，覆盖 `tap kitchen scale` 的 `zero out with container` pairwise close-call；当前 `needed_observation` 明示“容器是否在 tap 前已在秤上”时，planner 会先走 `fine_grained_why_recognition_precontext`，而不是先补 generic `followup_ext1`。
+- 本轮提交：同时按真实稳定行为更新该测试预期：precontext 回补本来就走 `sample_sparse_frames(tag=..._precontext)`，不是 `extract_frames_for_range`。
+- 本轮提交：专项回归已更新到 `348 passed, 344 deselected`
 - 本轮提交：why 题在首次 `infer_action_intent` 就暴露 `receptacle_outcome` 近窗歧义时，不再机械地先走一轮泛化 `followup`。现在会直接围绕动作尾部触发 `followup_transition`，主动去找“是否真的掉回 sink/pan/bowl/container”的决定性关键帧；同时这条路径会压过误触发的 `precontext`，避免 `flip cloth / shake / tap / tilt` 一类题被无关前置状态采样截走
 - 本轮提交：新增并通过 2 条定向测试，分别保护：
   - `receptacle_outcome` 型 why close-call 会在第一次歧义时直接进入 `followup_transition`

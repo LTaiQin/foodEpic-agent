@@ -17,7 +17,7 @@
 - 已提交进展：`16.49 generic measurement-meta -> exact measurement target`
 - 当前待提交进展：`16.50 pick up phone generic-measure -> exact ingredient record target`
 - 当前专项回归：`pytest -q tests/test_graph_agent.py -k 'action_intent'`
-- 当前已验证结果：`347 passed, 344 deselected`
+- 当前已验证结果：`348 passed, 344 deselected`
 
 ## 17.2 半天执行原则
 
@@ -183,7 +183,7 @@
 待做：
 
 - [x] 检查 `tap scale` state-change 现有 gate。
-- [ ] 补 `zero out with container` 必须看到 container precondition。
+- [x] 补 `zero out with container` 必须看到 container precondition。
 - [x] 补 `turn on` vs `zero out` 必须看动作前显示状态。
 - [x] 补 `adjust measurements` vs `weigh ingredient` 必须继续追 ingredient-on-scale 证据。
 
@@ -205,7 +205,9 @@
   - `planner` 在 `need_disambiguating_evidence` / `need_alternative_evidence_path` 下，若最近出现 `action_intent_resolution_withheld_for_missing_state_change_prereq=1`，会直接读取最新的 `pairwise/future_use` payload，并优先回采 `precontext`；
   - `tap kitchen scale` 的 backfill 还新增了更明确的 fast-path：只要 `needed_observation` 明示 `before the tap / already lit / already on / container already on the scale`，就不再继续盲目补动作后帧。
 - [x] 新增并通过 1 条 Bucket E 定向测试，覆盖 `resolve_action_intent_pairwise` 已明确“需要看动作前显示状态/容器前提”时，planner 会优先采样 `fine_grained_why_recognition_precontext`，而不是继续回到 `pairwise`。
-- [x] 本轮专项回归：`337 passed, 344 deselected`
+- [x] 收口 `zero out with container` 在 pairwise 缺少 container precondition 时的恢复顺序缺口。此前 `pairwise` 路径即使已经明确写出“要看 tap 前容器是否已在秤上”，也可能先退回 generic extra-followup，再去补真正决定性的 precontext；现在这条路径与 verifier-blocked 恢复链对齐，优先回采 `precontext`，只有 precontext 仍不足时才追加更长 followup。
+- [x] 新增并通过 1 条 Bucket E 定向测试，覆盖 `tap kitchen scale` 的 `zero out with container` pairwise close-call：当 `needed_observation` 明示“容器是否在 tap 前已在秤上”时，planner 会先走 `fine_grained_why_recognition_precontext`，而不是先补 generic `followup_ext1`。
+- [x] 本轮专项回归：`348 passed, 344 deselected`
 
 ## 17.9 Residual Bucket F：inspection / check / read label 与 later outcome
 
