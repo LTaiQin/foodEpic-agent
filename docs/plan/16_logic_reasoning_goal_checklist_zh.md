@@ -113,6 +113,12 @@
   - `make space on the shelf` 但只有 shelf layout 变化时，应回退到更合理的 generic access，而不是保留 exact-workspace 过拟合答案；
   - `make space on the worktop` 但只有 area becomes more open / no exact next target 时，应继续 withheld 而不是提前收口。
 - 本轮提交：专项回归已更新到 `332 passed, 344 deselected`
+- 本轮提交：Bucket B 的 `open/uncap vs weigh/use later` verifier-blocked recovery 继续收紧。此前只要 `reason / needed_observation` 提到 `same-object cap action / lid action`，mixed-horizon later-target hint 就会被整段拦掉，导致 planner 明明已经知道更晚目标是 `scale`，却仍可能围着动作物体打转。本轮改为：
+  - 只有当 `best` 本身已经是 later-use 候选时，才保留原有 same-object blocker，避免误伤原本就该追动作物体本身的题；
+  - 当 `best` 是近窗 `open/uncap`，而 later-use 只是竞争项时，不再因为 `cap/lid` 措辞直接放弃 later-target 追证；
+  - mixed-horizon later-target 落到 fixture 时，优先选更晚的 fixture 轨迹，而不是停在最早出现的同名节点。
+- 本轮提交：新增并通过 1 条 Bucket B 定向测试，保护 `open/uncap` vs `weigh later` 在 verifier-blocked close-call 下，即使 `reason` 明确提到 `same-object cap action`，planner 也会继续追 `scale` 的更晚轨迹。
+- 本轮提交：专项回归已更新到 `333 passed, 344 deselected`
 - 本轮提交：why 题在首次 `infer_action_intent` 就暴露 `receptacle_outcome` 近窗歧义时，不再机械地先走一轮泛化 `followup`。现在会直接围绕动作尾部触发 `followup_transition`，主动去找“是否真的掉回 sink/pan/bowl/container”的决定性关键帧；同时这条路径会压过误触发的 `precontext`，避免 `flip cloth / shake / tap / tilt` 一类题被无关前置状态采样截走
 - 本轮提交：新增并通过 2 条定向测试，分别保护：
   - `receptacle_outcome` 型 why close-call 会在第一次歧义时直接进入 `followup_transition`

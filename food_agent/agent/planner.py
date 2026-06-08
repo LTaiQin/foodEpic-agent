@@ -7531,18 +7531,6 @@ class GraphAgentPlanner:
         action_object = self._action_intent_question_object_hint(state)
         reason_text = str(result.get("reason") or "").lower()
         needed_observation_text = str(result.get("needed_observation") or "").lower()
-        same_object_block_markers = (
-            "same-object",
-            "same object",
-            "cap action",
-            "lid action",
-            "cover fit",
-            "cover fits",
-        )
-        if "final_place_return" not in later_categories and any(
-            marker in f"{reason_text} {needed_observation_text}" for marker in same_object_block_markers
-        ):
-            return None
         combined_text = f"{later_choice.lower()} {reason_text} {needed_observation_text}".strip()
         for item in result.get("candidate_evidence") or []:
             if not isinstance(item, dict):
@@ -7572,12 +7560,30 @@ class GraphAgentPlanner:
         )
         if not any(marker in combined_text for marker in ambiguity_markers):
             return None
-        return self._action_intent_later_outcome_target_hint(
+        # Only override same-object revisit when the current top answer is the
+        # immediate micro-outcome and the later-use competitor still needs proof.
+        if later_index == best_index:
+            same_object_block_markers = (
+                "same-object",
+                "same object",
+                "cap action",
+                "lid action",
+                "cover fit",
+                "cover fits",
+            )
+            if "final_place_return" not in later_categories and any(
+                marker in f"{reason_text} {needed_observation_text}" for marker in same_object_block_markers
+            ):
+                return None
+        later_target = self._action_intent_later_outcome_target_hint(
             choice=later_choice,
             action_object=action_object,
             categories=later_categories,
             evidence_text=combined_text,
         )
+        if later_target is None:
+            return None
+        return later_target
 
     def _action_intent_choice_has_hand_free_language(self, choice: str) -> bool:
         text = str(choice or "").strip().lower()
@@ -8296,7 +8302,7 @@ class GraphAgentPlanner:
                 tool="query_object",
                 args={"query": downstream_target, "limit": 24},
             )
-        if downstream_target in {"fridge", "drawer", "cupboard", "rack", "dishwasher", "shelf"}:
+        if target_kind == "fixture":
             later_selected = None
             for node in nodes:
                 if not isinstance(node, dict):

@@ -80,14 +80,22 @@
 待做：
 
 - [x] 找到已有 `open-close`、`same-object active use`、`mixed-horizon later target` 测试附近的残差。
-- [ ] 补一类 `open/uncap` vs `weigh/use later` 的 verifier-blocked recovery。
+- [x] 补一类 `open/uncap` vs `weigh/use later` 的 verifier-blocked recovery。
 - [x] 补一类 `open/uncap` vs `put back/store later` 的 later-target recovery。
-- [ ] 明确 same-object active use 只在看到后续使用链时才压过 later-use。
+- [x] 明确 same-object active use 只在看到后续使用链时才压过 later-use。
 
 完成标准：
 
 - [x] 对 `open/uncap` vs `put back/store later`，当前已开始优先追最终位置证据而不是停在同物体近窗动作。
-- [ ] 当证据只证明“打开了”，但没证明“为什么打开”，必须继续追后续目标。
+- [x] 当证据只证明“打开了”，但没证明“为什么打开”，必须继续追后续目标。
+
+本轮进展：
+
+- [x] 收紧 `verifier-blocked mixed_horizon later_target` 的 same-object blocker。此前只要 `reason / needed_observation` 出现 `same-object cap action / lid action`，planner 就可能直接放弃 later-target，导致 `open/uncap` vs `weigh later` 明明已经暴露出 `scale` 方向，仍围着动作物体本身打转。
+- [x] 现在只有在 `best` 本身已经是 later-use 候选时，才保留原有 same-object blocker；如果 `best` 只是近窗 `open/uncap`，而 later-use 仍是竞争项，则会继续追更晚目标。
+- [x] mixed-horizon later-target 落到 fixture 时，优先选更晚的 fixture 轨迹，不再停在最早出现的同名节点。
+- [x] 新增并通过 1 条定向测试，覆盖 `same-object cap action` 仍出现在 `reason` 里时，`open/uncap` vs `weigh later` 仍会继续追 `scale`。
+- [x] 本轮专项回归：`333 passed, 344 deselected`
 
 ## 17.6 Residual Bucket C：move / make space / hidden target / final placement
 
