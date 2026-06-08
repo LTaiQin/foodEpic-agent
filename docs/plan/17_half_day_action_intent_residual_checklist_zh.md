@@ -41,7 +41,7 @@
   - `pytest -q tests/test_graph_agent.py -k 'phone_generic_measure_prefers_exact_record_target or phone_exact_record_still_revisits_target'`
   - `pytest -q tests/test_graph_agent.py -k 'verifier_blocked_finish and action_intent'`
   - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
-- [ ] 如果全部通过，提交：
+- [x] 如果全部通过，提交：
   - 建议 commit：`fix: chase phone record targets after verifier block`
 
 ## 17.4 Residual Bucket A：phone / app / ingredient record 目标压实
@@ -79,14 +79,14 @@
 
 待做：
 
-- [ ] 找到已有 `open-close`、`same-object active use`、`mixed-horizon later target` 测试附近的残差。
+- [x] 找到已有 `open-close`、`same-object active use`、`mixed-horizon later target` 测试附近的残差。
 - [ ] 补一类 `open/uncap` vs `weigh/use later` 的 verifier-blocked recovery。
-- [ ] 补一类 `open/uncap` vs `put back/store later` 的 later-target recovery。
+- [x] 补一类 `open/uncap` vs `put back/store later` 的 later-target recovery。
 - [ ] 明确 same-object active use 只在看到后续使用链时才压过 later-use。
 
 完成标准：
 
-- [ ] 对 `open/check` 近窗候选，不再自动压过后续用途候选。
+- [x] 对 `open/uncap` vs `put back/store later`，当前已开始优先追最终位置证据而不是停在同物体近窗动作。
 - [ ] 当证据只证明“打开了”，但没证明“为什么打开”，必须继续追后续目标。
 
 ## 17.6 Residual Bucket C：move / make space / hidden target / final placement
