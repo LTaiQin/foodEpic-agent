@@ -11143,6 +11143,23 @@ class GraphAgentPlanner:
                             tool=hand_free_target_revisit.tool,
                             args=hand_free_target_revisit.args,
                         )
+                    same_object_active_use_revisit = (
+                        self._build_action_intent_verifier_blocked_same_object_active_use_revisit_decision(
+                            state=state,
+                            hints=hints,
+                            result=latest_action_intent_result,
+                            blocker_hint="future_use_close_call",
+                        )
+                    )
+                    if same_object_active_use_revisit is not None:
+                        return PlannerDecision(
+                            thought=(
+                                "why 题 repeated textual fallback 前，当前已经收敛到 same-object active use 与其它近窗/后续解释的冲突；"
+                                "直接追动作物体本身在更晚时刻的真实状态，而不是先退回 generic visual review。"
+                            ),
+                            tool=same_object_active_use_revisit.tool,
+                            args=same_object_active_use_revisit.args,
+                        )
                     unresolved_rerank_downstream_target_revisit = self._build_action_intent_unresolved_rerank_downstream_target_revisit_decision(
                         state=state,
                         hints=hints,

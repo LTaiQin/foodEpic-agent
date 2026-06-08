@@ -258,6 +258,17 @@
   - 在 `ranked_best_index` textual fallback 场景下，只要最近 working memory 里仍残留 `action_intent_needed_observation=...`，verifier 就不能直接 sufficient；
   - 这使 verifier 与最近几轮 planner fallback 收紧保持一致，不会一边要求继续追 later-target / needed-observation，一边又在文本 fallback 上提前放行。
 - 本轮提交：新增并通过 1 条定向测试，覆盖：
+- 本轮提交：repeated textual fallback 与 verifier-blocked specialized recovery 再对齐 1 条真实漏接链。此前 `planner` 已经在 verifier-blocked 路径支持 `same-object active use revisit`，但 repeated `rank_choices_from_state` textual fallback 前还没有复用这条恢复链；因此一旦 repeated vision failure 发生，`use the bottle/container next` vs `open/uncap/clean the same object` 这类 close-call 仍可能退回 generic visual review。
+- 本轮改为：
+  - 在 repeated textual fallback 分支中接入 `same_object_active_use_revisit`；
+  - 只要 latest action-intent result 已经形成 same-object active-use close-call，就优先继续追动作物体本身在更晚时刻的状态，而不是先退回 generic visual review。
+- 本轮提交：新增并通过 1 条定向测试，覆盖：
+  - `take bottle` 的 repeated textual fallback close-call 中，`use the bottle on the scale` vs `open the bottle` 会优先回到 `bottle` 的更晚轨迹，而不是退回 generic textual rank 收口。
+- 本轮提交：同时复核通过 3 条相关护栏测试，覆盖：
+  - verifier-blocked 的 same-object active-use revisit 仍保持有效；
+  - textual fallback 的 hand-free downstream fixture revisit 未被打坏；
+  - textual fallback 的 phone-record exact-target revisit 未被打坏。
+- 本轮提交：专项回归已更新到 `380 passed, 344 deselected`
   - `take bottle` 的 textual fallback 即使已有当前题 artifact 和 grounding，只要仍保留 `action_intent_needed_observation=whether the bottle is later put back into the fridge`，verifier 仍必须保持 blocking。
 - 本轮提交：同时保留并复核通过 1 条原有正例：
   - `place bowl` 的 textual fallback 在已有当前题 artifact、grounding 且没有未闭合 marker 时，仍可正常 finish。

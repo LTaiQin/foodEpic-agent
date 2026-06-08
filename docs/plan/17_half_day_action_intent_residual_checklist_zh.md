@@ -105,6 +105,12 @@
   - system 已经收敛到 `keep nearby for later use`、`put back later`、`final location remains unclear` 这类 long-horizon close-call；
   - 但 repeated vision failure 后如果系统退到 `need_alternative_evidence_path + rank_choices_from_state`，planner 仍可能直接退回 generic 稀疏补帧，或者虽然进入 long-horizon revisit 却停在过早节点，而不是继续追更晚节点。
 - [x] 当前最新专项回归：`379 passed, 344 deselected`
+- [x] 新 residual bucket：`textual fallback drops same-object active-use revisit back to generic visual review`
+- [x] 代表 case：
+  - system 已经收敛到 `use the bottle/container next` vs `open/uncap/clean the same object` 这类 same-object active-use close-call；
+  - verifier-blocked 路径已经会继续追动作物体本身在更晚时刻的真实状态；
+  - 但 repeated vision failure 后如果系统退到 `need_alternative_evidence_path + rank_choices_from_state`，planner 仍可能直接退回 generic textual fallback，没有复用这条 same-object specialized recovery。
+- [x] 当前最新专项回归：`380 passed, 344 deselected`
 
 ## 17.2 半天执行原则
 
@@ -115,6 +121,59 @@
 - [ ] 每轮都跑定向测试和 `action_intent` 专项回归。
 - [ ] 每轮都更新 `docs/plan/16_logic_reasoning_goal_checklist_zh.md` 或本清单的进展段。
 - [ ] 每轮都单独 commit，不 amend，不提交数据、输出、密钥和无关脏改。
+
+## 17.14 本轮进展：textual fallback 对齐 same-object active-use specialized recovery
+
+本轮 residual audit 定位到一个很窄但真实存在的 specialized recovery 漏接：
+
+- verifier-blocked 路径已经支持：
+  - `same-object active use revisit`
+- 但 repeated `rank_choices_from_state` textual fallback 前，
+  - planner 还没有把这条恢复链对称接回去
+- 结果就是：
+  - 一旦 why 题因为 repeated vision failure 退到 textual fallback
+  - 即使当前 close call 已经明确收敛到“同一物体后续继续打开/清洗/使用”
+  - 系统也更容易回到 generic visual review，而不是继续追动作物体本身
+
+### 本轮实现
+
+- [x] 在 `planner` 的 repeated textual fallback 分支中接入：
+  - `same_object_active_use_revisit`
+- [x] 当前如果 latest action-intent result 已经形成：
+  - same-object active use
+  - vs 其它近窗/后续解释
+  - 的 close-call
+  - 则 textual fallback 前会优先继续追动作物体本身在更晚时刻的状态
+  - 不再先退回 generic visual review
+
+### 本轮新增测试
+
+- [x] `test_planner_action_intent_textual_fallback_same_object_active_use_prefers_action_object_revisit`
+  - 验证 `take bottle` 时，
+  - `use the bottle on the scale`
+  - vs `open the bottle`
+  - 这类 same-object active-use close-call 在 repeated textual fallback 前，
+  - 会直接回到 `bottle` 的更晚轨迹，而不是退回 generic textual rank 收口
+
+### 本轮回归
+
+- [x] 定向测试：
+  - `pytest -q tests/test_graph_agent.py -k 'textual_fallback_same_object_active_use_prefers_action_object_revisit'`
+  - 结果：`1 passed, 723 deselected`
+- [x] 相关护栏复核：
+  - `pytest -q tests/test_graph_agent.py -k 'verifier_blocked_finish_same_object_active_use_prefers_action_object_revisit or textual_fallback_hand_free_fixture_gap_prefers_downstream_fixture or textual_fallback_phone_record_target_prefers_exact_ingredient_revisit'`
+  - 结果：`3 passed, 721 deselected`
+- [x] 专项回归：
+  - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+  - 结果：`380 passed, 344 deselected`
+
+### 本轮结论
+
+- [x] repeated textual fallback 与 verifier-blocked specialized recovery 再次对齐了一条真实高频链路：
+  - `same-object active use revisit`
+- [x] 当前 half-day 专项已经非常接近阶段收口：
+  - 最近几轮主要集中在把 repeated textual fallback 与已有 specialized recovery 做对称补线
+  - 当前最新专项回归已提升到 `380 passed, 344 deselected`
 
 ## 17.3 当前必须先收口的事项
 
