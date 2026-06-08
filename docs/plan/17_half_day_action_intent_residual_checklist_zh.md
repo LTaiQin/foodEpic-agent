@@ -90,6 +90,11 @@
   - system 已经收敛到 `check/open` 这类近窗解释与 `put back / serve / empty later` 这类更晚结果之间的 mixed-horizon close-call；
   - 但 repeated vision failure 后如果系统退到 `need_alternative_evidence_path + rank_choices_from_state`，planner 仍会先做 generic `inspect_visual_evidence`，没有直接复用 later-target revisit 去追 `fridge / sink / plate` 这类真实更晚目标。
 - [x] 当前最新专项回归：`376 passed, 344 deselected`
+- [x] 新 residual bucket：`textual fallback drops generic hand-free downstream revisit back to generic visual review`
+- [x] 代表 case：
+  - system 已经收敛到 `free one hand` 这类 generic hand-free 中间态与 `turn on the tap / use object next` 这类更具体下游动作之间的 close-call；
+  - 但 repeated vision failure 后如果系统退到 `need_alternative_evidence_path + rank_choices_from_state`，planner 仍会先做 generic `inspect_visual_evidence`，没有直接复用 hand-free downstream revisit 去追真实下游 fixture/object。
+- [x] 当前最新专项回归：`377 passed, 344 deselected`
 
 ## 17.2 半天执行原则
 
@@ -275,6 +280,13 @@
 - [x] 新增并通过 1 条定向测试，覆盖：
   - `take bottle` 的 textual fallback 在 repeated failure 后，如果 close-call 已经收敛到 `check label` vs `put back in the fridge`，则会直接追 `fridge` 的更晚节点。
 - [x] 本轮专项回归：`376 passed, 344 deselected`
+- [x] 收口 `textual fallback drops generic hand-free downstream revisit back to generic visual review`。此前 repeated vision failure 之后如果退到 `need_alternative_evidence_path + rank_choices_from_state`，即使系统已经收敛到 `generic hand-free` vs `turn on the tap / use object next` 这类 close-call，planner 仍会先做 generic `inspect_visual_evidence`，没有直接复用 hand-free downstream revisit。
+- [x] 现在 textual fallback 的恢复入口继续对齐：
+  - 直接复用 `generic hand-free vs exact downstream use` 的 specialized revisit；
+  - 同时对 fixture 目标启用“优先更晚节点”偏置，避免停在过早节点。
+- [x] 新增并通过 1 条定向测试，覆盖：
+  - `put down knife` 的 textual fallback 在 repeated failure 后，如果 close-call 已经收敛到 `free one hand` vs `turn on the tap`，则会直接追 `tap` 的更晚节点。
+- [x] 本轮专项回归：`377 passed, 344 deselected`
 
 补充进展：
 
