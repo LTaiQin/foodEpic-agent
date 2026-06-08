@@ -160,7 +160,15 @@
   - `planner._build_action_intent_unresolved_rerank_mixed_horizon_later_target_revisit_decision(...)` 也对 `target_kind == fixture` 对齐启用“优先选更晚节点”逻辑；
   - 因而 mixed-horizon unresolved close-call 一旦已经确定真实 later target 是 `fridge/scale/sink`，就不再停在第一个同名 fixture，而是会继续跳到动作后更有判别力的更晚窗口。
 - 本轮提交：新增并通过 1 条 Bucket F 定向测试，覆盖 `take bottle` 时 `check the label` vs `put the bottle back in the fridge` 的 unresolved-rerank close-call；当前 late window 只显示“标签朝外、尚未看清是否回冰箱”时，planner 会优先跳到更晚 fridge 节点，而不是停在近窗 fridge 轨迹。
-- 本轮提交：专项回归已更新到 `344 passed, 344 deselected`
+- 本轮提交：Bucket F 的 `weak cooking inspection` 再补 1 个 needed-evidence 缺口。此前 finalizer 虽然已经能在 `check boiling/check contents` vs `empty/pour/serve later` close-call 下正确 withheld，并写出 `target=sink` 这类 later-target marker，但如果上游 payload 自身没有 `needed_observation`，planner 仍只能依赖泛化 mixed-horizon/long-horizon 恢复链，无法显式知道“下一轮到底该去确认什么”。本轮改为：
+  - `graph_agent` 在 `weak cooking inspection` 被 withheld 时，会额外写入更具体的 `action_intent_needed_observation=...`，例如“是否真的朝 sink 倾倒，还是只是在 hob 附近短暂查看”；
+  - 该说明会优先结合 mixed-horizon competitor 的 `candidate_evidence` 生成，因此不只是泛化“看后续用途”，而是明确指向 `sink / plate / bowl / hob` 这类判别目标；
+  - `planner._action_intent_needed_observation_text(...)` 也补上了 `working_memory` fallback：即使最近一次 resolution payload 本身没有 `needed_observation`，只要 graph-agent 已经把该 marker 写进状态，planner 也会继续用它做 target / relation revisit。
+- 本轮提交：新增并通过 2 条 Bucket F 定向测试，分别保护：
+  - `pick up pot` 时 `check the boiling water` vs `empty the water` 的 finalizer close-call，会同时写入 `target=sink` later-target marker 与明确的 `needed_observation`；
+  - planner 在只有 `working_memory` 里的 inspection `needed_observation` marker 时，也会继续利用该信息进入更强的 relation/target revisit 路径，而不是退回泛化音频峰值或普通 followup。
+- 本轮提交：同时按新行为更新 2 条已有测试预期：当 `needed_observation` 已经足够明确点名 `sink` 关系时，planner 现在会优先走更强的 `target/relation revisit`，而不再停在旧的 `pot` long-horizon 或 generic detect-audio-peaks 路线。
+- 本轮提交：专项回归已更新到 `345 passed, 344 deselected`
 - 本轮提交：why 题在首次 `infer_action_intent` 就暴露 `receptacle_outcome` 近窗歧义时，不再机械地先走一轮泛化 `followup`。现在会直接围绕动作尾部触发 `followup_transition`，主动去找“是否真的掉回 sink/pan/bowl/container”的决定性关键帧；同时这条路径会压过误触发的 `precontext`，避免 `flip cloth / shake / tap / tilt` 一类题被无关前置状态采样截走
 - 本轮提交：新增并通过 2 条定向测试，分别保护：
   - `receptacle_outcome` 型 why close-call 会在第一次歧义时直接进入 `followup_transition`

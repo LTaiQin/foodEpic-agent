@@ -907,6 +907,27 @@ class GraphAgent:
                 )
                 if mixed_horizon_later_target_marker:
                     state.add_memory(mixed_horizon_later_target_marker)
+                weak_inspection_needed_observation = self._action_intent_resolution_weak_cooking_inspection_needed_observation(
+                    raw_result=raw_result,
+                    state=state,
+                )
+                if not weak_inspection_needed_observation and mixed_horizon_later_target_marker:
+                    marker_text = mixed_horizon_later_target_marker.lower()
+                    question = str(getattr(state, "question", "") or "").lower()
+                    action_object = self._action_intent_question_object(question) or "item"
+                    if "target=sink kind=fixture" in marker_text:
+                        weak_inspection_needed_observation = (
+                            f"whether the {action_object} is brought toward the sink and tilted to pour, "
+                            "or only briefly checked near the hob"
+                        )
+                    elif "target=plate kind=object" in marker_text or "target=bowl kind=object" in marker_text:
+                        target_name = "plate" if "target=plate kind=object" in marker_text else "bowl"
+                        weak_inspection_needed_observation = (
+                            f"whether the {action_object} is carried over the {target_name} to serve, "
+                            "or only briefly checked near the hob"
+                        )
+                if weak_inspection_needed_observation:
+                    state.add_memory(f"action_intent_needed_observation={weak_inspection_needed_observation}")
                 state.add_memory("action_intent_resolution_withheld_for_weak_cooking_inspection_evidence=1")
                 continue
             elif self._action_intent_resolution_should_withhold_weak_relocation_or_residue_claim(raw_result=raw_result, state=state):
@@ -1775,6 +1796,75 @@ class GraphAgent:
             contradiction="",
             action_object=action_object,
             global_context="",
+        )
+
+    def _action_intent_resolution_weak_cooking_inspection_needed_observation(
+        self,
+        *,
+        raw_result: dict[str, Any],
+        state: AgentState,
+    ) -> str:
+        pair = self._action_intent_resolution_competing_pair(raw_result=raw_result, state=state)
+        if pair is None:
+            return ""
+        best_index, competitor_index = pair
+        choices = [str(choice) for choice in getattr(state, "choices", [])]
+        categories_by_index = selected_choice_categories(choices, [best_index, competitor_index])
+        best_categories = set(categories_by_index.get(best_index) or set())
+        competitor_categories = set(categories_by_index.get(competitor_index) or set())
+        later_outcome_categories = {
+            "final_place_return",
+            "measure_weigh",
+            "transfer_contents",
+            "serve_consume",
+            "clean_dry",
+            "food_prep",
+            "discard",
+        }
+        best_choice = choices[best_index].lower()
+        competitor_choice = choices[competitor_index].lower()
+        if self._action_intent_choice_is_immediate_micro_outcome_candidate(best_choice, best_categories):
+            later_index = competitor_index
+            later_choice = competitor_choice
+            later_categories = competitor_categories
+        elif self._action_intent_choice_is_immediate_micro_outcome_candidate(competitor_choice, competitor_categories):
+            later_index = best_index
+            later_choice = best_choice
+            later_categories = best_categories
+        else:
+            return ""
+        if not (later_categories & later_outcome_categories):
+            return ""
+        combined_text = later_choice
+        for item in raw_result.get("candidate_evidence") or []:
+            if not isinstance(item, dict):
+                continue
+            index = self._coerce_choice_index(item.get("index"), choices)
+            if index != later_index:
+                continue
+            combined_text = f"{combined_text} {str(item.get('support') or '')} {str(item.get('contradiction') or '')}".strip()
+            break
+        question = str(getattr(state, "question", "") or "").lower()
+        action_object = self._action_intent_question_object(question)
+        target = self._action_intent_later_outcome_target_token_and_kind(
+            choice=later_choice,
+            action_object=action_object,
+            categories=later_categories,
+            evidence_text=combined_text,
+        )
+        action_label = action_object or "item"
+        if target is None:
+            return f"whether the {action_label} is only briefly checked near the hob or instead used for a later pour/serve action"
+        target_name, target_kind = target
+        if target_kind == "fixture" and target_name == "sink":
+            return f"whether the {action_label} is brought toward the sink and tilted to pour, or only briefly checked near the hob"
+        if target_kind == "fixture" and target_name in {"hob", "stove", "burner"}:
+            return f"whether the {action_label} stays near the hob for a brief inspection or is instead moved into a later use sequence"
+        if target_kind == "object" and target_name in {"plate", "bowl"}:
+            return f"whether the {action_label} is carried over the {target_name} to serve, or only briefly checked near the hob"
+        return (
+            f"whether the {action_label} is used with the {target_name} next, "
+            "or only briefly checked near the hob"
         )
 
     def _action_intent_resolution_should_withhold_broad_generic_claim_without_direct_evidence(

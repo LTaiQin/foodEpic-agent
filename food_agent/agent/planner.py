@@ -2369,10 +2369,16 @@ class GraphAgentPlanner:
             if text:
                 return text
         latest = self._latest_action_intent_resolution_payload(state)
-        if latest is None:
-            return ""
-        _tool, payload = latest
-        return str(payload.get("needed_observation") or "").strip().lower()
+        if latest is not None:
+            _tool, payload = latest
+            text = str(payload.get("needed_observation") or "").strip().lower()
+            if text:
+                return text
+        for item in reversed(list(getattr(state, "working_memory", []))[-16:]):
+            if not isinstance(item, str) or not item.startswith("action_intent_needed_observation="):
+                continue
+            return str(item.split("=", 1)[1] or "").strip().lower()
+        return ""
 
     def _action_intent_needed_observation_target_hint(
         self,
@@ -2424,6 +2430,20 @@ class GraphAgentPlanner:
                 for target, kind in unique_targets:
                     if kind == "object":
                         return target, kind
+            inspection_vs_later_use_terms = (
+                "tilted to pour",
+                "toward the sink",
+                "carried over the plate",
+                "briefly checked near the hob",
+                "stays near the hob",
+                "checked near the hob",
+            )
+            if any(term in text_lc for term in inspection_vs_later_use_terms):
+                preferred_targets = ("sink", "plate", "bowl")
+                for preferred in preferred_targets:
+                    for target, kind in unique_targets:
+                        if target == preferred:
+                            return target, kind
         return None
 
     def _action_intent_needed_observation_relation_hint(
