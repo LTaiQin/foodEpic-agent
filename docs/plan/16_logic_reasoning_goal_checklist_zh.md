@@ -253,6 +253,15 @@
   - 未闭合 `infer_action_intent` 在没有时间 hints 时，不再退 `rank_choices_from_state`，而是回到 `fine_grained_why_recognition_segment` 重抽；
   - 已闭合 `infer_action_intent` 在无其它恢复路径时，仍保持当前稳定行为，可直接 finish。
 - 本轮提交：专项回归已进一步提升到 `367 passed, 344 deselected`
+- 本轮提交：补上一个 verifier 侧的放行残差：`textual fallback ignores needed_observation marker`。此前 repeated vision failure 的文本 fallback 只要具备当前题 artifact 和一些 grounding，就可能被 verifier 直接判 sufficient；但它没有把 `action_intent_needed_observation=...` 这类“明确还缺关键后续证据”的 working-memory marker 当作 blocker，因此会把仍未闭合的 why 文本 fallback 提前放行。
+- 本轮改为：
+  - 在 `ranked_best_index` textual fallback 场景下，只要最近 working memory 里仍残留 `action_intent_needed_observation=...`，verifier 就不能直接 sufficient；
+  - 这使 verifier 与最近几轮 planner fallback 收紧保持一致，不会一边要求继续追 later-target / needed-observation，一边又在文本 fallback 上提前放行。
+- 本轮提交：新增并通过 1 条定向测试，覆盖：
+  - `take bottle` 的 textual fallback 即使已有当前题 artifact 和 grounding，只要仍保留 `action_intent_needed_observation=whether the bottle is later put back into the fridge`，verifier 仍必须保持 blocking。
+- 本轮提交：同时保留并复核通过 1 条原有正例：
+  - `place bowl` 的 textual fallback 在已有当前题 artifact、grounding 且没有未闭合 marker 时，仍可正常 finish。
+- 本轮提交：专项回归已进一步提升到 `368 passed, 344 deselected`
   - `pick up pot` 时若证据已经明确写出 `brought to the sink and tilted to pour`，则 `to empty the water.` 会压过弱 `to check the boiling water.`。
 - 本轮提交：同时回归通过 3 条关键保护：
   - `check label vs put back` 的 later-target marker 仍会在“尚未看清是否回冰箱”时继续 withheld；

@@ -45,6 +45,13 @@
   - 但当前又没有 `times / input_times`，也暂时构不出更具体的 followup / pairwise / future-use 恢复链；
   - planner 不能因此先退 `rank_choices_from_state`，更不能下一轮继续掉到泛化 `query_time`，而必须留在 why 专用恢复链中继续重抽当前题 `segment`。
 - [x] 当前最新专项回归：`367 passed, 344 deselected`
+- [x] 新 residual bucket：`textual fallback ignores needed_observation marker`
+- [x] 代表 case：
+  - repeated vision failure 后，系统已经落到 `ranked_best_index` textual fallback；
+  - 当前题 artifact 与 grounding 都存在；
+  - 但 working memory 里仍保留 `action_intent_needed_observation=...`，说明真正的 later-target / followup 关键证据还没闭合；
+  - verifier 不能因为文本 fallback 看起来“像是够了”就直接放行。
+- [x] 当前最新专项回归：`368 passed, 344 deselected`
 
 ## 17.2 半天执行原则
 
@@ -166,6 +173,15 @@
   - 未闭合 `infer_action_intent` 在没有时间 hints 时，不再退 `rank_choices_from_state`，而是回到 `fine_grained_why_recognition_segment`；
   - 已闭合 `infer_action_intent` 在无其它恢复路径时，保持当前稳定行为，仍可直接 finish。
 - [x] 本轮专项回归：`367 passed, 344 deselected`
+- [x] 收口 `textual fallback ignores needed_observation marker`。此前 repeated vision failure 的 why 文本 fallback 只要具有当前题 artifact 和一些 grounding，就可能被 verifier 直接判 sufficient；但 verifier 没有把 `action_intent_needed_observation=...` 这类“明确还缺关键后续证据”的 working-memory marker 当作 blocker，因此会把仍未闭合的 textual fallback 过早放行。
+- [x] 现在 verifier 的 textual fallback 放行 gate 也收紧：
+  - 只要最近 working memory 里仍有 `action_intent_needed_observation=...`，就不允许 textual fallback 直接 sufficient；
+  - 这保证 verifier 与最近几轮 planner fallback 收紧后的行为一致，不会一边要求继续追 needed observation，一边又把文本 fallback 提前放行。
+- [x] 新增并通过 1 条定向测试，覆盖：
+  - `take bottle` 的 textual fallback 即使已有当前题 artifact 和 grounding，只要仍保留 `action_intent_needed_observation=whether the bottle is later put back into the fridge`，verifier 仍必须保持 blocking。
+- [x] 同时复核通过 1 条原有正例：
+  - `place bowl` 的 textual fallback 在已有当前题 artifact、grounding且没有未闭合 marker 时，仍可正常 finish。
+- [x] 本轮专项回归：`368 passed, 344 deselected`
 
 补充进展：
 
@@ -407,8 +423,8 @@ pytest -q tests/test_graph_agent.py -k 'pairwise and action_intent'
 
 - 当前专项回归命令：`pytest -q tests/test_graph_agent.py -k 'action_intent'`
 - 当前稳定结果：`363 passed, 344 deselected`
-- 当前稳定结果：`367 passed, 344 deselected`
-- 相比进入本轮半天专项时文档记录的 `353 passed, 344 deselected`，本阶段净增：`+14 passed`
+- 当前稳定结果：`368 passed, 344 deselected`
+- 相比进入本轮半天专项时文档记录的 `353 passed, 344 deselected`，本阶段净增：`+15 passed`
 
 ### 本阶段已完成的 bucket
 

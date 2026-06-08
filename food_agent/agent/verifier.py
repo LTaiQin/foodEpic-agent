@@ -327,6 +327,11 @@ class GraphAgentVerifier:
             return False
         if self._action_intent_has_pending_evidence_gap(state):
             return False
+        if any(
+            isinstance(item, str) and item.startswith("action_intent_needed_observation=")
+            for item in list(getattr(state, "working_memory", []))[-16:]
+        ):
+            return False
         if not self._action_intent_has_current_task_artifact_grounding(state):
             return False
         choices = [str(choice) for choice in getattr(state, "choices", [])]
