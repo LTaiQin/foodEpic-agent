@@ -147,6 +147,10 @@
   - 但 `reason + decisive_observation + needed_observation` 里没有形成 `brief cooking inspection over disposal` 的强链条；
   - 则直接写入 `action_intent_resolution_withheld_for_weak_cooking_inspection_evidence=1` 并继续 withheld。
 - 本轮提交：新增并通过 1 条 Bucket F 定向测试，覆盖“只有 `pot is lifted while it still seems to contain hot water`、没有 `brief inspection / no tilt / stays near hob` 链条”时，finalizer 不能直接收口到 `to check the boiling water.`。
+- 本轮提交：Bucket F 的 `check label vs put back` 再补 1 个 planner 恢复缺口。此前 finalizer 已能写入 `action_intent_resolution_withheld_for_mixed_horizon_later_target=1 target=fridge kind=fixture`，但 `finalize_withheld_mixed_horizon_later_target_revisit` 仍可能停在过早的 fridge 节点，而不是追更晚的 return window。本轮改为：
+  - 对 finalizer 写出的 fixture later-target，planner 也像 verifier-blocked 那条 mixed-horizon 路径一样，优先选择满足 `min_start_time` 的更晚 fixture 轨迹；
+  - 因而 `check label` 被拦下后，会优先跳到更晚的 fridge return 时段，而不是停在近窗里“瓶子靠近冰箱”的早期节点。
+- 本轮提交：新增并通过 1 条 Bucket F 定向测试，覆盖 `check label` 被 finalizer 拦下并写入 `target=fridge kind=fixture` 后，planner 会优先跳到更晚的 fridge 轨迹窗口，而不是停在过早的 near-fridge 节点。
 - 本轮提交：专项回归已更新到 `337 passed, 344 deselected`
 - 本轮提交：why 题在首次 `infer_action_intent` 就暴露 `receptacle_outcome` 近窗歧义时，不再机械地先走一轮泛化 `followup`。现在会直接围绕动作尾部触发 `followup_transition`，主动去找“是否真的掉回 sink/pan/bowl/container”的决定性关键帧；同时这条路径会压过误触发的 `precontext`，避免 `flip cloth / shake / tap / tilt` 一类题被无关前置状态采样截走
 - 本轮提交：新增并通过 2 条定向测试，分别保护：

@@ -237,6 +237,8 @@
 - [x] 收口 `weak cooking inspection` 的 finalizer 缺口。此前 `resolve_action_intent_future_use` 若直接给出 `check the boiling water / check the contents / check the consistency`，只要锅具里“似乎还有液体/内容物”就可能被 deterministic finalizer 直接收口，即使没有 `brief inspection / stays near hob / no tilt / no pouring / no serving destination` 这类 inspection chain。
 - [x] 新增 `weak cooking inspection` finish gate：对于 `pot/pan/saucepan/frying pan/bowl` 这类 cooking vessel，若 top 候选是 `check boiling / check contents / check consistency / see if done`，但 `reason + decisive_observation + needed_observation` 里没有形成 `brief cooking inspection over disposal` 的强链条，则直接 withheld。
 - [x] 新增并通过 1 条 Bucket F 定向测试，覆盖“只有 `pot is lifted while it still seems to contain hot water`、没有 `brief inspection / no tilt / stays near hob` 链条”时，finalizer 不能直接收口到 `to check the boiling water.`。
+- [x] 收口 `check label vs put back` 的一个 planner 恢复缺口。此前 finalizer 已能写入 `action_intent_resolution_withheld_for_mixed_horizon_later_target=1 target=fridge kind=fixture`，但 mixed-horizon later-target revisit 仍可能停在过早的 fridge 节点，而不是追更晚的 return window。本轮改为：对于 finalizer 写出的 fixture later-target，planner 也像 verifier-blocked 那条路径一样，优先选择满足 `min_start_time` 的更晚 fixture 轨迹。
+- [x] 新增并通过 1 条 Bucket F 定向测试，覆盖 `check label` 被 finalizer 拦下并写入 `target=fridge kind=fixture` 后，planner 会优先跳到更晚的 fridge 轨迹窗口，而不是停在过早的近窗 fridge 节点。
 
 ## 17.10 半天验收命令
 
