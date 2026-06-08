@@ -330,6 +330,13 @@
 - 本轮提交：新增并通过 1 条定向测试，覆盖：
   - `move bottle` 的 textual fallback 在 repeated failure 后，如果 close-call 已经收敛到 `access what's behind` vs `take the hidden spice jar`，则会直接追 `jar` 的更晚节点，而不是先退回 generic visual review。
 - 本轮提交：专项回归已进一步提升到 `378 passed, 344 deselected`
+- 本轮提交：继续补 `repeated textual fallback` 下的 `long-horizon later-use / final-location` 对称性。此前 `unresolved_rerank` 已经能识别“当前仍缺更晚 final location / later use 证据”，但 repeated vision failure 后一旦退到 `rank_choices_from_state`，planner 仍可能只回到 generic 稀疏补帧，或者虽然进入 long-horizon revisit 却停在过早节点。
+- 本轮改为：
+  - textual fallback 入口也接入 `unresolved_rerank_long_horizon_revisit`；
+  - 同时对 long-horizon object revisit 启用“优先更晚节点”偏置，避免停在早窗中间态。
+- 本轮提交：新增并通过 1 条定向测试，覆盖：
+  - `take bottle` 的 textual fallback 在 repeated failure 后，如果 close-call 已经收敛到 `keep nearby for later use` vs `put back in the fridge`，则会直接追 `bottle` 的更晚节点，而不是退回 generic 稀疏补帧或停在早窗节点。
+- 本轮提交：专项回归已进一步提升到 `379 passed, 344 deselected`
   - `pick up pot` 时若证据已经明确写出 `brought to the sink and tilted to pour`，则 `to empty the water.` 会压过弱 `to check the boiling water.`。
 - 本轮提交：同时回归通过 3 条关键保护：
   - `check label vs put back` 的 later-target marker 仍会在“尚未看清是否回冰箱”时继续 withheld；

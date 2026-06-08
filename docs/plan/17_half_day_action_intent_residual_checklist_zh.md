@@ -100,6 +100,11 @@
   - system 已经收敛到 `access what's behind` 这类 reveal 中间态与 `take the hidden target` 这类更具体下游对象之间的 close-call；
   - 但 repeated vision failure 后如果系统退到 `need_alternative_evidence_path + rank_choices_from_state`，planner 仍会先做 generic `inspect_visual_evidence`，没有直接复用 downstream object revisit 去追真实 hidden target。
 - [x] 当前最新专项回归：`378 passed, 344 deselected`
+- [x] 新 residual bucket：`textual fallback drops long-horizon later-use/final-location revisit back to generic resample or early node`
+- [x] 代表 case：
+  - system 已经收敛到 `keep nearby for later use`、`put back later`、`final location remains unclear` 这类 long-horizon close-call；
+  - 但 repeated vision failure 后如果系统退到 `need_alternative_evidence_path + rank_choices_from_state`，planner 仍可能直接退回 generic 稀疏补帧，或者虽然进入 long-horizon revisit 却停在过早节点，而不是继续追更晚节点。
+- [x] 当前最新专项回归：`379 passed, 344 deselected`
 
 ## 17.2 半天执行原则
 
@@ -299,6 +304,13 @@
 - [x] 新增并通过 1 条定向测试，覆盖：
   - `move bottle` 的 textual fallback 在 repeated failure 后，如果 close-call 已经收敛到 `access what's behind` vs `take the hidden spice jar`，则会直接追 `jar` 的更晚节点。
 - [x] 本轮专项回归：`378 passed, 344 deselected`
+- [x] 收口 `textual fallback drops long-horizon later-use/final-location revisit back to generic resample or early node`。此前 repeated vision failure 之后如果退到 `need_alternative_evidence_path + rank_choices_from_state`，即使系统已经收敛到 `later-use / final-location` 仍未闭合，planner 仍可能直接退回 generic 稀疏补帧，或者虽然进入 long-horizon revisit 却停在过早节点。
+- [x] 现在 textual fallback 的恢复入口继续对齐：
+  - 直接复用 `unresolved_rerank_long_horizon_revisit`；
+  - 同时对 long-horizon object revisit 启用“优先更晚节点”偏置，避免停在早窗中间态。
+- [x] 新增并通过 1 条定向测试，覆盖：
+  - `take bottle` 的 textual fallback 在 repeated failure 后，如果 close-call 已经收敛到 `keep nearby for later use` vs `put back in the fridge`，则会直接追 `bottle` 的更晚节点。
+- [x] 本轮专项回归：`379 passed, 344 deselected`
 
 补充进展：
 

@@ -8742,6 +8742,29 @@ class GraphAgentPlanner:
         )
         if selected is None:
             return None
+        later_selected = None
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            start_raw = node.get("start_time")
+            end_raw = node.get("end_time")
+            if start_raw is None:
+                continue
+            try:
+                start_time = float(start_raw)
+            except Exception:  # noqa: BLE001
+                continue
+            try:
+                end_time = float(end_raw) if end_raw is not None else start_time
+            except Exception:  # noqa: BLE001
+                end_time = start_time
+            if end_time < start_time:
+                end_time = start_time
+            if min_start_time is not None and start_time < min_start_time:
+                continue
+            later_selected = (node, start_time, end_time)
+        if later_selected is not None:
+            selected = later_selected
         _node, start_time, end_time = selected
         query_time = start_time if abs(end_time - start_time) < 0.25 else (start_time + min(end_time, start_time + 1.2)) / 2
         return PlannerDecision(
@@ -11127,6 +11150,13 @@ class GraphAgentPlanner:
                     )
                     if unresolved_rerank_downstream_target_revisit is not None:
                         return unresolved_rerank_downstream_target_revisit
+                    unresolved_rerank_long_horizon_revisit = self._build_action_intent_unresolved_rerank_long_horizon_revisit_decision(
+                        state=state,
+                        hints=hints,
+                        thought="why 题 repeated textual fallback 前，unresolved rerank 已明确 later-use / final-location 还缺更晚证据；直接沿缓存目标节点向后追，而不是先退回 generic visual review。",
+                    )
+                    if unresolved_rerank_long_horizon_revisit is not None:
+                        return unresolved_rerank_long_horizon_revisit
                 if (
                     self._is_action_intent_task(state)
                     and isinstance(latest_action_intent_result, dict)
