@@ -229,6 +229,14 @@
   - `transfer cup of breadcrumbs` 时，`free hand -> uncap/open same object immediately` 仍会压过 later `weigh breadcrumbs`；
   - `move tray` 时，`reveal scale -> immediately turn on the scale` 仍会压过 generic `access the scale behind the tray`。
 - 本轮提交：专项回归已更新到 `361 passed, 344 deselected`
+- 本轮提交：收口一个 planner 级 fallback 残差：`specialized failure fallback over-finishes stale intent`。此前如果 `resolve_action_intent_pairwise / future_use` 连续失败，planner 会直接回退到“最近一次成功的 infer_action_intent 结果”并 finish；但这条兜底没有检查旧成功结果本身是否已经明确承认“还需要 future evidence / needed observation”，因此在 mixed-horizon / later-target 题上可能把本该继续追更晚证据的旧猜测提前收口。
+- 本轮改为：
+  - 只有当最近一次成功的 `infer_action_intent` 结果本身已经闭合时，才允许作为 failure fallback 直接 finish；
+  - 若旧成功结果仍带有 `need_future_evidence / need_more_evidence / needed_observation`，或 working memory 里仍残留 `pending_resolution / withheld / unresolved_rerank_withheld / action_intent_needed_observation`，则不允许直接 finish，继续走已有的专用恢复链。
+- 本轮提交：新增并通过 2 条定向测试，分别覆盖：
+  - `take bottle` 在旧成功结果仍明确要求“确认是否 later put back into the fridge”时，后续 pairwise 失败不能直接 finish 到 `to open the bottle.`；
+  - `place lid` 在旧成功结果已经形成闭合链条时，后续 pairwise 失败仍可安全复用该结果直接 finish。
+- 本轮提交：专项回归已进一步提升到 `363 passed, 344 deselected`
   - `pick up pot` 时若证据已经明确写出 `brought to the sink and tilted to pour`，则 `to empty the water.` 会压过弱 `to check the boiling water.`。
 - 本轮提交：同时回归通过 3 条关键保护：
   - `check label vs put back` 的 later-target marker 仍会在“尚未看清是否回冰箱”时继续 withheld；

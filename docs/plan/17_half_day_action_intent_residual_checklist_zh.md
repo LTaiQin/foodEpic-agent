@@ -27,6 +27,12 @@
   - `transfer cup of breadcrumbs` 时如果证据已经形成 `free hand -> uncap/open same object immediately`，则不能被后续 `weigh breadcrumbs` 反向压回 withheld。
 - [x] 这轮没有新增大机制，只收紧 `graph_agent` unresolved rerank 的即时微结果证据边界，并修复一个真实字符串残差：`breadcrumbs` 中的 `read` 子串此前会误触发阅读类分支，导致 `uncap/open` 证据被提前短路。
 - [x] 当前最新专项回归：`361 passed, 344 deselected`
+- [x] 新 residual bucket：`specialized failure fallback over-finishes stale intent`
+- [x] 代表 case：
+  - `infer_action_intent` 旧成功结果已经明确写出 `need_future_evidence / needed_observation`；
+  - 之后 `resolve_action_intent_pairwise / future_use` 因工具失败中断；
+  - planner 不能因为“有一个旧 best_index”就直接 finish，而必须继续沿已有的 mixed-horizon / later-target 恢复链追证据。
+- [x] 当前最新专项回归：`363 passed, 344 deselected`
 
 ## 17.2 半天执行原则
 
@@ -121,6 +127,17 @@
   - `free hand same-object open over later scale use`
   - `exact revealed fixture enablement over generic access`
 - [x] 本轮专项回归：`361 passed, 344 deselected`
+- [x] 收口 `specialized failure fallback over-finishes stale intent`。此前 `resolve_action_intent_pairwise / future_use` 连续失败后，planner 会直接回退到最近一次成功的 `infer_action_intent` 并 finish；但这条兜底没有区分“旧成功结果已经闭合”和“旧成功结果自己都还写着 need_future_evidence / needed_observation”，因此 mixed-horizon later-target 题在工具失败时仍可能被过早收口。
+- [x] 现在 failure fallback 只有在旧成功结果已经真正闭合时才允许 finish；若旧结果仍带：
+  - `need_future_evidence`
+  - `need_more_evidence`
+  - `needed_observation`
+  - 或 working memory 里仍残留 `pending_resolution / withheld / unresolved_rerank_withheld / action_intent_needed_observation`
+  则继续走已有专用恢复链，不允许直接落回旧 best guess。
+- [x] 新增并通过 2 条定向测试，覆盖：
+  - `take bottle` 的旧成功结果仍要求确认是否 later put back into the fridge 时，pairwise 失败不能直接 finish 到 `to open the bottle.`；
+  - `place lid` 的旧成功结果已经形成闭合链条时，pairwise 失败仍可安全 finish。
+- [x] 本轮专项回归：`363 passed, 344 deselected`
 
 补充进展：
 
@@ -361,8 +378,8 @@ pytest -q tests/test_graph_agent.py -k 'pairwise and action_intent'
 ### 当前专项结果
 
 - 当前专项回归命令：`pytest -q tests/test_graph_agent.py -k 'action_intent'`
-- 当前稳定结果：`357 passed, 344 deselected`
-- 相比进入本轮半天专项时文档记录的 `353 passed, 344 deselected`，本阶段净增：`+4 passed`
+- 当前稳定结果：`363 passed, 344 deselected`
+- 相比进入本轮半天专项时文档记录的 `353 passed, 344 deselected`，本阶段净增：`+10 passed`
 
 ### 本阶段已完成的 bucket
 

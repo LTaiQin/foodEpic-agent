@@ -9662,7 +9662,10 @@ class GraphAgentPlanner:
                     if retry_pairwise is not None:
                         return retry_pairwise
             recovered_intent = self._latest_successful_action_intent_result(state)
-            if recovered_intent.get("best_index") is not None:
+            if self._action_intent_success_result_is_ready_for_failure_finish(
+                state=state,
+                payload=recovered_intent,
+            ):
                 best_index = int(recovered_intent["best_index"])
                 return PlannerDecision(
                     thought="why 题专用裁决工具连续失败，保留最近一次当前题专用动作目的判断，避免退回通用视觉检查混入旧帧。",
@@ -13582,6 +13585,42 @@ class GraphAgentPlanner:
             if payload.get("best_index") is not None:
                 return payload
         return {}
+
+    def _action_intent_success_result_is_ready_for_failure_finish(
+        self,
+        *,
+        state: AgentState,
+        payload: dict[str, Any],
+    ) -> bool:
+        if not self._is_action_intent_task(state) or not isinstance(payload, dict):
+            return False
+        if payload.get("best_index") is None:
+            return False
+        if any(
+            bool(payload.get(key))
+            for key in (
+                "need_future_evidence",
+                "need_more_evidence",
+                "needs_more_evidence",
+            )
+        ):
+            return False
+        needed_observation = str(payload.get("needed_observation") or "").strip()
+        if needed_observation:
+            return False
+        recent_memory = list(getattr(state, "working_memory", []) or [])[-16:]
+        if any(
+            isinstance(item, str)
+            and (
+                item.startswith("action_intent_pending_resolution=")
+                or item.startswith("action_intent_resolution_withheld_for_")
+                or item.startswith("action_intent_unresolved_rerank_withheld")
+                or item.startswith("action_intent_needed_observation=")
+            )
+            for item in recent_memory
+        ):
+            return False
+        return True
 
     def _latest_action_intent_resolution_payload(self, state: AgentState) -> tuple[str, dict[str, Any]] | None:
         for entry in reversed(getattr(state, "tool_trace", [])):
