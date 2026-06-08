@@ -311,27 +311,92 @@ pytest -q tests/test_graph_agent.py -k 'pairwise and action_intent'
 
 - [x] 当前 `action_intent` 通过数量。
 - [x] 当前 `action_intent` 通过数量。
-- [ ] 新增了哪些 residual bucket。
-- [ ] 哪些 bucket 已提交。
-- [ ] 哪些 bucket 还没做。
-- [ ] 是否存在未提交但已验证通过的改动。
+- [x] 新增了哪些 residual bucket。
+- [x] 哪些 bucket 已提交。
+- [x] 哪些 bucket 还没做。
+- [x] 是否存在未提交但已验证通过的改动。
 - [x] 是否存在未提交但已验证通过的改动。
 - [x] 是否存在失败测试或已知回归风险。
 
 ## 17.11 半天结束时的交付物
 
-- [ ] 至少提交当前 `16.50` 改动。
-- [ ] 继续完成至少 2 个后续 residual bucket。
-- [ ] `pytest -q tests/test_graph_agent.py -k 'action_intent'` 通过。
-- [ ] `docs/plan/16_logic_reasoning_goal_checklist_zh.md` 或本文件记录每轮进展。
-- [ ] git log 中每轮有独立 commit。
-- [ ] 最终给出阶段报告：
+- [x] 至少提交当前 `16.50` 改动。
+- [x] 继续完成至少 2 个后续 residual bucket。
+- [x] `pytest -q tests/test_graph_agent.py -k 'action_intent'` 通过。
+- [x] `docs/plan/16_logic_reasoning_goal_checklist_zh.md` 或本文件记录每轮进展。
+- [x] git log 中每轮有独立 commit。
+- [x] 最终给出阶段报告：
   - 当前做到第几个 bucket
   - 准确性机制提升点
   - 回归测试结果
   - 下一步还剩什么
 
-## 17.12 Goal 模式提示词
+## 17.12 半天阶段报告
+
+### 当前专项结果
+
+- 当前专项回归命令：`pytest -q tests/test_graph_agent.py -k 'action_intent'`
+- 当前稳定结果：`357 passed, 344 deselected`
+- 相比进入本轮半天专项时文档记录的 `353 passed, 344 deselected`，本阶段净增：`+4 passed`
+
+### 本阶段已完成的 bucket
+
+- [x] Bucket A：phone / app / ingredient record 目标压实
+- [x] Bucket B：open / close / same-object use 与 later-use 冲突
+- [x] Bucket C：move / make space / hidden target / final placement 冲突
+- [x] Bucket D：towel / cloth / paper towel 的 transport-vs-use
+- [x] Bucket E：scale / tare / zero / measurement state-change
+- [x] Bucket F：inspection / check / read label 与 later outcome
+
+### 本阶段关键机制提升
+
+- `phone generic-measure -> exact ingredient record target` 已从单目标压实到多 exact target 并存时的 evidence-starved target 优先追证。
+- `open/uncap` 与 `weigh/use later`、`put back/store later` 的 mixed-horizon later-target recovery 已稳定，planner 会优先追更晚、更有判别力的目标轨迹。
+- `make space / generic access` 相关冲突已能区分：
+  - exact workspace creation
+  - revealed slot / sink slot downstream placement
+  - hidden-target retrieval
+  - 仅有 broad workspace effect 时继续 withheld 或回退到更合理的 generic access
+- `transport-vs-use` 已补齐 hand-use、surface cleanup、simple relocation 的 finish gate，不再只凭拿起、短暂接触或靠近台面就提前定答。
+- `tap scale / zero out / weigh ingredient` 已要求 precontext、state-change 和 exact weighing-use 证据，broad measurement-meta 不再过早收口。
+- `inspection` 相关残差已补齐：
+  - label visible 不等于 check label
+  - brief cooking inspection 不等于 empty/serve
+  - later outcome 若已明确发生，可以直接压过弱 inspection
+
+### 本阶段提交列表
+
+- `ee1cb3f` `fix: prefer exact phone record targets with weakest evidence`
+- `84e9114` `fix: tighten unresolved measurement intent gating`
+- `9a63baa` `fix: prefer explicit later outcomes over weak inspection`
+- `1445cf1` `fix: prefer hidden retrieval over broad make-space`
+
+说明：
+- 更早的相关专项提交仍保留在 git 历史中，例如 `59affd7`、`688cfa0`、`c4d1a6e`、`5a98202`、`ccfa467`、`e7e7d50`、`bed05a6`、`3e95a51` 等。
+- 本阶段没有提交用户的无关脏改、数据、输出、密钥或未跟踪脚本。
+
+### 当前未完成项
+
+- bucket 级高频残差按当前文档已经全部勾完，但这不等于 why 专项完全结束。
+- 仍未完成的是：
+  - 更系统的 residual audit，确认是否还有新的高频簇值得单独立 bucket
+  - 将当前 bucket 级规则提升与真实小样本/真实运行日志做更完整对照
+  - 把 why 专项结果进一步并入完整 agent 的端到端验证
+
+### 当前风险状态
+
+- 当前 `action_intent` 专项回归已通过，文档记录范围内没有未修复失败测试。
+- 已知剩余风险主要不是回归红灯，而是：
+  - 新 residual bucket 可能在真实数据上继续暴露
+  - why 逻辑虽已显著收紧，但仍以规则化 residual 收口为主，尚未做系统化长尾审计
+
+### 下一步计划
+
+- 第一优先：做一次新的 residual audit，确认在 `357 passed, 344 deselected` 之后是否还存在值得单独建 bucket 的高频 close-call。
+- 第二优先：把当前 why 专项阶段成果整理成更稳定的阶段基线，供后续完整 agent 验证直接复用。
+- 第三优先：将 why 专项与完整 agent 的小样本真实运行串起来，检查这些结构化收口是否真正改善端到端表现。
+
+## 17.13 Goal 模式提示词
 
 下面这段可以直接作为 goal 模式目标使用：
 
