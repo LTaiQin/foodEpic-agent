@@ -17,7 +17,7 @@
 - 已提交进展：`16.49 generic measurement-meta -> exact measurement target`
 - 当前待提交进展：`16.50 pick up phone generic-measure -> exact ingredient record target`
 - 当前专项回归：`pytest -q tests/test_graph_agent.py -k 'action_intent'`
-- 当前已验证结果：`345 passed, 344 deselected`
+- 当前已验证结果：`347 passed, 344 deselected`
 
 ## 17.2 半天执行原则
 
@@ -222,7 +222,7 @@
 
 - [x] 补 `label visible` 但没有 reading chain 时不能 finish。
 - [x] 补 `check label` vs `put back` 的混合窗口追证。
-- [ ] 补 `check contents` vs `pour/empty/serve` 的 later outcome 追证。
+- [x] 补 `check contents` vs `pour/empty/serve` 的 later outcome 追证。
 - [x] 将 inspection 的 needed evidence 写得更明确，指导 planner 查后续帧。
 
 完成标准：
@@ -248,7 +248,12 @@
 - [x] 新增并通过 2 条 Bucket F 定向测试，分别覆盖：
   - `pick up pot` 时 `check the boiling water` vs `empty the water` 的 finalizer close-call，会同时写入 `target=sink` later-target marker 和明确的 `needed_observation`；
   - planner 在只有 `working_memory` 里的 inspection `needed_observation` marker 时，也会继续利用该信息进入更强的 relation/target revisit 路径。
-- [x] 本轮专项回归：`345 passed, 344 deselected`
+- [x] 收口 `check contents` vs `serve later` 的 plate/bowl later-outcome 泛化。此前 `sink` 这类 later target 已经能稳定写出 `needed_observation` 并驱动 planner，但 `serve the vegetables / serve the soup / carried over the plate` 这类 plate-serving 场景仍缺少专门保护；现在这一分支也被测试锁住，并允许 planner 在已有 inspection `needed_observation` marker 时，直接跳进 relation revisit，而不是退回 generic audio-peaks。
+- [x] 同时放宽 `needed_observation target/relation revisit` 的旧 followup 次数门槛：如果 working memory 里已经有明确的 `action_intent_needed_observation=...`，就不再强制等到第 2 次 followup 之后才允许进入目标/关系追证。
+- [x] 新增并通过 2 条 Bucket F 定向测试，分别覆盖：
+  - `lift frying pan` 时 `check the contents of the pan` vs `serve the vegetables` 的 finalizer close-call，会同时写入 `target=plate` later-target marker 和明确的 `needed_observation`；
+  - planner 在只有 `working_memory` 里的 `plate-serving` inspection marker 时，也会直接利用该 marker 进入 relation revisit，优先去看 frying pan 是否真的被带到 plate 上方。
+- [x] 本轮专项回归：`347 passed, 344 deselected`
 
 ## 17.10 半天验收命令
 

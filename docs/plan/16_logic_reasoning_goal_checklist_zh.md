@@ -168,7 +168,14 @@
   - `pick up pot` 时 `check the boiling water` vs `empty the water` 的 finalizer close-call，会同时写入 `target=sink` later-target marker 与明确的 `needed_observation`；
   - planner 在只有 `working_memory` 里的 inspection `needed_observation` marker 时，也会继续利用该信息进入更强的 relation/target revisit 路径，而不是退回泛化音频峰值或普通 followup。
 - 本轮提交：同时按新行为更新 2 条已有测试预期：当 `needed_observation` 已经足够明确点名 `sink` 关系时，planner 现在会优先走更强的 `target/relation revisit`，而不再停在旧的 `pot` long-horizon 或 generic detect-audio-peaks 路线。
-- 本轮提交：专项回归已更新到 `345 passed, 344 deselected`
+- 本轮提交：Bucket F 的 `serve/plate` later-outcome 泛化也补齐了保护。此前 `sink` 分支已经能稳定写出 inspection 的 `needed_observation` 并驱动 planner 去追 `sink`，但 `check contents` vs `serve later` 这类 `plate/bowl` serving 场景还没有同等级别的测试锁定，也仍受旧的 followup 次数门槛影响。本轮改为：
+  - `lift frying pan` / `serve the vegetables` 这类 close-call 现在也会被测试保护，确认 finalizer 会同时写入 `target=plate` later-target marker 与“是否真的被带到 plate 上方，还是只是在 hob 附近短暂查看”的明确 `needed_observation`；
+  - `planner._action_intent_needed_observation_target_hint(...)` 与 `...relation_hint(...)` 的旧门槛被最小放宽：如果 working memory 里已经存在明确的 `action_intent_needed_observation=...`，就不再强制等待第 2 次 followup 才允许进入目标/关系追证；
+  - 因而 `plate-serving` inspection marker 不会再被 generic `detect_audio_peaks` 抢走，而是能直接进入更强的 relation revisit，去验证 frying pan/container 是否真的被带到 `plate / bowl` 上方。
+- 本轮提交：新增并通过 2 条 Bucket F 定向测试，分别保护：
+  - `lift frying pan` 时 `check the contents of the pan` vs `serve the vegetables` 的 finalizer close-call；
+  - planner 在只有 `working_memory` 里的 `plate-serving` inspection marker 时，也会直接进入 relation revisit。
+- 本轮提交：专项回归已更新到 `347 passed, 344 deselected`
 - 本轮提交：why 题在首次 `infer_action_intent` 就暴露 `receptacle_outcome` 近窗歧义时，不再机械地先走一轮泛化 `followup`。现在会直接围绕动作尾部触发 `followup_transition`，主动去找“是否真的掉回 sink/pan/bowl/container”的决定性关键帧；同时这条路径会压过误触发的 `precontext`，避免 `flip cloth / shake / tap / tilt` 一类题被无关前置状态采样截走
 - 本轮提交：新增并通过 2 条定向测试，分别保护：
   - `receptacle_outcome` 型 why close-call 会在第一次歧义时直接进入 `followup_transition`

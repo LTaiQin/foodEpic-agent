@@ -2386,7 +2386,10 @@ class GraphAgentPlanner:
         state: AgentState,
         result: dict[str, Any] | None = None,
     ) -> tuple[str, str] | None:
-        if self._action_intent_followup_attempt_count(state) < 2:
+        if self._action_intent_followup_attempt_count(state) < 2 and not any(
+            isinstance(item, str) and item.startswith("action_intent_needed_observation=")
+            for item in list(getattr(state, "working_memory", []))[-16:]
+        ):
             return None
         text = self._action_intent_needed_observation_text(state=state, result=result)
         if not text:
@@ -2452,7 +2455,10 @@ class GraphAgentPlanner:
         state: AgentState,
         result: dict[str, Any] | None = None,
     ) -> tuple[str, str, str] | None:
-        if self._action_intent_followup_attempt_count(state) < 2:
+        if self._action_intent_followup_attempt_count(state) < 2 and not any(
+            isinstance(item, str) and item.startswith("action_intent_needed_observation=")
+            for item in list(getattr(state, "working_memory", []))[-16:]
+        ):
             return None
         target_hint = self._action_intent_needed_observation_target_hint(state=state, result=result)
         if target_hint is None:
