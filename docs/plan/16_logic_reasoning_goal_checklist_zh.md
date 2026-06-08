@@ -262,6 +262,14 @@
 - 本轮提交：同时保留并复核通过 1 条原有正例：
   - `place bowl` 的 textual fallback 在已有当前题 artifact、grounding 且没有未闭合 marker 时，仍可正常 finish。
 - 本轮提交：专项回归已进一步提升到 `368 passed, 344 deselected`
+- 本轮提交：补上 `missing_direct_outcome_evidence` 在 repeated textual fallback 下的恢复对称性。此前这类 why close-call 在 verifier-blocked 路径上已经会优先触发 `followup_transition`，但如果随后连续视觉失败并退到 `need_alternative_evidence_path + rank_choices_from_state`，planner 仍可能回到泛化的 `recover_frames/segment`，错过“继续围绕动作尾部查近窗直接结果”的更优恢复链。
+- 本轮改为：
+  - 只要 `working_memory` 里仍保留 `action_intent_resolution_withheld_for_missing_direct_outcome_evidence=1`；
+  - 且最近 action-intent 专用裁决来自 `infer_action_intent / pairwise / future_use`；
+  - 那么在 `need_alternative_evidence_path` 的 textual fallback 恢复入口，也会优先复用现有 `followup_transition` 恢复链，而不是先退回通用 `segment/recover_frames`。
+- 本轮提交：新增并通过 1 条定向测试，覆盖：
+  - `flip orange cloth` 的 close-call 在 repeated failure 之后，即使已经退到 textual fallback，也仍优先围绕动作尾部补 `followup_transition`，而不是退回泛化补帧。
+- 本轮提交：专项回归维持 `368 passed, 344 deselected`
   - `pick up pot` 时若证据已经明确写出 `brought to the sink and tilted to pour`，则 `to empty the water.` 会压过弱 `to check the boiling water.`。
 - 本轮提交：同时回归通过 3 条关键保护：
   - `check label vs put back` 的 later-target marker 仍会在“尚未看清是否回冰箱”时继续 withheld；

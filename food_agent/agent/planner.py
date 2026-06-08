@@ -9713,6 +9713,21 @@ class GraphAgentPlanner:
                 if recovered is not None:
                     return recovered
             if retry_count >= 3:
+                if (
+                    any(
+                        isinstance(item, str)
+                        and item.startswith("action_intent_resolution_withheld_for_missing_direct_outcome_evidence=1")
+                        for item in list(getattr(state, "working_memory", []))[-12:]
+                    )
+                ):
+                    transition_recovery = self._build_action_intent_transition_probe_decision(
+                        state=state,
+                        hints=hints,
+                        result=None,
+                        thought="why 题 repeated textual fallback 前已经明确缺的是近窗直接结果；继续围绕动作尾部补 `followup_transition`，不要先退回泛化 `segment/recover_frames`。",
+                    )
+                    if transition_recovery is not None:
+                        return transition_recovery
                 evidence_first = self._build_action_intent_evidence_first_recovery_decision(
                     state=state,
                     hints=hints,
@@ -10926,6 +10941,28 @@ class GraphAgentPlanner:
             )
         if isinstance(last_result, dict) and last_tool.get("tool") == "rank_choices_from_state" and last_result.get("best_index") is not None:
             if self._action_intent_text_fallback_ready(state):
+                if (
+                    self._is_action_intent_task(state)
+                    and any(
+                        isinstance(item, str)
+                        and item.startswith("action_intent_resolution_withheld_for_missing_direct_outcome_evidence=1")
+                        for item in list(getattr(state, "working_memory", []))[-12:]
+                    )
+                ):
+                    probe_window = self._action_intent_transition_probe_window(state=state, hints=hints, result=None)
+                    if probe_window is not None and not self._action_intent_has_transition_followup_frames(state):
+                        start_time, end_time, stride_s, max_frames = probe_window
+                        return PlannerDecision(
+                            thought="why 题 repeated textual fallback 前已经明确缺的是近窗直接结果；继续围绕动作尾部补 `followup_transition`，不要直接用 textual rank 收口或退回泛化补帧。",
+                            tool="extract_frames_for_range",
+                            args={
+                                "start_time": start_time,
+                                "end_time": end_time,
+                                "stride_s": stride_s,
+                                "max_frames": max_frames,
+                                "tag": f"{state.task_family}_followup_transition",
+                            },
+                        )
                 evidence_first = self._build_action_intent_evidence_first_recovery_decision(
                     state=state,
                     hints=hints,
@@ -11838,6 +11875,7 @@ class GraphAgentPlanner:
             and "need_alternative_evidence_path" in open_questions
         ):
             latest_resolution = self._latest_action_intent_resolution_payload(state)
+            latest_action_intent_tool = latest_resolution[0] if latest_resolution is not None else ""
             latest_action_intent_result = latest_resolution[1] if latest_resolution is not None else {}
             if (
                 isinstance(latest_action_intent_result, dict)
@@ -11862,6 +11900,27 @@ class GraphAgentPlanner:
                 )
                 if precondition is not None:
                     return precondition
+            if (
+                latest_action_intent_tool in {
+                    "infer_action_intent",
+                    "resolve_action_intent_pairwise",
+                    "resolve_action_intent_future_use",
+                }
+                and isinstance(latest_action_intent_result, dict)
+                and any(
+                    isinstance(item, str)
+                    and item.startswith("action_intent_resolution_withheld_for_missing_direct_outcome_evidence=1")
+                    for item in list(getattr(state, "working_memory", []))[-12:]
+                )
+            ):
+                transition_recovery = self._build_action_intent_resolution_transition_recovery_decision(
+                    state=state,
+                    hints=hints,
+                    tool_name=latest_action_intent_tool,
+                    result=latest_action_intent_result,
+                )
+                if transition_recovery is not None:
+                    return transition_recovery
             if self._action_intent_prefers_long_horizon_object_retrieval(state=state):
                 long_horizon_query = self._build_action_intent_long_horizon_object_query_decision(
                     state=state,

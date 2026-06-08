@@ -52,6 +52,12 @@
   - 但 working memory 里仍保留 `action_intent_needed_observation=...`，说明真正的 later-target / followup 关键证据还没闭合；
   - verifier 不能因为文本 fallback 看起来“像是够了”就直接放行。
 - [x] 当前最新专项回归：`368 passed, 344 deselected`
+- [x] 新 residual bucket：`textual fallback drops direct-outcome recovery back to generic frames`
+- [x] 代表 case：
+  - `graph_agent` / verifier 已经明确写出 `action_intent_resolution_withheld_for_missing_direct_outcome_evidence=1`；
+  - 说明真正缺的是动作尾部后的近窗直接结果，而不是泛化长窗；
+  - 但 repeated vision failure 后如果系统退到 `need_alternative_evidence_path + rank_choices_from_state`，planner 仍可能回到 generic `recover_frames/segment`，没有继续沿 `followup_transition` 查最关键的即时结果。
+- [x] 当前最新专项回归：`368 passed, 344 deselected`
 
 ## 17.2 半天执行原则
 
@@ -181,6 +187,14 @@
   - `take bottle` 的 textual fallback 即使已有当前题 artifact 和 grounding，只要仍保留 `action_intent_needed_observation=whether the bottle is later put back into the fridge`，verifier 仍必须保持 blocking。
 - [x] 同时复核通过 1 条原有正例：
   - `place bowl` 的 textual fallback 在已有当前题 artifact、grounding且没有未闭合 marker 时，仍可正常 finish。
+- [x] 本轮专项回归：`368 passed, 344 deselected`
+- [x] 收口 `textual fallback drops direct-outcome recovery back to generic frames`。此前 `missing_direct_outcome_evidence` 已经能在 verifier-blocked 路径上稳定触发 `followup_transition`，但 repeated vision failure 之后如果退到 `need_alternative_evidence_path + rank_choices_from_state`，planner 仍会优先回到 `recover_frames/segment` 这类 generic raw fallback，导致“真正缺的是近窗直接结果”的题失去针对性恢复。
+- [x] 现在 textual fallback 的恢复入口也对齐：
+  - 只要最近 working memory 里仍有 `action_intent_resolution_withheld_for_missing_direct_outcome_evidence=1`；
+  - 且最近专用裁决来自 `infer_action_intent / pairwise / future_use`；
+  - 就先复用现有 `followup_transition` 恢复链，继续围绕动作尾部补决定性关键帧，而不是先退回通用 `segment/recover_frames`。
+- [x] 新增并通过 1 条定向测试，覆盖：
+  - `flip orange cloth` 的 close-call 在 repeated failure 后退到 textual fallback 时，仍优先补 `followup_transition`，而不是 generic raw fallback。
 - [x] 本轮专项回归：`368 passed, 344 deselected`
 
 补充进展：
