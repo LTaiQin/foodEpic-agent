@@ -11086,6 +11086,25 @@ class GraphAgentPlanner:
                     )
                     if precondition is not None:
                         return precondition
+                finalize_mixed_horizon_later_target_revisit = (
+                    self._build_action_intent_finalize_withheld_mixed_horizon_later_target_revisit_decision(
+                        state=state,
+                        hints=hints,
+                        thought="why 题 repeated textual fallback 前，当前 `check/open` 这类近窗解释还没压过更晚结果；直接追 mixed-horizon 竞争里更晚结果对应的真实目标，而不是先退回 generic visual review。",
+                    )
+                )
+                if finalize_mixed_horizon_later_target_revisit is not None:
+                    return finalize_mixed_horizon_later_target_revisit
+                infer_mixed_horizon_later_target_revisit = (
+                    self._build_action_intent_verifier_blocked_mixed_horizon_later_target_revisit_decision(
+                        state=state,
+                        hints=hints,
+                        result=latest_action_intent_result,
+                        blocker_hint="future_use_close_call",
+                    )
+                )
+                if infer_mixed_horizon_later_target_revisit is not None:
+                    return infer_mixed_horizon_later_target_revisit
                 if (
                     self._is_action_intent_task(state)
                     and any(

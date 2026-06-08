@@ -85,6 +85,11 @@
   - system 已经收敛到 `generic measurement-meta vs exact weighing target`，或 `generic phone-measure vs exact ingredient record target`；
   - 但 repeated vision failure 后如果系统退到 `need_alternative_evidence_path + rank_choices_from_state`，planner 仍会先做 generic `inspect_visual_evidence`，没有直接复用 specialized target revisit 去追 `scale` 或具体 ingredient target。
 - [x] 当前最新专项回归：`375 passed, 344 deselected`
+- [x] 新 residual bucket：`textual fallback drops mixed-horizon later-target revisit back to generic visual review`
+- [x] 代表 case：
+  - system 已经收敛到 `check/open` 这类近窗解释与 `put back / serve / empty later` 这类更晚结果之间的 mixed-horizon close-call；
+  - 但 repeated vision failure 后如果系统退到 `need_alternative_evidence_path + rank_choices_from_state`，planner 仍会先做 generic `inspect_visual_evidence`，没有直接复用 later-target revisit 去追 `fridge / sink / plate` 这类真实更晚目标。
+- [x] 当前最新专项回归：`376 passed, 344 deselected`
 
 ## 17.2 半天执行原则
 
@@ -263,6 +268,13 @@
   - `pick up scale` 的 textual fallback 在 repeated failure 后，会优先追 `scale` / weighing target；
   - `pick up phone` 的 textual fallback 在 repeated failure 后，会优先追 `broccoli` 这类 exact ingredient record target。
 - [x] 本轮专项回归：`375 passed, 344 deselected`
+- [x] 收口 `textual fallback drops mixed-horizon later-target revisit back to generic visual review`。此前 repeated vision failure 之后如果退到 `need_alternative_evidence_path + rank_choices_from_state`，即使系统已经收敛到 `check label vs put back`、`open vs later return/use` 这类 mixed-horizon close-call，planner 仍会先做 generic `inspect_visual_evidence`，没有直接复用 later-target revisit 去追真实更晚目标。
+- [x] 现在 textual fallback 的恢复入口继续对齐：
+  - 直接复用 `finalizer mixed_horizon later-target revisit` 与 `verifier-blocked mixed_horizon later-target revisit`；
+  - 同时保持既有顺序：`missing_state_change_prereq` 仍优先于 mixed-horizon later-target，避免把 `tap scale` 一类前提缺失题错误拉去追 later target。
+- [x] 新增并通过 1 条定向测试，覆盖：
+  - `take bottle` 的 textual fallback 在 repeated failure 后，如果 close-call 已经收敛到 `check label` vs `put back in the fridge`，则会直接追 `fridge` 的更晚节点。
+- [x] 本轮专项回归：`376 passed, 344 deselected`
 
 补充进展：
 
