@@ -285,6 +285,14 @@
 - 本轮提交：新增并通过 1 条定向测试，覆盖：
   - `take bottle` 的 textual fallback 在 repeated failure 后，如果 `needed_observation` 已经明确收敛到“是先读标签还是回 fridge”，就直接继续追 `bottle -> fridge` 的更晚证据，而不是先做 generic 短时序复核。
 - 本轮提交：专项回归已进一步提升到 `371 passed, 344 deselected`
+- 本轮提交：继续补 `repeated textual fallback` 的 finalizer-marker 对称性。此前 `generic access / generic relocation / generic hand-free` 这三类 finalizer withheld marker 在 `verifier-blocked` 与 specialized recovery 路径里已经会直接追真实 downstream target，但一旦 repeated vision failure 后退到 `rank_choices_from_state`，planner 仍可能只回到该目标的早窗节点，甚至退回 generic visual review。
+- 本轮改为：
+  - textual fallback 入口也先读取最近的 finalizer withheld marker；
+  - 对 `generic access / generic relocation / generic hand-free`，直接复用已有 downstream target revisit 路径；
+  - 同时把这三类 marker 接入 `prefer latest long-horizon node` 偏置，避免虽然追到了对的下游对象，却仍停在过早的中间节点。
+- 本轮提交：新增并通过 1 条定向测试，覆盖：
+  - `move bottle` 的 textual fallback 在 repeated failure 后，如果 finalizer 已经写出 `generic relocation/storage -> target=jar`，则会直接跳到 `jar` 的更晚节点，而不是停在早窗 reveal 片段。
+- 本轮提交：专项回归已进一步提升到 `372 passed, 344 deselected`
   - `pick up pot` 时若证据已经明确写出 `brought to the sink and tilted to pour`，则 `to empty the water.` 会压过弱 `to check the boiling water.`。
 - 本轮提交：同时回归通过 3 条关键保护：
   - `check label vs put back` 的 later-target marker 仍会在“尚未看清是否回冰箱”时继续 withheld；

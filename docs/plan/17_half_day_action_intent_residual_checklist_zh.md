@@ -70,6 +70,11 @@
   - 说明真正缺的是更晚的 target/relation 证据，而不是 generic frame summary；
   - 但 repeated vision failure 后如果系统退到 `need_alternative_evidence_path + rank_choices_from_state`，planner 仍可能先做 `inspect_visual_evidence`，没有直接进入已有的 target/relation revisit 恢复链。
 - [x] 当前最新专项回归：`370 passed, 344 deselected`
+- [x] 新 residual bucket：`textual fallback drops finalizer generic-downstream markers back to early intermediate node`
+- [x] 代表 case：
+  - finalizer 已经明确写出 `generic access / generic relocation / generic hand-free` 不是结论，并给出了真实 downstream target；
+  - 但 repeated vision failure 后如果系统退到 `need_alternative_evidence_path + rank_choices_from_state`，planner 虽然可能开始追这个目标，却仍容易停在过早的 reveal/intermediate 节点，而不是直接跳到更晚、更有判别力的节点。
+- [x] 当前最新专项回归：`372 passed, 344 deselected`
 
 ## 17.2 半天执行原则
 
@@ -223,6 +228,14 @@
 - [x] 新增并通过 1 条定向测试，覆盖：
   - `take bottle` 的 textual fallback 在 repeated failure 后，如果 `needed_observation` 已经明确收敛到“是先读标签还是回 fridge”，就直接继续追 `bottle -> fridge` 的更晚证据。
 - [x] 本轮专项回归：`371 passed, 344 deselected`
+- [x] 收口 `textual fallback drops finalizer generic-downstream markers back to early intermediate node`。此前 repeated vision failure 之后如果退到 `need_alternative_evidence_path + rank_choices_from_state`，即使 finalizer 已经通过 `generic access / generic relocation / generic hand-free` marker 点名了真实 downstream target，planner 也可能只回到该目标的早窗节点，停在 reveal/intermediate 片段，而不是跳到更晚、更有判别力的节点。
+- [x] 现在 textual fallback 的恢复入口继续对齐：
+  - 先读取最近的 finalizer generic-downstream marker；
+  - 直接复用已有 downstream target revisit 路径；
+  - 同时对这三类 marker 启用 `prefer latest long-horizon node` 偏置，避免停在早窗中间节点。
+- [x] 新增并通过 1 条定向测试，覆盖：
+  - `move bottle` 的 textual fallback 在 repeated failure 后，如果 finalizer 已经写出 `generic relocation/storage -> target=jar`，就直接跳到 `jar` 的更晚节点，而不是停在早窗 reveal 片段。
+- [x] 本轮专项回归：`372 passed, 344 deselected`
 
 补充进展：
 

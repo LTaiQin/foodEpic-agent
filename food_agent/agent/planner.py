@@ -6356,6 +6356,13 @@ class GraphAgentPlanner:
         bias_profile = self._action_intent_timeline_review_bias_profile(state)
         if bias_profile["final_location_unclear"]:
             return True
+        recent_finalize_marker = self._action_intent_recent_later_outcome_finalize_withheld_marker(state)
+        if recent_finalize_marker in {
+            "action_intent_resolution_withheld_for_generic_hand_free_enablement=1",
+            "action_intent_resolution_withheld_for_generic_access_or_space_enablement=1",
+            "action_intent_resolution_withheld_for_generic_relocation_or_storage_enablement=1",
+        }:
+            return True
         needed_profile = self._action_intent_needed_observation_profile(state=state)
         return bool(needed_profile["prefer_final_placement"]) and not bool(needed_profile["prefer_future_use_outcome"])
 
@@ -10961,6 +10968,27 @@ class GraphAgentPlanner:
                     )
                     if needed_observation_target_revisit is not None:
                         return needed_observation_target_revisit
+                    finalize_access_or_space_revisit = self._build_action_intent_finalize_withheld_generic_access_or_space_revisit_decision(
+                        state=state,
+                        hints=hints,
+                        thought="why 题 repeated textual fallback 前，finalizer 已明确 generic access / make-space 不是结论；直接追真正的 reveal/use 下游目标，而不是先退回 generic visual review。",
+                    )
+                    if finalize_access_or_space_revisit is not None:
+                        return finalize_access_or_space_revisit
+                    finalize_relocation_or_storage_revisit = self._build_action_intent_finalize_withheld_generic_relocation_or_storage_revisit_decision(
+                        state=state,
+                        hints=hints,
+                        thought="why 题 repeated textual fallback 前，finalizer 已明确 generic put-away / relocation 不是结论；直接追真实后续目标，而不是先退回 generic visual review。",
+                    )
+                    if finalize_relocation_or_storage_revisit is not None:
+                        return finalize_relocation_or_storage_revisit
+                    finalize_hand_free_revisit = self._build_action_intent_finalize_withheld_generic_hand_free_revisit_decision(
+                        state=state,
+                        hints=hints,
+                        thought="why 题 repeated textual fallback 前，finalizer 已明确 generic hand-free 不是结论；直接追真实 downstream object / same-object use，而不是先退回 generic visual review。",
+                    )
+                    if finalize_hand_free_revisit is not None:
+                        return finalize_hand_free_revisit
                 if (
                     self._is_action_intent_task(state)
                     and isinstance(latest_action_intent_result, dict)
