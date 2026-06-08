@@ -11165,6 +11165,13 @@ class GraphAgentPlanner:
                         hints=hints,
                         thought="why 题 repeated textual fallback 前，unresolved rerank 已指出 revealed-target / freed-slot 的真正下游目标还没被确认；优先追那个下游对象，而不是先退回 generic visual review。",
                     )
+                    unresolved_rerank_downstream_fixture_revisit = self._build_action_intent_unresolved_rerank_downstream_fixture_revisit_decision(
+                        state=state,
+                        hints=hints,
+                        thought="why 题 repeated textual fallback 前，unresolved rerank 已指出 hand-free / fixture enablement 的真正下游装置还没被确认；优先追那个下游 fixture，而不是先退回 generic visual review。",
+                    )
+                    if unresolved_rerank_downstream_fixture_revisit is not None:
+                        return unresolved_rerank_downstream_fixture_revisit
                     if unresolved_rerank_downstream_target_revisit is not None:
                         return unresolved_rerank_downstream_target_revisit
                     unresolved_rerank_long_horizon_revisit = self._build_action_intent_unresolved_rerank_long_horizon_revisit_decision(

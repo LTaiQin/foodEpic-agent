@@ -111,6 +111,12 @@
   - verifier-blocked 路径已经会继续追动作物体本身在更晚时刻的真实状态；
   - 但 repeated vision failure 后如果系统退到 `need_alternative_evidence_path + rank_choices_from_state`，planner 仍可能直接退回 generic textual fallback，没有复用这条 same-object specialized recovery。
 - [x] 当前最新专项回归：`380 passed, 344 deselected`
+- [x] 新 residual bucket：`textual fallback drops unresolved fixture-gap revisit back to generic visual review`
+- [x] 代表 case：
+  - system 已经收敛到 `access the scale/tap` vs `turn on the scale/tap` 这类 hand-free / fixture enablement close-call；
+  - unresolved rerank 路径已经会继续追真正的下游 fixture；
+  - 但 repeated vision failure 后如果系统退到 `need_alternative_evidence_path + rank_choices_from_state`，planner 仍可能直接退回 generic textual fallback，没有复用这条 unresolved fixture-gap specialized recovery。
+- [x] 当前最新专项回归：`381 passed, 344 deselected`
 
 ## 17.2 半天执行原则
 
@@ -174,6 +180,63 @@
 - [x] 当前 half-day 专项已经非常接近阶段收口：
   - 最近几轮主要集中在把 repeated textual fallback 与已有 specialized recovery 做对称补线
   - 当前最新专项回归已提升到 `380 passed, 344 deselected`
+
+## 17.15 本轮进展：textual fallback 对齐 unresolved fixture-gap specialized recovery
+
+这轮 residual audit 又找到一个和上一轮同类型、但更窄的 specialized recovery 漏接：
+
+- `unresolved rerank` 路径已经支持：
+  - `downstream fixture revisit`
+- 典型是：
+  - `access the scale behind the tray`
+  - vs `turn on the scale`
+  - 或 `free one hand`
+  - vs `turn on the tap`
+- 但 repeated `rank_choices_from_state` textual fallback 前，
+  - planner 还没有把这条 unresolved fixture-gap 恢复链显式接回去
+- 结果就是：
+  - 一旦 repeated vision failure 发生
+  - 即使 unresolved rerank 已经明确“真正缺的是下游 fixture 的决定性证据”
+  - 系统也可能先退回 generic visual review，而不是直接追 `scale/tap`
+
+### 本轮实现
+
+- [x] 在 repeated textual fallback 分支中接入：
+  - `unresolved_rerank_downstream_fixture_revisit`
+- [x] 当前只要 recent unresolved-rerank marker 已经指向：
+  - `timeline_review_hand_free_or_fixture_gap`
+  - 且 latest resolution payload 暴露出真实下游 fixture
+  - 就会优先追 `scale/tap` 这类下游装置的更晚证据
+  - 不再先退回 generic visual review
+
+### 本轮新增测试
+
+- [x] `test_planner_action_intent_textual_fallback_fixture_gap_revisits_downstream_fixture_node`
+  - 验证 `move tray` 时，
+  - `access the scale behind the tray`
+  - vs `turn on the scale`
+  - 这类 fixture-gap close-call 在 repeated textual fallback 前，
+  - 会直接回到 `scale` 的更晚轨迹，而不是退回 generic textual rank
+
+### 本轮回归
+
+- [x] 定向测试：
+  - `pytest -q tests/test_graph_agent.py -k 'textual_fallback_fixture_gap_revisits_downstream_fixture_node'`
+  - 结果：`1 passed, 724 deselected`
+- [x] 相关护栏复核：
+  - `pytest -q tests/test_graph_agent.py -k 'textual_fallback_fixture_gap_revisits_downstream_fixture_node or unresolved_rerank_fixture_gap_revisits_downstream_fixture_node or textual_fallback_hand_free_fixture_gap_prefers_downstream_fixture or textual_fallback_same_object_active_use_prefers_action_object_revisit'`
+  - 结果：`4 passed, 721 deselected`
+- [x] 专项回归：
+  - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+  - 结果：`381 passed, 344 deselected`
+
+### 本轮结论
+
+- [x] repeated textual fallback 与 unresolved-rerank specialized recovery 又对齐了一条真实链路：
+  - `downstream fixture revisit`
+- [x] 当前这条 half-day 主线已经高度收敛：
+  - 最近两轮都是在补 repeated textual fallback 与已有 specialized recovery 的最后对称漏点
+  - 当前最新专项回归已提升到 `381 passed, 344 deselected`
 
 ## 17.3 当前必须先收口的事项
 

@@ -269,6 +269,18 @@
   - textual fallback 的 hand-free downstream fixture revisit 未被打坏；
   - textual fallback 的 phone-record exact-target revisit 未被打坏。
 - 本轮提交：专项回归已更新到 `380 passed, 344 deselected`
+- 本轮提交：repeated textual fallback 与 unresolved-rerank specialized recovery 又对齐 1 条真实漏接链。此前 `planner` 已经在 unresolved-rerank 路径支持 `downstream fixture revisit`，能在 `access the scale/tap` vs `turn on the scale/tap` 这类 close-call 下继续追真实下游 fixture；但 repeated `rank_choices_from_state` textual fallback 前还没有复用这条恢复链，因此 repeated vision failure 发生后仍可能退回 generic visual review。
+- 本轮改为：
+  - 在 repeated textual fallback 分支中接入 `unresolved_rerank_downstream_fixture_revisit`；
+  - 只要 recent unresolved-rerank marker 已经指向 `timeline_review_hand_free_or_fixture_gap`，且 latest resolution payload 暴露出真实下游 fixture，就优先继续追 `scale/tap` 这类下游装置的更晚证据，而不是先退回 generic visual review。
+- 本轮提交：新增并通过 1 条定向测试，覆盖：
+  - `move tray` 的 repeated textual fallback close-call 中，`access the scale behind the tray` vs `turn on the scale` 会优先回到 `scale` 的更晚轨迹，而不是退回 generic textual rank。
+- 本轮提交：同时复核通过 4 条相关护栏测试，覆盖：
+  - textual fallback 的新 fixture-gap revisit 正常触发；
+  - unresolved-rerank 的原始 fixture-gap revisit 仍保持有效；
+  - textual fallback 的 hand-free downstream fixture revisit 未被打坏；
+  - textual fallback 的 same-object active-use revisit 未被打坏。
+- 本轮提交：专项回归已更新到 `381 passed, 344 deselected`
   - `take bottle` 的 textual fallback 即使已有当前题 artifact 和 grounding，只要仍保留 `action_intent_needed_observation=whether the bottle is later put back into the fridge`，verifier 仍必须保持 blocking。
 - 本轮提交：同时保留并复核通过 1 条原有正例：
   - `place bowl` 的 textual fallback 在已有当前题 artifact、grounding 且没有未闭合 marker 时，仍可正常 finish。
