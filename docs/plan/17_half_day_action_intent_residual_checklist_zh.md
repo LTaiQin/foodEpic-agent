@@ -396,6 +396,68 @@ pytest -q tests/test_graph_agent.py -k 'pairwise and action_intent'
 - 第二优先：把当前 why 专项阶段成果整理成更稳定的阶段基线，供后续完整 agent 验证直接复用。
 - 第三优先：将 why 专项与完整 agent 的小样本真实运行串起来，检查这些结构化收口是否真正改善端到端表现。
 
+## 17.14 2026-06-08 residual audit 增量收口：`missing_direct_outcome_evidence` 现在会触发近窗 forced transition probe
+
+本轮没有再硬开一个已经基本收口的旧 bucket，而是顺着 `17.12` 的 residual audit 继续往下查，补上了一条此前已经被 `graph_agent finalizer` 识别、但还没有被 `planner` 真正利用起来的恢复链。
+
+### 本轮定位到的真实缺口
+
+- `graph_agent` 已经会在一类 close-call 上写入：
+  - `action_intent_resolution_withheld_for_missing_direct_outcome_evidence=1`
+- 这类题典型是：
+  - `flip / turn / shake cloth`
+  - `move towel / cloth`
+  - 某些弱 `residue release / relocation` 候选
+- 它们的问题不是“更晚 long-horizon 目标未知”
+- 而是“当前近窗里最关键的直接结果链还没看清”
+- 例如：
+  - `crumb 有没有真的掉进 sink`
+  - `cloth 是不是真的翻到了另一面`
+  - `move` 是否真的形成了直接 relocation outcome
+
+此前缺口在于：
+
+- finalizer 已经知道“不能定答”
+- 但 planner 侧并没有把这个 marker 显式接到现有的 `forced followup_transition` 恢复链上
+- 因而这类题更多还是靠通用 close-call 路径恢复，而不是优先去看最有判别力的近窗直接结果帧
+
+### 本轮实现
+
+- [x] 在 `planner._action_intent_verifier_blocked_prefers_forced_transition_probe(...)` 中新增：
+  - 若最近 working memory 已写入
+  - `action_intent_resolution_withheld_for_missing_direct_outcome_evidence=1`
+  - 则直接启用 forced `followup_transition`
+- [x] 保持原有保护边界：
+  - 如果已经存在 `followup_transition` 帧
+  - 不会重复触发同一轮 transition probe
+
+### 本轮新增测试
+
+- [x] `test_planner_action_intent_verifier_blocked_missing_direct_outcome_marker_forces_transition_probe`
+  - 验证 `flip orange cloth` 这类题在已有 marker 后，会直接转去 `extract_frames_for_range(tag=...followup_transition)`
+- [x] `test_planner_action_intent_verifier_blocked_missing_direct_outcome_marker_does_not_repeat_transition_probe`
+  - 验证已有 transition probe 帧后，不会反复重复同一条近窗密采样路径
+
+### 本轮回归
+
+- [x] 定向测试：
+  - `pytest -q tests/test_graph_agent.py -k 'missing_direct_outcome_marker_forces_transition_probe or missing_direct_outcome_marker_does_not_repeat_transition_probe or verifier_blocked_finish_post_action_blocker_prefers_followup_sampling'`
+  - 结果：`3 passed, 700 deselected`
+- [x] 专项回归：
+  - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+  - 结果：`359 passed, 344 deselected`
+
+### 本轮结论
+
+- 这次更像是 `17.12` residual audit 下的一次“小型结构补线”，不是新开大 bucket。
+- 但它有实际价值：
+  - finalizer 已识别出的“缺直接结果链”现在不再只是一个被动 marker
+  - 而是会主动驱动 planner 去补最该看的近窗关键帧
+- 下一轮 residual audit 可以继续优先排查：
+  - `missing_simple_relocation_evidence`
+  - `missing_immediate_micro_outcome_evidence`
+  - 是否还存在值得单独建 bucket 的高频 close-call
+
 ## 17.13 Goal 模式提示词
 
 下面这段可以直接作为 goal 模式目标使用：

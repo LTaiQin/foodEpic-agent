@@ -232,6 +232,11 @@
   - `move bottle` 时 `to make space on the shelf.` 会被明确的 `take the hidden spice jar behind it` 压过；
   - 如果只是 reveal 了 behind area、但 hidden spice jar 仍只是 speculative，则不会误翻到 exact hidden retrieval，而会回退到 `to access what's behind the bottle.`。
 - 本轮提交：专项回归已进一步提升到 `357 passed, 344 deselected`
+- 本轮提交：把 `action_intent_resolution_withheld_for_missing_direct_outcome_evidence=1` 接到了 planner 的 forced `followup_transition` 恢复链。此前 `graph_agent finalizer` 已经能识别一类“近窗直接结果还没看清”的弱 `relocation / residue / cloth flip` close-call，但该 marker 还没有驱动专门恢复动作；现在 verifier-blocked recovery 看到这个 marker 时，会优先围绕动作尾部做近窗密采样，而不是退回更泛化的 close-call 恢复。
+- 本轮提交：新增并通过 2 条定向测试，分别保护：
+  - `missing_direct_outcome_evidence` marker 会强制触发 `followup_transition`；
+  - 如果 transition probe 帧已经存在，则不会重复触发同一条近窗密采样路径。
+- 本轮提交：专项回归已进一步提升到 `359 passed, 344 deselected`
 - 本轮提交：同时收紧了 `transport-vs-use` 的前移触发门槛。只有模型已经显式承认 `need_more_evidence / ambiguity / whether X or Y` 时，才会抢先看近窗后果；普通高置信但只是泛化“暂时看不清”的 towel/cloth 题仍保持原有 `precontext` 路线，不会被误伤
 - 本轮提交：why 初始化阶段的取帧策略也不再一刀切。过去只要还没有当前题时间窗帧，`planner` 就会统一先抽 `segment`；现在对于一开始就属于 `strict visual disambiguation` 的 why 题，会直接走 `initial transition probe`，先围绕动作尾部和后续短窗口抽更密的关键帧，而不是先看一组静态动作片段
 - 本轮提交：这一步当前先覆盖：

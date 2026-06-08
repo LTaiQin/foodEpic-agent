@@ -14055,6 +14055,12 @@ class GraphAgentPlanner:
             return False
         if blocker_hint not in {"post_action_evidence", "future_use_close_call", "pairwise_close_call"}:
             return False
+        if any(
+            isinstance(item, str)
+            and item.startswith("action_intent_resolution_withheld_for_missing_direct_outcome_evidence=1")
+            for item in list(getattr(state, "working_memory", []))[-12:]
+        ):
+            return True
         needed_profile = self._action_intent_needed_observation_profile(state=state, result=result)
         if needed_profile["prefer_state_change_only"]:
             return True
