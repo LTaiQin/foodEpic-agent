@@ -12769,6 +12769,27 @@ class GraphAgentPlanner:
         )
         if needed_observation_target_revisit is not None:
             return needed_observation_target_revisit
+        finalize_access_or_space_revisit = self._build_action_intent_finalize_withheld_generic_access_or_space_revisit_decision(
+            state=state,
+            hints=hints,
+            thought="why 题被 verifier 拦下后，当前已知 generic reveal/access 不是结论；优先直接追 finalizer 指出的真实 downstream target，而不是先退回泛化补帧。",
+        )
+        if finalize_access_or_space_revisit is not None:
+            return finalize_access_or_space_revisit
+        finalize_relocation_or_storage_revisit = self._build_action_intent_finalize_withheld_generic_relocation_or_storage_revisit_decision(
+            state=state,
+            hints=hints,
+            thought="why 题被 verifier 拦下后，当前已知 generic relocation / put-away 不是结论；优先直接追 finalizer 指出的真实后续目标，而不是先退回泛化补帧。",
+        )
+        if finalize_relocation_or_storage_revisit is not None:
+            return finalize_relocation_or_storage_revisit
+        finalize_hand_free_revisit = self._build_action_intent_finalize_withheld_generic_hand_free_revisit_decision(
+            state=state,
+            hints=hints,
+            thought="why 题被 verifier 拦下后，当前已知 generic hand-free 不是结论；优先直接追 finalizer 指出的真实 downstream object / same-object use，而不是先退回泛化补帧。",
+        )
+        if finalize_hand_free_revisit is not None:
+            return finalize_hand_free_revisit
         forced_transition_probe = self._build_action_intent_verifier_blocked_forced_transition_probe_decision(
             state=state,
             hints=hints,
