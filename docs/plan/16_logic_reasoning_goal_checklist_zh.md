@@ -156,7 +156,11 @@
   - 对 `check boiling/check contents` vs `empty/pour/serve later` 这类 close-call，只要竞争项已经暴露出明确目标语义（例如 `sink`），即使通用 mixed-horizon 分类还不够完整，也会把该 later target 写回 working memory；
   - 因而 `pick up pot`、`pot still seems to contain hot water` 这类题，在“尚未看清是短暂查看还是倒向 sink”时，不再只有 generic withhold，而是会显式留下 `target=sink kind=fixture` 给 planner 后续恢复链使用。
 - 本轮提交：新增并通过 1 条 Bucket F 定向测试，覆盖 `check the boiling water` vs `empty the water` 的 weak-inspection close-call；现在 finalizer 会同时写入 `action_intent_resolution_withheld_for_weak_cooking_inspection_evidence=1` 与 `action_intent_resolution_withheld_for_mixed_horizon_later_target=1 target=sink kind=fixture`。
-- 本轮提交：专项回归已更新到 `343 passed, 344 deselected`
+- 本轮提交：Bucket F 的 `check label vs put back` 再补 1 个 unresolved-rerank 恢复缺口。此前 finalizer 与 verifier-blocked 的 mixed-horizon later-target revisit 已经会对 `fridge/scale/sink` 这类 fixture later-target 优先跳到满足 `min_start_time` 的更晚节点，但 unresolved rerank 这条路径仍可能停在近窗 fixture 轨迹，导致 `check label` vs `put back` 这类题在“已经知道要去追 fridge、却仍停在早窗 fridge 节点”的状态下反复打转。本轮改为：
+  - `planner._build_action_intent_unresolved_rerank_mixed_horizon_later_target_revisit_decision(...)` 也对 `target_kind == fixture` 对齐启用“优先选更晚节点”逻辑；
+  - 因而 mixed-horizon unresolved close-call 一旦已经确定真实 later target 是 `fridge/scale/sink`，就不再停在第一个同名 fixture，而是会继续跳到动作后更有判别力的更晚窗口。
+- 本轮提交：新增并通过 1 条 Bucket F 定向测试，覆盖 `take bottle` 时 `check the label` vs `put the bottle back in the fridge` 的 unresolved-rerank close-call；当前 late window 只显示“标签朝外、尚未看清是否回冰箱”时，planner 会优先跳到更晚 fridge 节点，而不是停在近窗 fridge 轨迹。
+- 本轮提交：专项回归已更新到 `344 passed, 344 deselected`
 - 本轮提交：why 题在首次 `infer_action_intent` 就暴露 `receptacle_outcome` 近窗歧义时，不再机械地先走一轮泛化 `followup`。现在会直接围绕动作尾部触发 `followup_transition`，主动去找“是否真的掉回 sink/pan/bowl/container”的决定性关键帧；同时这条路径会压过误触发的 `precontext`，避免 `flip cloth / shake / tap / tilt` 一类题被无关前置状态采样截走
 - 本轮提交：新增并通过 2 条定向测试，分别保护：
   - `receptacle_outcome` 型 why close-call 会在第一次歧义时直接进入 `followup_transition`
