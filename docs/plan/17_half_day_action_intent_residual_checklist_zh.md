@@ -199,6 +199,7 @@
 - [x] 新增 `weak measurement meta` finish gate：若 top 候选只是 `adjust/read/record measurements`，而 `reason + decisive_observation` 里没有 `reading / tare / zero / display change / entered update` 等直接信号，则直接 withheld。
 - [x] 同时补上 why 题 structured best-index fallback 的通用保护：只要已经写入 `action_intent_resolution_withheld_for_*` marker，就不允许后续 fallback 再把答案从旧的 `best_index` memory 里捞回来。
 - [x] 新增并通过 1 条 Bucket E 定向测试，覆盖 `pick up scale` 后只有“scale remains near ingredient area”的宽泛 measurement 语义、但没有 `reading/tare` 明确信号时，finalizer 不能直接收口到 `adjust the measurements.`。
+- [x] 新增并通过 1 条 Bucket E 回归保护测试，覆盖 `tap kitchen scale` 在缺少动作前开机状态/容器前提时，即使 working memory 里残留旧的 `action_intent_best_index=zero out`，structured fallback 也不会把被 finalizer withheld 的 `zero out` 再回填出来。
 - [x] 本轮专项回归：`337 passed, 344 deselected`
 
 ## 17.9 Residual Bucket F：inspection / check / read label 与 later outcome
