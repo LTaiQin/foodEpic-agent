@@ -15,9 +15,9 @@
 当前起点：
 
 - 已提交进展：`16.49 generic measurement-meta -> exact measurement target`
-- 当前待提交进展：`16.50 pick up phone generic-measure -> exact ingredient record target`
+- 当前待提交进展：`Bucket A multiple exact phone-record targets -> prefer most evidence-starved exact target`
 - 当前专项回归：`pytest -q tests/test_graph_agent.py -k 'action_intent'`
-- 当前已验证结果：`350 passed, 344 deselected`
+- 当前已验证结果：`352 passed, 344 deselected`
 
 ## 17.2 半天执行原则
 
@@ -57,7 +57,7 @@
 - [x] 覆盖 `record nutritional value of X`、`update app with measurements of X` 两类高频措辞。
 - [x] 覆盖 best 是 generic measure、second best 是 exact target 的情况。
 - [x] 覆盖 best 是 exact target、但证据链仍不闭合的情况。
-- [ ] 覆盖多个 exact record target 同时存在时，优先追当前最缺证据的目标。
+- [x] 覆盖多个 exact record target 同时存在时，优先追当前最缺证据的目标。
 - [x] 如果没有目标轨迹，先 `query_object`，不要直接 finish。
 - [x] 如果有目标轨迹，优先 `query_spatial_context` 到更晚、更有判别力的时刻。
 
@@ -96,6 +96,17 @@
 - [x] mixed-horizon later-target 落到 fixture 时，优先选更晚的 fixture 轨迹，不再停在最早出现的同名节点。
 - [x] 新增并通过 1 条定向测试，覆盖 `same-object cap action` 仍出现在 `reason` 里时，`open/uncap` vs `weigh later` 仍会继续追 `scale`。
 - [x] 本轮专项回归：`333 passed, 344 deselected`
+
+补充进展：
+
+- [x] `16.50` 已完成并提交，不再处于“待提交”状态；当前 Bucket A 的剩余缺口已经转成“多 exact record target 并存时如何选最该追的那个目标”。
+- [x] 收口 `multiple exact phone-record targets` 的 verifier-blocked recovery。此前这条路径只稳定覆盖 `generic measure vs 单个 exact target`；如果同时存在 `coriander / broccoli / carrot` 这类多个具体记录目标，planner 容易只盯住最先进入 top-2 的 exact target，而不会比较哪一个目标当前最缺判别证据。
+- [x] 现在 `planner` 会扫描全部 `phone/app record target` 候选，综合 `screen not readable / no X target visible / still unresolved / no direct recording target` 这类 uncertainty marker，优先追“目标最明确、但证据链仍最缺”的 exact target。
+- [x] 同时补上 phone-record revisit 的 later-node 偏置：如果当前还没有更强的 anchor/followup 约束，就不再默认追该对象最早出现的轨迹，而会优先看更晚、更有判别力的目标节点。
+- [x] 新增并通过 2 条 Bucket A 定向测试，分别覆盖：
+  - 多个 exact ingredient record target 同时存在时，会优先追当前最不确定、最需要补证据的那个目标；
+  - 如果该目标没有现成轨迹，则会先 `query_object` 检索它，而不是退回 generic measure 或继续追错对象。
+- [x] 本轮专项回归：`352 passed, 344 deselected`
 
 ## 17.6 Residual Bucket C：move / make space / hidden target / final placement
 

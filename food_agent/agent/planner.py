@@ -7975,23 +7975,28 @@ class GraphAgentPlanner:
         competitor_is_exact_record = self._action_intent_choice_is_phone_record_target_purpose(competitor_choice)
         if not ((best_is_generic_measure and competitor_is_exact_record) or (competitor_is_generic_measure and best_is_exact_record)):
             return None
-        exact_choice = best_choice if best_is_exact_record else competitor_choice
-        target_hint = self._action_intent_choice_record_target_hint(exact_choice)
-        if not target_hint:
-            return None
         combined_text = (
             f"{str(result.get('reason') or '').lower()} "
             f"{str(result.get('needed_observation') or '').lower()}"
         ).strip()
+        candidate_rows: list[tuple[int, float, str, str, str]] = []
         for item in result.get("candidate_evidence") or []:
             if not isinstance(item, dict):
                 continue
             index = self._coerce_choice_index(item.get("index"), choices)
-            if index not in {best_index, competitor_index}:
+            if index is None:
                 continue
+            choice = choices[index]
+            support = str(item.get("support") or "").lower()
+            contradiction = str(item.get("contradiction") or "").lower()
+            try:
+                score = float(item.get("score") or 0.0)
+            except Exception:  # noqa: BLE001
+                score = 0.0
             combined_text = (
-                f"{combined_text} {str(item.get('support') or '').lower()} {str(item.get('contradiction') or '').lower()}"
+                f"{combined_text} {support} {contradiction}"
             ).strip()
+            candidate_rows.append((index, score, choice, support, contradiction))
         uncertainty_markers = (
             "unclear",
             "not yet visible",
@@ -8016,7 +8021,48 @@ class GraphAgentPlanner:
         )
         if not any(marker in combined_text for marker in uncertainty_markers):
             return None
-        return target_hint, "object"
+        exact_target_candidates: list[tuple[float, str]] = []
+        for index, score, choice, support, contradiction in candidate_rows:
+            if not self._action_intent_choice_is_phone_record_target_purpose(choice):
+                continue
+            target_hint = self._action_intent_choice_record_target_hint(choice)
+            if not target_hint:
+                continue
+            candidate_uncertainty = f"{support} {contradiction}"
+            uncertainty_bonus = 0.0
+            if any(
+                marker in candidate_uncertainty
+                for marker in (
+                    "not readable",
+                    "screen not readable",
+                    "entry is not readable",
+                    "recording target is not shown",
+                    "no direct recording target",
+                    "no broccoli target",
+                    "no coriander target",
+                    "no carrot target",
+                    "still unclear",
+                    "still unresolved",
+                    "not yet visible",
+                    "没有直接记录目标",
+                    "还看不出",
+                    "证据不足",
+                )
+            ):
+                uncertainty_bonus += 0.22
+            if index == best_index:
+                uncertainty_bonus += 0.06
+            if index == competitor_index:
+                uncertainty_bonus += 0.04
+            exact_target_candidates.append((score + uncertainty_bonus, target_hint))
+        if not exact_target_candidates:
+            exact_choice = best_choice if best_is_exact_record else competitor_choice
+            target_hint = self._action_intent_choice_record_target_hint(exact_choice)
+            if not target_hint:
+                return None
+            return target_hint, "object"
+        exact_target_candidates.sort(key=lambda item: (-item[0], item[1]))
+        return exact_target_candidates[0][1], "object"
 
     def _action_intent_unresolved_rerank_hand_free_object_hint(self, state: AgentState) -> str:
         reason = self._action_intent_recent_unresolved_rerank_withheld_reason(state)
@@ -8567,7 +8613,10 @@ class GraphAgentPlanner:
             after_time = anchor_time
         min_start_time = None if after_time is None else float(after_time) + 0.5
         selected = None
-        for node in nodes:
+        candidate_nodes = list(nodes)
+        if min_start_time is None and len(candidate_nodes) >= 2:
+            candidate_nodes = list(reversed(candidate_nodes))
+        for node in candidate_nodes:
             if not isinstance(node, dict):
                 continue
             start_raw = node.get("start_time")
