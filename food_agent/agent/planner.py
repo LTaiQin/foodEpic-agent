@@ -12769,6 +12769,14 @@ class GraphAgentPlanner:
         )
         if needed_observation_target_revisit is not None:
             return needed_observation_target_revisit
+        forced_transition_probe = self._build_action_intent_verifier_blocked_forced_transition_probe_decision(
+            state=state,
+            hints=hints,
+            result=payload,
+            blocker_hint=blocker_hint,
+        )
+        if forced_transition_probe is not None:
+            return forced_transition_probe
         if tool_name == "infer_action_intent":
             if (
                 blocker_hint == "precondition_context"
@@ -12958,6 +12966,75 @@ class GraphAgentPlanner:
                 thought="why 题被 verifier 拦下后，回到 top-2 专用裁决并用更新后的证据重判。",
             )
         return None
+
+    def _action_intent_verifier_blocked_prefers_forced_transition_probe(
+        self,
+        *,
+        state: AgentState,
+        result: dict[str, Any] | None,
+        blocker_hint: str,
+    ) -> bool:
+        if not self._is_action_intent_task(state) or not isinstance(result, dict):
+            return False
+        if self._action_intent_has_transition_followup_frames(state):
+            return False
+        if blocker_hint not in {"post_action_evidence", "future_use_close_call", "pairwise_close_call"}:
+            return False
+        needed_profile = self._action_intent_needed_observation_profile(state=state, result=result)
+        if needed_profile["prefer_state_change_only"]:
+            return True
+        support_text = self._action_intent_result_support_text(result)
+        combined_text = f"{support_text} {str(result.get('needed_observation') or '').lower()}".strip()
+        transition_first_markers = (
+            "missing_direct_effect",
+            "direct physical effect",
+            "display state change",
+            "state change",
+            "display",
+            "readout",
+            "tare",
+            "zero",
+            "turn on",
+            "turned on",
+            "turned off",
+            "opened",
+            "closed",
+            "reset",
+            "开机",
+            "归零",
+            "显示",
+        )
+        return any(marker in combined_text for marker in transition_first_markers)
+
+    def _build_action_intent_verifier_blocked_forced_transition_probe_decision(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        result: dict[str, Any] | None,
+        blocker_hint: str,
+    ) -> PlannerDecision | None:
+        if not self._action_intent_verifier_blocked_prefers_forced_transition_probe(
+            state=state,
+            result=result,
+            blocker_hint=blocker_hint,
+        ):
+            return None
+        probe_window = self._action_intent_transition_probe_window(state=state, hints=hints, result=result)
+        if probe_window is None:
+            return None
+        start_time, end_time, stride_s, max_frames = probe_window
+        return PlannerDecision(
+            thought="why 题被 verifier 拦下后，当前缺口是近窗直接效果/状态变化证据；先强制围绕动作尾部做 `followup_transition` 密采样，确认是否真的出现决定性即时结果，再考虑更晚时域恢复。",
+            tool="extract_frames_for_range",
+            args={
+                "start_time": start_time,
+                "end_time": end_time,
+                "stride_s": stride_s,
+                "max_frames": max_frames,
+                "tag": f"{state.task_family}_followup_transition",
+            },
+        )
 
     def _state_add_memory(self, state: AgentState, text: str) -> None:
         add_memory = getattr(state, "add_memory", None)
