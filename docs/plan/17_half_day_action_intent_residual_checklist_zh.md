@@ -17,7 +17,7 @@
 - 已提交进展：`16.49 generic measurement-meta -> exact measurement target`
 - 当前待提交进展：`16.50 pick up phone generic-measure -> exact ingredient record target`
 - 当前专项回归：`pytest -q tests/test_graph_agent.py -k 'action_intent'`
-- 当前已验证结果：`332 passed, 344 deselected`
+- 当前已验证结果：`343 passed, 344 deselected`
 
 ## 17.2 半天执行原则
 
@@ -239,6 +239,9 @@
 - [x] 新增并通过 1 条 Bucket F 定向测试，覆盖“只有 `pot is lifted while it still seems to contain hot water`、没有 `brief inspection / no tilt / stays near hob` 链条”时，finalizer 不能直接收口到 `to check the boiling water.`。
 - [x] 收口 `check label vs put back` 的一个 planner 恢复缺口。此前 finalizer 已能写入 `action_intent_resolution_withheld_for_mixed_horizon_later_target=1 target=fridge kind=fixture`，但 mixed-horizon later-target revisit 仍可能停在过早的 fridge 节点，而不是追更晚的 return window。本轮改为：对于 finalizer 写出的 fixture later-target，planner 也像 verifier-blocked 那条路径一样，优先选择满足 `min_start_time` 的更晚 fixture 轨迹。
 - [x] 新增并通过 1 条 Bucket F 定向测试，覆盖 `check label` 被 finalizer 拦下并写入 `target=fridge kind=fixture` 后，planner 会优先跳到更晚的 fridge 轨迹窗口，而不是停在过早的近窗 fridge 节点。
+- [x] 收口 `weak cooking inspection` 被 finalizer 拦下后没有写出 later-target 的缺口。现在 `check boiling/check contents` 这类 immediate inspection close-call 如果竞争项本身已经暴露出 `empty/pour/serve later` 的目标语义，即使通用 mixed-horizon 分类还不够完整，也会继续把真实 later target 写回 working memory。
+- [x] 新增并通过 1 条 Bucket F 定向测试，覆盖 `pick up pot` 时 `check the boiling water` vs `empty the water` 的 close-call：当文本只说明“锅里似乎还有热水、尚未看清是否倒向 sink 还是只是短暂查看”时，finalizer 会同时写入 `action_intent_resolution_withheld_for_weak_cooking_inspection_evidence=1` 和 `action_intent_resolution_withheld_for_mixed_horizon_later_target=1 target=sink kind=fixture`，供 planner 后续追更晚 sink 轨迹。
+- [x] 本轮专项回归：`343 passed, 344 deselected`
 
 ## 17.10 半天验收命令
 

@@ -898,6 +898,15 @@ class GraphAgent:
                 state.add_memory("action_intent_resolution_withheld_for_weak_surface_wiping_evidence=1")
                 continue
             elif self._action_intent_resolution_should_withhold_weak_cooking_inspection_claim(raw_result=raw_result, state=state):
+                mixed_horizon_later_target_marker = (
+                    self._action_intent_resolution_mixed_horizon_later_target_marker(
+                        raw_result=raw_result,
+                        state=state,
+                        allow_weak_immediate_inspection=True,
+                    )
+                )
+                if mixed_horizon_later_target_marker:
+                    state.add_memory(mixed_horizon_later_target_marker)
                 state.add_memory("action_intent_resolution_withheld_for_weak_cooking_inspection_evidence=1")
                 continue
             elif self._action_intent_resolution_should_withhold_weak_relocation_or_residue_claim(raw_result=raw_result, state=state):
@@ -1890,12 +1899,14 @@ class GraphAgent:
         *,
         raw_result: dict[str, Any],
         state: AgentState,
+        allow_weak_immediate_inspection: bool = False,
     ) -> str:
         if not self._action_intent_resolution_should_withhold_mixed_horizon_overclaim(
             raw_result=raw_result,
             state=state,
         ):
-            return ""
+            if not allow_weak_immediate_inspection:
+                return ""
         pair = self._action_intent_resolution_competing_pair(raw_result=raw_result, state=state)
         if pair is None:
             return ""
@@ -1915,11 +1926,28 @@ class GraphAgent:
             "food_prep",
             "discard",
         }
-        if not self._action_intent_choice_is_immediate_micro_outcome_candidate(best_choice, best_categories):
-            return ""
+        best_is_immediate = self._action_intent_choice_is_immediate_micro_outcome_candidate(best_choice, best_categories)
+        if not best_is_immediate:
+            if not (
+                allow_weak_immediate_inspection
+                and self._action_intent_resolution_should_withhold_weak_cooking_inspection_claim(
+                    raw_result=raw_result,
+                    state=state,
+                )
+            ):
+                return ""
         if not (competitor_categories & later_outcome_categories):
-            return ""
+            competitor_target_only = self._action_intent_later_outcome_target_token_and_kind(
+                choice=competitor_choice,
+                action_object=self._action_intent_question_object(str(getattr(state, "question", "") or "")),
+                categories=competitor_categories,
+                evidence_text="",
+            )
+            if competitor_target_only is None:
+                return ""
         action_object = self._action_intent_question_object(str(getattr(state, "question", "") or ""))
+        if not best_is_immediate and not allow_weak_immediate_inspection:
+            return ""
         combined_text = " ".join(
             str(raw_result.get(key) or "")
             for key in ("reason", "decisive_observation", "needed_observation")
