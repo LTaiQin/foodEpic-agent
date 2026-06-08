@@ -2420,6 +2420,8 @@ class GraphAgent:
                 "没有实际取出",
                 "没有直接搬运路径",
                 "没有具体终点",
+                "区域更开阔",
+                "台面更空了",
             )
         )
 
@@ -2764,6 +2766,32 @@ class GraphAgent:
                 )
             ):
                 gaps.append("missing_simple_relocation_evidence")
+        if self._action_intent_choice_has_specific_space_target(choice_lc):
+            if any(
+                term in context_lc
+                for term in (
+                    "only a broad workspace effect",
+                    "only a generic workspace effect",
+                    "broader than the exact next workspace use",
+                    "broader than the specific next use",
+                    "no exact next object use is shown",
+                    "no exact next target is shown",
+                    "no specific next use",
+                    "no explicit workspace-clearing result",
+                    "the area becomes more open",
+                    "the rack area becomes more open",
+                    "the sink-side area becomes more open",
+                    "extra room near the sink",
+                    "clears some room on the counter",
+                    "changes the nearby shelf layout",
+                    "changes the shelf layout",
+                    "creates a bit of counter room",
+                    "只是更宽泛的空间效果",
+                    "只是泛化空间效果",
+                    "没有明确腾位结果",
+                )
+            ):
+                gaps.append("exact_workspace_without_exact_use")
         if "wipe" in choice_lc and any(term in choice_lc for term in ("surface", "counter", "worktop", "table", "台面", "桌")):
             if any(term in support_lc for term in ("not yet shown", "no wiping motion", "未显示", "还未显示", "尚未显示")):
                 gaps.append("missing_surface_wiping_evidence")
@@ -2925,6 +2953,7 @@ class GraphAgent:
                 "timeline_review_revealed_slot_gap",
                 "timeline_review_revealed_target_gap",
                 "timeline_review_hand_free_or_fixture_gap",
+                "exact_workspace_without_exact_use",
             )
         ):
             return True
@@ -4910,6 +4939,10 @@ class GraphAgent:
             for token in (
                 "sink",
                 "hob",
+                "worktop",
+                "counter",
+                "countertop",
+                "shelf",
                 "scale",
                 "counter",
                 "dish drainer",
@@ -5220,6 +5253,10 @@ class GraphAgent:
                 "rack",
                 "sink",
                 "hob",
+                "worktop",
+                "counter",
+                "countertop",
+                "shelf",
                 "scale",
                 "tray",
                 "colander",
@@ -5418,16 +5455,34 @@ class GraphAgent:
             ):
                 return False
         if any(
-            token in contradiction
+            token in signal_text
             for token in (
                 "only a generic workspace effect",
+                "only a broad workspace effect",
                 "side effect",
                 "just generic space",
                 "no exact next object",
+                "no exact next object use is shown",
+                "no exact next target is shown",
+                "no specific next use",
                 "not tied to a specific next item",
+                "broader than the exact next workspace use",
+                "broader than the specific next use",
+                "no explicit workspace-clearing result",
+                "the area becomes more open",
+                "the rack area becomes more open",
+                "the sink-side area becomes more open",
+                "extra room near the sink",
+                "clears some room on the counter",
+                "changes the nearby shelf layout",
+                "changes the shelf layout",
+                "creates a bit of counter room",
                 "只是泛化空间效果",
+                "只是更宽泛的空间效果",
                 "只是副作用",
                 "没有具体下一目标",
+                "没有明确下一目标",
+                "没有明确腾位结果",
             )
         ):
             return False

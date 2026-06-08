@@ -108,6 +108,11 @@
   - `move mug -> blue cup into freed slot` 时会优先追 `cup` 的后续轨迹，而不是卡在 `cup + slot` 的双目标歧义里；
   - `move colander -> saucepan into sink slot` 时会优先追 `saucepan` 的后续轨迹，而不是回到 `colander / sink` 关系或被 `pan` 子串误匹配带偏。
 - 本轮提交：专项回归已更新到 `330 passed, 344 deselected`
+- 本轮提交：Bucket C 的 exact-workspace overclaim 继续收口。`make space on the shelf/worktop` 这类 choice 现在会被识别为具体空间目标，不再落回 generic make-space；同时 unresolved rerank 新增 `exact_workspace_without_exact_use` 语义缺口，用于识别“只有宽泛空间变化、没有确切下游物体/用途/目的地”的反例。
+- 本轮提交：新增并收口 2 条 Bucket C 反例测试，分别覆盖：
+  - `make space on the shelf` 但只有 shelf layout 变化时，应回退到更合理的 generic access，而不是保留 exact-workspace 过拟合答案；
+  - `make space on the worktop` 但只有 area becomes more open / no exact next target 时，应继续 withheld 而不是提前收口。
+- 本轮提交：专项回归已更新到 `332 passed, 344 deselected`
 - 本轮提交：why 题在首次 `infer_action_intent` 就暴露 `receptacle_outcome` 近窗歧义时，不再机械地先走一轮泛化 `followup`。现在会直接围绕动作尾部触发 `followup_transition`，主动去找“是否真的掉回 sink/pan/bowl/container”的决定性关键帧；同时这条路径会压过误触发的 `precontext`，避免 `flip cloth / shake / tap / tilt` 一类题被无关前置状态采样截走
 - 本轮提交：新增并通过 2 条定向测试，分别保护：
   - `receptacle_outcome` 型 why close-call 会在第一次歧义时直接进入 `followup_transition`

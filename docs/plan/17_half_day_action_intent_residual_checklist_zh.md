@@ -17,7 +17,7 @@
 - 已提交进展：`16.49 generic measurement-meta -> exact measurement target`
 - 当前待提交进展：`16.50 pick up phone generic-measure -> exact ingredient record target`
 - 当前专项回归：`pytest -q tests/test_graph_agent.py -k 'action_intent'`
-- 当前已验证结果：`330 passed, 344 deselected`
+- 当前已验证结果：`332 passed, 344 deselected`
 
 ## 17.2 半天执行原则
 
@@ -105,13 +105,13 @@
 - [x] 检查 `needed_observation` target revisit、reveal subtype、workspace/final placement gate。
 - [ ] 补 `make space` vs `take hidden X` 的更多泛化测试。
 - [x] 补 `make space` vs `place Y into freed slot` 的目标追证测试。
-- [ ] 补 `move object` 后只看到空间变化但没看到下游动作时不能 finish。
+- [x] 补 `move object` 后只看到空间变化但没看到下游动作时不能 finish。
 
 完成标准：
 
 - [x] `revealed slot / sink slot` 这类“双目标文本”不再因为同时出现对象和槽位而丢失追证目标；planner 会优先追真正要被放入的 downstream object。
-- [ ] 只有看到 hidden target 被取出、slot 被使用、或后续目标动作发生，才允许具体候选收口。
-- [ ] 如果只是空间变大，继续追证据。
+- [x] 只有看到 hidden target 被取出、slot 被使用、或后续目标动作发生，才允许具体候选收口。
+- [x] 如果只是空间变大，继续追证据。
 
 本轮进展：
 
@@ -119,6 +119,9 @@
 - [x] 修复 `choice target` 词项抽取中的子串误命中，避免 `saucepan -> pan` 这类目标追歪。
 - [x] 新增 2 条定向测试覆盖 `blue cup -> freed slot` 与 `saucepan -> sink slot`。
 - [x] 本轮专项回归：`330 passed, 344 deselected`
+- [x] 收口 `make space on shelf/worktop` 的 exact-workspace overclaim。现在 `shelf/worktop/counter` 会进入 specific-space-target 路径；若证据只显示 broad workspace effect 而没有确切下游 use/destination，则 unresolved rerank 会写入 `exact_workspace_without_exact_use` 并继续等待证据。
+- [x] 这一收口同时保留了更合理的 generic fallback：例如 `shelf layout` 变化但没有 hidden-target retrieval 时，允许回退到 generic access；而仅有 `worktop becomes more open` 这类宽泛变化时，会继续 withheld。
+- [x] 当前专项回归已提升到 `332 passed, 344 deselected`
 
 ## 17.7 Residual Bucket D：towel / cloth / paper towel 的 transport-vs-use
 
