@@ -7634,6 +7634,84 @@ class GraphAgentPlanner:
             )
         )
 
+    def _action_intent_choice_is_generic_measure_phone_goal(self, *, choice: str, action_object: str) -> bool:
+        text = str(choice or "").strip().lower()
+        object_text = str(action_object or "").strip().lower()
+        if not any(token in object_text for token in ("phone", "smartphone", "mobile")):
+            return False
+        if self._action_intent_choice_is_phone_record_target_purpose(choice):
+            return False
+        return any(
+            token in text
+            for token in (
+                "measure the ingredients",
+                "measure ingredients",
+                "weigh the ingredients",
+                "measure.",
+                "to measure",
+                "测量食材",
+                "称量食材",
+            )
+        )
+
+    def _action_intent_choice_record_target_hint(self, choice: str) -> str:
+        text = str(choice or "").strip().lower()
+        patterns = (
+            r"(?:nutritional\s+value|nutrition(?:al)?\s+value|value)\s+of\s+the\s+([a-z0-9][a-z0-9 -]*)",
+            r"(?:measurements?|entry|entries|record|update|log)\s+of\s+the\s+([a-z0-9][a-z0-9 -]*)",
+            r"for\s+the\s+([a-z0-9][a-z0-9 -]*)",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if not match:
+                continue
+            target = re.split(r"[,.]", str(match.group(1) or "").strip())[0].strip()
+            target = re.sub(
+                r"\b(with|using|while|after|before|on|in|at|near|beside|next)\b.*$",
+                "",
+                target,
+            ).strip()
+            if target:
+                return target
+        return ""
+
+    def _action_intent_choice_is_phone_record_target_purpose(self, choice: str) -> bool:
+        text = str(choice or "").strip().lower()
+        target_hint = self._action_intent_choice_record_target_hint(choice)
+        has_record_signal = any(
+            token in text
+            for token in (
+                "record",
+                "update",
+                "enter",
+                "log",
+                "app",
+                "nutrition",
+                "nutritional",
+                "phone",
+                "ingredient",
+                "measurements of the",
+                "value of the",
+                "记录",
+                "录入",
+                "更新",
+                "营养",
+                "手机",
+            )
+        )
+        if not has_record_signal:
+            return False
+        return bool(target_hint) and not any(
+            token in text
+            for token in (
+                "measure the ingredients",
+                "measure ingredients",
+                "weigh the ingredients",
+                "to measure.",
+                "generic measure",
+            )
+        )
+
     def _action_intent_verifier_blocked_hand_free_target_hint(
         self,
         *,
@@ -7766,6 +7844,80 @@ class GraphAgentPlanner:
         if not any(marker in combined_text for marker in uncertainty_markers):
             return None
         return "scale", "fixture"
+
+    def _action_intent_verifier_blocked_phone_record_target_hint(
+        self,
+        *,
+        state: AgentState,
+        result: dict[str, Any] | None,
+        blocker_hint: str,
+    ) -> tuple[str, str] | None:
+        if not self._is_action_intent_task(state) or not isinstance(result, dict):
+            return None
+        if blocker_hint != "future_use_close_call":
+            return None
+        choices = [str(choice) for choice in getattr(state, "choices", [])]
+        best_index = self._coerce_choice_index(result.get("best_index"), choices)
+        competitor_index = self._action_intent_competing_candidate_index(result, state)
+        if best_index is None or competitor_index is None or best_index == competitor_index:
+            return None
+        action_object = self._action_intent_question_object_hint(state)
+        best_choice = choices[best_index]
+        competitor_choice = choices[competitor_index]
+        best_is_generic_measure = self._action_intent_choice_is_generic_measure_phone_goal(
+            choice=best_choice,
+            action_object=action_object,
+        )
+        competitor_is_generic_measure = self._action_intent_choice_is_generic_measure_phone_goal(
+            choice=competitor_choice,
+            action_object=action_object,
+        )
+        best_is_exact_record = self._action_intent_choice_is_phone_record_target_purpose(best_choice)
+        competitor_is_exact_record = self._action_intent_choice_is_phone_record_target_purpose(competitor_choice)
+        if not ((best_is_generic_measure and competitor_is_exact_record) or (competitor_is_generic_measure and best_is_exact_record)):
+            return None
+        exact_choice = best_choice if best_is_exact_record else competitor_choice
+        target_hint = self._action_intent_choice_record_target_hint(exact_choice)
+        if not target_hint:
+            return None
+        combined_text = (
+            f"{str(result.get('reason') or '').lower()} "
+            f"{str(result.get('needed_observation') or '').lower()}"
+        ).strip()
+        for item in result.get("candidate_evidence") or []:
+            if not isinstance(item, dict):
+                continue
+            index = self._coerce_choice_index(item.get("index"), choices)
+            if index not in {best_index, competitor_index}:
+                continue
+            combined_text = (
+                f"{combined_text} {str(item.get('support') or '').lower()} {str(item.get('contradiction') or '').lower()}"
+            ).strip()
+        uncertainty_markers = (
+            "unclear",
+            "not yet visible",
+            "not visible",
+            "not yet seen",
+            "still unclear",
+            "still unresolved",
+            "no actual recording target",
+            "no direct recording target",
+            "recording target is not shown",
+            "no specific target",
+            "no broccoli target",
+            "no coriander target",
+            "screen is not readable",
+            "screen not readable",
+            "entry is not readable",
+            "仍不清楚",
+            "还看不出",
+            "证据不足",
+            "没有直接记录目标",
+            "没有具体目标",
+        )
+        if not any(marker in combined_text for marker in uncertainty_markers):
+            return None
+        return target_hint, "object"
 
     def _action_intent_unresolved_rerank_hand_free_object_hint(self, state: AgentState) -> str:
         reason = self._action_intent_recent_unresolved_rerank_withheld_reason(state)
@@ -8236,6 +8388,82 @@ class GraphAgentPlanner:
         query_time = start_time if abs(end_time - start_time) < 0.25 else (start_time + min(end_time, start_time + 1.2)) / 2
         return PlannerDecision(
             thought="why 题被 verifier 拦下后，当前 `infer` 已暴露出 generic measurement-meta 只是宽泛量测语境；优先直接追更有判别力的量测目标，而不是继续停留在调读数/量测语境层。",
+            tool="query_spatial_context",
+            args={
+                "time_s": query_time,
+                "object_name": downstream_target,
+                "limit": 16 if target_kind == "fixture" else 18,
+            },
+        )
+
+    def _build_action_intent_verifier_blocked_phone_record_target_revisit_decision(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        result: dict[str, Any] | None,
+        blocker_hint: str,
+    ) -> PlannerDecision | None:
+        hint = self._action_intent_verifier_blocked_phone_record_target_hint(
+            state=state,
+            result=result,
+            blocker_hint=blocker_hint,
+        )
+        if hint is None:
+            return None
+        downstream_target, target_kind = hint
+        nodes = self._latest_action_intent_long_horizon_nodes(state, object_hint=downstream_target)
+        if not nodes:
+            return PlannerDecision(
+                thought=f"why 题被 verifier 拦下后，当前 `infer` 已暴露出 phone generic-measure 仍只是宽泛量测语境；先定位真正记录目标 `{downstream_target}` 的更晚轨迹，而不是继续停留在 generic measure 层。",
+                tool="query_object",
+                args={"query": downstream_target, "limit": 24},
+            )
+        anchor_time = self._latest_action_intent_target_spatial_anchor_time(state)
+        latest_followup_end = self._latest_action_intent_followup_end_time(state)
+        after_time: float | None = None
+        if anchor_time is not None and latest_followup_end is not None:
+            after_time = max(anchor_time, latest_followup_end)
+        elif latest_followup_end is not None:
+            after_time = latest_followup_end
+        else:
+            after_time = anchor_time
+        min_start_time = None if after_time is None else float(after_time) + 0.5
+        selected = None
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            start_raw = node.get("start_time")
+            end_raw = node.get("end_time")
+            if start_raw is None:
+                continue
+            try:
+                start_time = float(start_raw)
+                end_time = float(end_raw) if end_raw is not None else start_time
+            except Exception:  # noqa: BLE001
+                continue
+            if min_start_time is not None and start_time < min_start_time:
+                continue
+            selected = (node, start_time, end_time)
+            break
+        if selected is None:
+            selected = self._action_intent_select_long_horizon_node(
+                state=state,
+                hints=hints,
+                nodes=nodes,
+                min_start_time=min_start_time,
+                object_hint=downstream_target,
+            )
+        if selected is None:
+            return PlannerDecision(
+                thought=f"why 题被 verifier 拦下后，当前 `infer` 已暴露出 phone generic-measure 仍只是宽泛量测语境；继续重新检索真正记录目标 `{downstream_target}`。",
+                tool="query_object",
+                args={"query": downstream_target, "limit": 24},
+            )
+        _node, start_time, end_time = selected
+        query_time = start_time if abs(end_time - start_time) < 0.25 else (start_time + min(end_time, start_time + 1.2)) / 2
+        return PlannerDecision(
+            thought="why 题被 verifier 拦下后，当前 `infer` 已暴露出 phone generic-measure 只是宽泛量测语境；优先直接追真正被记录/录入的食材目标，而不是继续停留在 generic measure 层。",
             tool="query_spatial_context",
             args={
                 "time_s": query_time,
@@ -13342,6 +13570,16 @@ class GraphAgentPlanner:
             )
             if infer_measurement_target_revisit is not None:
                 return infer_measurement_target_revisit
+            infer_phone_record_target_revisit = (
+                self._build_action_intent_verifier_blocked_phone_record_target_revisit_decision(
+                    state=state,
+                    hints=hints,
+                    result=payload,
+                    blocker_hint=blocker_hint,
+                )
+            )
+            if infer_phone_record_target_revisit is not None:
+                return infer_phone_record_target_revisit
         forced_transition_probe = self._build_action_intent_verifier_blocked_forced_transition_probe_decision(
             state=state,
             hints=hints,
