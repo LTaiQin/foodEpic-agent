@@ -12815,6 +12815,16 @@ class GraphAgentPlanner:
         )
         if finalize_hand_free_revisit is not None:
             return finalize_hand_free_revisit
+        if tool_name == "infer_action_intent" and blocker_hint in {"post_action_evidence", "future_use_close_call", "pairwise_close_call"}:
+            finalize_mixed_horizon_later_target_revisit = (
+                self._build_action_intent_finalize_withheld_mixed_horizon_later_target_revisit_decision(
+                    state=state,
+                    hints=hints,
+                    thought="why 题被 verifier/finalizer 拦下，因为 `check/open` 这类近窗解释还没压过更晚结果；直接追 mixed-horizon 竞争里更晚结果对应的真实目标，而不是继续围着动作物体或局部状态泛化补帧。",
+                )
+            )
+            if finalize_mixed_horizon_later_target_revisit is not None:
+                return finalize_mixed_horizon_later_target_revisit
         forced_transition_probe = self._build_action_intent_verifier_blocked_forced_transition_probe_decision(
             state=state,
             hints=hints,
@@ -12845,15 +12855,6 @@ class GraphAgentPlanner:
                 if precondition is not None:
                     return precondition
             if blocker_hint in {"post_action_evidence", "future_use_close_call"}:
-                finalize_mixed_horizon_later_target_revisit = (
-                    self._build_action_intent_finalize_withheld_mixed_horizon_later_target_revisit_decision(
-                        state=state,
-                        hints=hints,
-                        thought="why 题被 verifier/finalizer 拦下，因为 `check/open` 这类近窗解释还没压过更晚结果；直接追 mixed-horizon 竞争里更晚结果对应的真实目标，而不是继续围着动作物体泛化补帧。",
-                    )
-                )
-                if finalize_mixed_horizon_later_target_revisit is not None:
-                    return finalize_mixed_horizon_later_target_revisit
                 finalize_long_horizon_revisit = self._build_action_intent_finalize_withheld_long_horizon_revisit_decision(
                     state=state,
                     hints=hints,
@@ -12898,15 +12899,6 @@ class GraphAgentPlanner:
                 if extra_followup is not None:
                     return extra_followup
             if blocker_hint == "pairwise_close_call":
-                finalize_mixed_horizon_later_target_revisit = (
-                    self._build_action_intent_finalize_withheld_mixed_horizon_later_target_revisit_decision(
-                        state=state,
-                        hints=hints,
-                        thought="why 题被 verifier/finalizer 拦下，因为 `check/open` 这类近窗解释还没压过更晚结果；直接追 mixed-horizon 竞争里更晚结果对应的真实目标，而不是继续围着动作物体泛化补帧。",
-                    )
-                )
-                if finalize_mixed_horizon_later_target_revisit is not None:
-                    return finalize_mixed_horizon_later_target_revisit
                 finalize_long_horizon_revisit = self._build_action_intent_finalize_withheld_long_horizon_revisit_decision(
                     state=state,
                     hints=hints,
