@@ -7288,8 +7288,29 @@ class GraphAgentPlanner:
             return False
         choice_lc = str(choice or "").strip().lower()
         object_tokens = [token for token in re.split(r"[^a-z0-9]+", action_object_lc) if token]
+        same_object_component_reference = any(token in choice_lc for token in ("lid", "cover", "cap", "top"))
+        component_bearing_objects = (
+            "bottle",
+            "jar",
+            "container",
+            "cup",
+            "mug",
+            "tin",
+            "can",
+            "tupperware",
+            "shaker",
+            "thermos",
+            "flask",
+            "pot",
+            "pan",
+            "saucepan",
+            "blender",
+            "box",
+        )
+        can_reference_same_object_component = any(token in action_object_lc for token in component_bearing_objects)
         if object_tokens and not all(token in choice_lc for token in object_tokens):
-            return False
+            if not (same_object_component_reference and can_reference_same_object_component):
+                return False
         return any(
             token in choice_lc
             for token in (
@@ -7303,7 +7324,11 @@ class GraphAgentPlanner:
                 "uncap",
                 "cap",
                 "lid",
+                "cover",
+                "replace",
+                "fit",
                 "unscrew",
+                "pry",
                 "shake",
                 "hold",
                 "in hand",
@@ -12798,6 +12823,14 @@ class GraphAgentPlanner:
         )
         if forced_transition_probe is not None:
             return forced_transition_probe
+        same_object_active_use_revisit = self._build_action_intent_verifier_blocked_same_object_active_use_revisit_decision(
+            state=state,
+            hints=hints,
+            result=payload,
+            blocker_hint=blocker_hint,
+        )
+        if same_object_active_use_revisit is not None:
+            return same_object_active_use_revisit
         if tool_name == "infer_action_intent":
             if (
                 blocker_hint == "precondition_context"
@@ -13054,6 +13087,101 @@ class GraphAgentPlanner:
                 "stride_s": stride_s,
                 "max_frames": max_frames,
                 "tag": f"{state.task_family}_followup_transition",
+            },
+        )
+
+    def _action_intent_verifier_blocked_same_object_active_use_hint(
+        self,
+        *,
+        state: AgentState,
+        result: dict[str, Any] | None,
+        blocker_hint: str,
+    ) -> str:
+        if not self._is_action_intent_task(state) or not isinstance(result, dict):
+            return ""
+        if blocker_hint not in {"post_action_evidence", "future_use_close_call", "pairwise_close_call"}:
+            return ""
+        choices = [str(choice) for choice in getattr(state, "choices", [])]
+        if not choices:
+            return ""
+        action_object = self._action_intent_question_object_hint(state)
+        if not action_object:
+            return ""
+        best_index = self._coerce_choice_index(result.get("best_index"), choices)
+        second_best_index = self._coerce_choice_index(result.get("second_best_index"), choices)
+        competitor_index = self._action_intent_competing_candidate_index(result, state)
+        candidate_indices: list[int] = []
+        for index in (best_index, second_best_index, competitor_index):
+            if index is None or index in candidate_indices:
+                continue
+            candidate_indices.append(index)
+        for item in result.get("candidate_evidence") or []:
+            if not isinstance(item, dict):
+                continue
+            index = self._coerce_choice_index(item.get("index"), choices)
+            if index is None or index in candidate_indices:
+                continue
+            candidate_indices.append(index)
+        for index in candidate_indices[:4]:
+            choice = choices[index]
+            if self._action_intent_choice_is_same_object_active_use(choice=choice, action_object=action_object):
+                return action_object
+        return ""
+
+    def _build_action_intent_verifier_blocked_same_object_active_use_revisit_decision(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        result: dict[str, Any] | None,
+        blocker_hint: str,
+    ) -> PlannerDecision | None:
+        target = self._action_intent_verifier_blocked_same_object_active_use_hint(
+            state=state,
+            result=result,
+            blocker_hint=blocker_hint,
+        )
+        if not target:
+            return None
+        nodes = self._latest_action_intent_long_horizon_nodes(state, object_hint=target)
+        if not nodes:
+            return PlannerDecision(
+                thought=f"why 题被 verifier 拦下后，当前 close call 已经涉及同一物体 `{target}` 的后续打开/清洗/继续使用；先重新定位它在更晚时刻的轨迹，而不是退回泛化补帧。",
+                tool="query_object",
+                args={"query": target, "limit": 24},
+            )
+        anchor_time = self._latest_action_intent_target_spatial_anchor_time(state)
+        latest_followup_end = self._latest_action_intent_followup_end_time(state)
+        after_time: float | None = None
+        if anchor_time is not None and latest_followup_end is not None:
+            after_time = max(anchor_time, latest_followup_end)
+        elif latest_followup_end is not None:
+            after_time = latest_followup_end
+        else:
+            after_time = anchor_time
+        min_start_time = None if after_time is None else float(after_time) + 0.15
+        selected = self._action_intent_select_long_horizon_node(
+            state=state,
+            hints=hints,
+            nodes=nodes,
+            min_start_time=min_start_time,
+            object_hint=target,
+        )
+        if selected is None:
+            return PlannerDecision(
+                thought=f"why 题被 verifier 拦下后，当前 close call 已经涉及同一物体 `{target}` 的后续打开/清洗/继续使用；继续检索它的更晚轨迹，而不是退回泛化补帧。",
+                tool="query_object",
+                args={"query": target, "limit": 24},
+            )
+        _node, start_time, end_time = selected
+        query_time = start_time if abs(end_time - start_time) < 0.25 else (start_time + min(end_time, start_time + 1.2)) / 2
+        return PlannerDecision(
+            thought="why 题被 verifier 拦下后，当前 top 候选已涉及同一物体的后续打开/清洗/继续使用；优先直接查看这个物体在更晚时刻的状态，而不是退回泛化补帧。",
+            tool="query_spatial_context",
+            args={
+                "time_s": query_time,
+                "object_name": target,
+                "limit": 18,
             },
         )
 
