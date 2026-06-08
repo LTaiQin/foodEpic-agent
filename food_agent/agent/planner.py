@@ -7454,6 +7454,103 @@ class GraphAgentPlanner:
             evidence_text=combined_text,
         )
 
+    def _action_intent_verifier_blocked_mixed_horizon_later_target_hint(
+        self,
+        *,
+        state: AgentState,
+        result: dict[str, Any] | None,
+        blocker_hint: str,
+    ) -> tuple[str, str] | None:
+        if not self._is_action_intent_task(state) or not isinstance(result, dict):
+            return None
+        if blocker_hint not in {"post_action_evidence", "future_use_close_call", "pairwise_close_call"}:
+            return None
+        choices = [str(choice) for choice in getattr(state, "choices", [])]
+        best_index = self._coerce_choice_index(result.get("best_index"), choices)
+        competitor_index = self._action_intent_competing_candidate_index(result, state)
+        if best_index is None or competitor_index is None or best_index == competitor_index:
+            return None
+        categories_by_index = selected_choice_categories(choices, [best_index, competitor_index])
+        best_categories = set(categories_by_index.get(best_index) or set())
+        competitor_categories = set(categories_by_index.get(competitor_index) or set())
+        later_outcome_categories = {
+            "final_place_return",
+            "measure_weigh",
+            "transfer_contents",
+            "serve_consume",
+            "clean_dry",
+            "food_prep",
+            "discard",
+        }
+        best_choice = choices[best_index]
+        competitor_choice = choices[competitor_index]
+        best_is_immediate = self._action_intent_choice_is_immediate_micro_outcome_candidate(best_choice, best_categories)
+        competitor_is_immediate = self._action_intent_choice_is_immediate_micro_outcome_candidate(
+            competitor_choice,
+            competitor_categories,
+        )
+        later_index: int | None = None
+        later_categories: set[str] = set()
+        later_choice = ""
+        if best_is_immediate and competitor_categories & later_outcome_categories:
+            later_index = competitor_index
+            later_categories = competitor_categories
+            later_choice = competitor_choice
+        elif competitor_is_immediate and best_categories & later_outcome_categories:
+            later_index = best_index
+            later_categories = best_categories
+            later_choice = best_choice
+        if later_index is None:
+            return None
+        action_object = self._action_intent_question_object_hint(state)
+        reason_text = str(result.get("reason") or "").lower()
+        needed_observation_text = str(result.get("needed_observation") or "").lower()
+        same_object_block_markers = (
+            "same-object",
+            "same object",
+            "cap action",
+            "lid action",
+            "cover fit",
+            "cover fits",
+        )
+        if any(marker in f"{reason_text} {needed_observation_text}" for marker in same_object_block_markers):
+            return None
+        combined_text = f"{later_choice.lower()} {reason_text} {needed_observation_text}".strip()
+        for item in result.get("candidate_evidence") or []:
+            if not isinstance(item, dict):
+                continue
+            index = self._coerce_choice_index(item.get("index"), choices)
+            if index != later_index:
+                continue
+            combined_text = (
+                f"{combined_text} {str(item.get('support') or '').lower()} {str(item.get('contradiction') or '').lower()}"
+            ).strip()
+            break
+        ambiguity_markers = (
+            "whether",
+            "unclear",
+            "not yet visible",
+            "not visible",
+            "remains unresolved",
+            "still unresolved",
+            "still unclear",
+            "could still",
+            "may be",
+            "might be",
+            "未明确",
+            "仍不清楚",
+            "还看不出",
+            "证据不足",
+        )
+        if not any(marker in combined_text for marker in ambiguity_markers):
+            return None
+        return self._action_intent_later_outcome_target_hint(
+            choice=later_choice,
+            action_object=action_object,
+            categories=later_categories,
+            evidence_text=combined_text,
+        )
+
     def _action_intent_unresolved_rerank_hand_free_object_hint(self, state: AgentState) -> str:
         reason = self._action_intent_recent_unresolved_rerank_withheld_reason(state)
         if not reason or "timeline_review_hand_free_or_fixture_gap" not in reason:
@@ -7749,6 +7846,64 @@ class GraphAgentPlanner:
         query_time = start_time if abs(end_time - start_time) < 0.25 else (start_time + min(end_time, start_time + 1.2)) / 2
         return PlannerDecision(
             thought=thought,
+            tool="query_spatial_context",
+            args={
+                "time_s": query_time,
+                "object_name": downstream_target,
+                "limit": 16 if target_kind == "fixture" else 18,
+            },
+        )
+
+    def _build_action_intent_verifier_blocked_mixed_horizon_later_target_revisit_decision(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        result: dict[str, Any] | None,
+        blocker_hint: str,
+    ) -> PlannerDecision | None:
+        hint = self._action_intent_verifier_blocked_mixed_horizon_later_target_hint(
+            state=state,
+            result=result,
+            blocker_hint=blocker_hint,
+        )
+        if hint is None:
+            return None
+        downstream_target, target_kind = hint
+        nodes = self._latest_action_intent_long_horizon_nodes(state, object_hint=downstream_target)
+        if not nodes:
+            return PlannerDecision(
+                thought=f"why 题被 verifier 拦下后，当前 `infer` 已经暴露出 mixed-horizon close call；先定位更晚结果对应的真实目标 `{downstream_target}` 轨迹，而不是继续围着当前物体或近窗状态泛化补帧。",
+                tool="query_object",
+                args={"query": downstream_target, "limit": 24},
+            )
+        anchor_time = self._latest_action_intent_target_spatial_anchor_time(state)
+        latest_followup_end = self._latest_action_intent_followup_end_time(state)
+        after_time: float | None = None
+        if anchor_time is not None and latest_followup_end is not None:
+            after_time = max(anchor_time, latest_followup_end)
+        elif latest_followup_end is not None:
+            after_time = latest_followup_end
+        else:
+            after_time = anchor_time
+        min_start_time = None if after_time is None else float(after_time) + 0.15
+        selected = self._action_intent_select_long_horizon_node(
+            state=state,
+            hints=hints,
+            nodes=nodes,
+            min_start_time=min_start_time,
+            object_hint=downstream_target,
+        )
+        if selected is None:
+            return PlannerDecision(
+                thought=f"why 题被 verifier 拦下后，当前 `infer` 已经暴露出 mixed-horizon close call；继续重新检索更晚结果对应的真实目标 `{downstream_target}`。",
+                tool="query_object",
+                args={"query": downstream_target, "limit": 24},
+            )
+        _node, start_time, end_time = selected
+        query_time = start_time if abs(end_time - start_time) < 0.25 else (start_time + min(end_time, start_time + 1.2)) / 2
+        return PlannerDecision(
+            thought="why 题被 verifier 拦下后，当前 `infer` 已经暴露出 `open/check` 对 `weigh/serve/...` 的 mixed-horizon close call；优先直接追更晚结果对应的真实目标，而不是继续围着当前物体或局部状态泛化补帧。",
             tool="query_spatial_context",
             args={
                 "time_s": query_time,
@@ -12825,6 +12980,16 @@ class GraphAgentPlanner:
             )
             if finalize_mixed_horizon_later_target_revisit is not None:
                 return finalize_mixed_horizon_later_target_revisit
+            infer_mixed_horizon_later_target_revisit = (
+                self._build_action_intent_verifier_blocked_mixed_horizon_later_target_revisit_decision(
+                    state=state,
+                    hints=hints,
+                    result=payload,
+                    blocker_hint=blocker_hint,
+                )
+            )
+            if infer_mixed_horizon_later_target_revisit is not None:
+                return infer_mixed_horizon_later_target_revisit
         forced_transition_probe = self._build_action_intent_verifier_blocked_forced_transition_probe_decision(
             state=state,
             hints=hints,
