@@ -7551,6 +7551,117 @@ class GraphAgentPlanner:
             evidence_text=combined_text,
         )
 
+    def _action_intent_choice_has_hand_free_language(self, choice: str) -> bool:
+        text = str(choice or "").strip().lower()
+        return any(
+            token in text
+            for token in (
+                "free hand",
+                "free one hand",
+                "left hand is free",
+                "right hand is free",
+                "use the left hand",
+                "use the right hand",
+                "腾出",
+                "左手",
+                "右手",
+            )
+        )
+
+    def _action_intent_choice_target_or_same_object_hint(
+        self,
+        *,
+        choice: str,
+        action_object: str,
+    ) -> tuple[str, str] | None:
+        fixture_targets = self._action_intent_choice_fixture_target_candidates(choice=choice, action_object=action_object)
+        if fixture_targets:
+            return fixture_targets[0], "fixture"
+        object_targets = [
+            token
+            for token in self._action_intent_choice_target_object_candidates(choice=choice, action_object=action_object)
+            if token not in set(fixture_targets)
+        ]
+        if object_targets:
+            return object_targets[0], "object"
+        if self._action_intent_choice_is_same_object_active_use(choice=choice, action_object=action_object):
+            return action_object, "object"
+        return None
+
+    def _action_intent_verifier_blocked_hand_free_target_hint(
+        self,
+        *,
+        state: AgentState,
+        result: dict[str, Any] | None,
+        blocker_hint: str,
+    ) -> tuple[str, str] | None:
+        if not self._is_action_intent_task(state) or not isinstance(result, dict):
+            return None
+        if blocker_hint not in {"post_action_evidence", "future_use_close_call", "pairwise_close_call"}:
+            return None
+        choices = [str(choice) for choice in getattr(state, "choices", [])]
+        best_index = self._coerce_choice_index(result.get("best_index"), choices)
+        competitor_index = self._action_intent_competing_candidate_index(result, state)
+        if best_index is None or competitor_index is None or best_index == competitor_index:
+            return None
+        best_choice = choices[best_index]
+        competitor_choice = choices[competitor_index]
+        best_has_hand_free = self._action_intent_choice_has_hand_free_language(best_choice)
+        competitor_has_hand_free = self._action_intent_choice_has_hand_free_language(competitor_choice)
+        if not best_has_hand_free and not competitor_has_hand_free:
+            return None
+        action_object = self._action_intent_question_object_hint(state)
+        reason_text = str(result.get("reason") or "").lower()
+        needed_observation_text = str(result.get("needed_observation") or "").lower()
+        combined_text = f"{reason_text} {needed_observation_text}".strip()
+        for item in result.get("candidate_evidence") or []:
+            if not isinstance(item, dict):
+                continue
+            index = self._coerce_choice_index(item.get("index"), choices)
+            if index not in {best_index, competitor_index}:
+                continue
+            combined_text = (
+                f"{combined_text} {str(item.get('support') or '').lower()} {str(item.get('contradiction') or '').lower()}"
+            ).strip()
+        uncertainty_markers = (
+            "unclear",
+            "not yet visible",
+            "not visible",
+            "remains ambiguous",
+            "still ambiguous",
+            "still unresolved",
+            "may next",
+            "could next",
+            "not yet seen",
+            "仍不清楚",
+            "还看不出",
+            "证据不足",
+        )
+        hand_free_markers = (
+            "free hand",
+            "other hand",
+            "left hand",
+            "right hand",
+            "腾出",
+            "另一只手",
+            "左手",
+            "右手",
+        )
+        if not any(marker in combined_text for marker in hand_free_markers):
+            return None
+        if not any(marker in combined_text for marker in uncertainty_markers):
+            return None
+        target_hint = None
+        if best_has_hand_free:
+            target_hint = self._action_intent_choice_target_or_same_object_hint(choice=competitor_choice, action_object=action_object)
+            if target_hint is None:
+                target_hint = self._action_intent_choice_target_or_same_object_hint(choice=best_choice, action_object=action_object)
+        else:
+            target_hint = self._action_intent_choice_target_or_same_object_hint(choice=best_choice, action_object=action_object)
+            if target_hint is None:
+                target_hint = self._action_intent_choice_target_or_same_object_hint(choice=competitor_choice, action_object=action_object)
+        return target_hint
+
     def _action_intent_unresolved_rerank_hand_free_object_hint(self, state: AgentState) -> str:
         reason = self._action_intent_recent_unresolved_rerank_withheld_reason(state)
         if not reason or "timeline_review_hand_free_or_fixture_gap" not in reason:
@@ -7904,6 +8015,64 @@ class GraphAgentPlanner:
         query_time = start_time if abs(end_time - start_time) < 0.25 else (start_time + min(end_time, start_time + 1.2)) / 2
         return PlannerDecision(
             thought="why 题被 verifier 拦下后，当前 `infer` 已经暴露出 `open/check` 对 `weigh/serve/...` 的 mixed-horizon close call；优先直接追更晚结果对应的真实目标，而不是继续围着当前物体或局部状态泛化补帧。",
+            tool="query_spatial_context",
+            args={
+                "time_s": query_time,
+                "object_name": downstream_target,
+                "limit": 16 if target_kind == "fixture" else 18,
+            },
+        )
+
+    def _build_action_intent_verifier_blocked_hand_free_target_revisit_decision(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        result: dict[str, Any] | None,
+        blocker_hint: str,
+    ) -> PlannerDecision | None:
+        hint = self._action_intent_verifier_blocked_hand_free_target_hint(
+            state=state,
+            result=result,
+            blocker_hint=blocker_hint,
+        )
+        if hint is None:
+            return None
+        downstream_target, target_kind = hint
+        nodes = self._latest_action_intent_long_horizon_nodes(state, object_hint=downstream_target)
+        if not nodes:
+            return PlannerDecision(
+                thought=f"why 题被 verifier 拦下后，当前 `infer` 已暴露出 generic hand-free 仍只是中间态；先定位真正下游目标 `{downstream_target}` 的更晚轨迹，而不是继续把“手空出来了”当结论。",
+                tool="query_object",
+                args={"query": downstream_target, "limit": 24},
+            )
+        anchor_time = self._latest_action_intent_target_spatial_anchor_time(state)
+        latest_followup_end = self._latest_action_intent_followup_end_time(state)
+        after_time: float | None = None
+        if anchor_time is not None and latest_followup_end is not None:
+            after_time = max(anchor_time, latest_followup_end)
+        elif latest_followup_end is not None:
+            after_time = latest_followup_end
+        else:
+            after_time = anchor_time
+        min_start_time = None if after_time is None else float(after_time) + 0.15
+        selected = self._action_intent_select_long_horizon_node(
+            state=state,
+            hints=hints,
+            nodes=nodes,
+            min_start_time=min_start_time,
+            object_hint=downstream_target,
+        )
+        if selected is None:
+            return PlannerDecision(
+                thought=f"why 题被 verifier 拦下后，当前 `infer` 已暴露出 generic hand-free 仍只是中间态；继续重新检索真正下游目标 `{downstream_target}`。",
+                tool="query_object",
+                args={"query": downstream_target, "limit": 24},
+            )
+        _node, start_time, end_time = selected
+        query_time = start_time if abs(end_time - start_time) < 0.25 else (start_time + min(end_time, start_time + 1.2)) / 2
+        return PlannerDecision(
+            thought="why 题被 verifier 拦下后，当前 `infer` 已暴露出 generic hand-free 只是 enablement 中间态；优先直接追 hand-free 背后真正要拿起、要继续操作，或同一物体后续要处理的目标。",
             tool="query_spatial_context",
             args={
                 "time_s": query_time,
@@ -12990,6 +13159,16 @@ class GraphAgentPlanner:
             )
             if infer_mixed_horizon_later_target_revisit is not None:
                 return infer_mixed_horizon_later_target_revisit
+            infer_hand_free_target_revisit = (
+                self._build_action_intent_verifier_blocked_hand_free_target_revisit_decision(
+                    state=state,
+                    hints=hints,
+                    result=payload,
+                    blocker_hint=blocker_hint,
+                )
+            )
+            if infer_hand_free_target_revisit is not None:
+                return infer_hand_free_target_revisit
         forced_transition_probe = self._build_action_intent_verifier_blocked_forced_transition_probe_decision(
             state=state,
             hints=hints,
