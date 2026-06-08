@@ -182,16 +182,24 @@
 
 待做：
 
-- [ ] 检查 `tap scale` state-change 现有 gate。
+- [x] 检查 `tap scale` state-change 现有 gate。
 - [ ] 补 `zero out with container` 必须看到 container precondition。
 - [ ] 补 `turn on` vs `zero out` 必须看动作前显示状态。
-- [ ] 补 `adjust measurements` vs `weigh ingredient` 必须继续追 ingredient-on-scale 证据。
+- [x] 补 `adjust measurements` vs `weigh ingredient` 必须继续追 ingredient-on-scale 证据。
 
 完成标准：
 
 - [ ] 只看到显示为 0 不能直接判 zero out。
 - [ ] 没有动作前显示状态时，必须补 precontext 或 transition frames。
 - [ ] 没有食材上秤证据时，不能把 broad measurement 当作最终答案。
+
+本轮进展：
+
+- [x] 收口 `adjust/read measurements` 这类 broad measurement-meta 的 finalizer 边界。此前 `toolbox/planner` 已能在上游把 `adjust the measurements`、`read the measurements` 往“真正 weigh ingredient”追证，但 graph-agent finalizer 侧还缺少显式保护，导致这类宽泛答案在缺少 `reading/tare/update/direct weighing use` 时仍可能被提前收口。
+- [x] 新增 `weak measurement meta` finish gate：若 top 候选只是 `adjust/read/record measurements`，而 `reason + decisive_observation` 里没有 `reading / tare / zero / display change / entered update` 等直接信号，则直接 withheld。
+- [x] 同时补上 why 题 structured best-index fallback 的通用保护：只要已经写入 `action_intent_resolution_withheld_for_*` marker，就不允许后续 fallback 再把答案从旧的 `best_index` memory 里捞回来。
+- [x] 新增并通过 1 条 Bucket E 定向测试，覆盖 `pick up scale` 后只有“scale remains near ingredient area”的宽泛 measurement 语义、但没有 `reading/tare` 明确信号时，finalizer 不能直接收口到 `adjust the measurements.`。
+- [x] 本轮专项回归：`337 passed, 344 deselected`
 
 ## 17.9 Residual Bucket F：inspection / check / read label 与 later outcome
 

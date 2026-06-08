@@ -818,6 +818,13 @@ class GraphAgent:
         return prediction, answer_text, confidence
 
     def _resolve_structured_best_index_answer(self, state: AgentState) -> tuple[int, str, float] | None:
+        if str(getattr(state, "task_family", "")) == "fine_grained_why_recognition":
+            recent_items = list(getattr(state, "working_memory", []))[-12:]
+            if any(
+                isinstance(item, str) and item.startswith("action_intent_resolution_withheld_for_")
+                for item in recent_items
+            ):
+                return None
         prefixes_with_confidence: tuple[tuple[str, float], ...] = (
             ("ingredient_retrieval_best_index=", 0.84),
             ("recipe_membership_best_index=", 0.84),
@@ -870,6 +877,9 @@ class GraphAgent:
                 continue
             if self._action_intent_resolution_should_withhold_state_change_overclaim(raw_result=raw_result, state=state):
                 state.add_memory("action_intent_resolution_withheld_for_missing_state_change_prereq=1")
+                continue
+            if self._action_intent_resolution_should_withhold_weak_measurement_meta_claim(raw_result=raw_result, state=state):
+                state.add_memory("action_intent_resolution_withheld_for_weak_measurement_meta_evidence=1")
                 continue
             index = self._coerce_choice_index(raw_result.get("best_index"), state.choices)
             if index is None:
@@ -1525,7 +1535,7 @@ class GraphAgent:
             return False
         text = " ".join(
             str(raw_result.get(key) or "")
-            for key in ("reason", "decisive_observation", "needed_observation")
+            for key in ("reason", "decisive_observation")
         ).lower()
         prior_text = self._action_intent_prior_reasoning_text(state).lower()
         combined_text = f"{prior_text} {text}".strip()
@@ -1585,6 +1595,61 @@ class GraphAgent:
         if explicit_no_container or container_added_after_tap:
             return True
         return not has_on_prereq and not has_container_at_tap
+
+    def _action_intent_resolution_should_withhold_weak_measurement_meta_claim(
+        self,
+        *,
+        raw_result: dict[str, Any],
+        state: AgentState,
+    ) -> bool:
+        index = self._coerce_choice_index(raw_result.get("best_index"), state.choices)
+        if index is None:
+            return False
+        choice_lc = str(state.choices[index]).lower()
+        if not any(
+            token in choice_lc
+            for token in (
+                "adjust the measurements",
+                "adjust measurements",
+                "adjust the scale",
+                "record measurements",
+                "record the measurements",
+                "read the measurements",
+                "check the reading",
+                "measurement reading",
+                "调整刻度",
+                "记录读数",
+                "看读数",
+            )
+        ):
+            return False
+        text = " ".join(
+            str(raw_result.get(key) or "")
+            for key in ("reason", "decisive_observation")
+        ).lower()
+        if self._action_intent_text_has_negative_evidence(text):
+            return True
+        return not any(
+            token in text
+            for token in (
+                "reading",
+                "check the reading",
+                "tare",
+                "zero",
+                "returns to 0",
+                "display changes",
+                "display turns on",
+                "screen lights",
+                "update is entered",
+                "records the measurement",
+                "读数",
+                "归零",
+                "去皮",
+                "显示变化",
+                "记录读数",
+                "录入",
+            )
+        )
 
     def _action_intent_resolution_should_withhold_weak_surface_wiping_claim(
         self,

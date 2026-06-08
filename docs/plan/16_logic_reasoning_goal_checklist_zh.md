@@ -132,6 +132,11 @@
 - 本轮提交：Bucket D 的 finalizer 边界再补 1 条显式反例，验证“即使已经出现 `crumbs / worktop target`，但还没有真正 `wiping stroke / sweep` 时，`wipe the worktop` 仍必须继续 withheld”。这次没有新增实现代码，说明当前 weak-surface-wiping finish gate 已能覆盖该边界，缺的是测试保护。
 - 本轮提交：新增并通过 1 条 Bucket D 定向测试，覆盖 `dish cloth` 放到 crumbs 旁边、`needed_observation` 仍是“是否真的擦过台面”时，finalizer 不能提前收口到 `wipe the worktop`。
 - 本轮提交：专项回归已更新到 `336 passed, 344 deselected`
+- 本轮提交：Bucket E 的 `adjust/read measurements` broad measurement-meta finish gate 开始收紧。此前 `toolbox/planner` 已能在上游把 `adjust the measurements`、`read the measurements` 这类泛化 measurement-meta 往“真正 weigh ingredient”追证，但 graph-agent finalizer 侧还缺少显式保护，导致这类宽泛答案在缺少 `reading/tare/update/direct weighing use` 时仍可能被提前收口。本轮改为：
+  - 新增 `weak measurement meta` finish gate：若 top 候选只是 `adjust/read/record measurements` 这类 broad measurement-meta，而 `reason + decisive_observation` 里没有 `reading / tare / zero / display change / entered update` 等直接信号，则直接 withheld；
+  - 同时补上 why 题 structured best-index fallback 的通用保护：只要已经写入 `action_intent_resolution_withheld_for_*` marker，就不允许后续 fallback 再把答案从旧的 `best_index` memory 里捞回来。
+- 本轮提交：新增并通过 1 条 Bucket E 定向测试，覆盖 `pick up scale` 后只有“scale remains near ingredient area”的宽泛 measurement 语义、但没有 `reading/tare` 明确信号时，finalizer 不能直接收口到 `adjust the measurements.`。
+- 本轮提交：专项回归已更新到 `337 passed, 344 deselected`
 - 本轮提交：why 题在首次 `infer_action_intent` 就暴露 `receptacle_outcome` 近窗歧义时，不再机械地先走一轮泛化 `followup`。现在会直接围绕动作尾部触发 `followup_transition`，主动去找“是否真的掉回 sink/pan/bowl/container”的决定性关键帧；同时这条路径会压过误触发的 `precontext`，避免 `flip cloth / shake / tap / tilt` 一类题被无关前置状态采样截走
 - 本轮提交：新增并通过 2 条定向测试，分别保护：
   - `receptacle_outcome` 型 why close-call 会在第一次歧义时直接进入 `followup_transition`
