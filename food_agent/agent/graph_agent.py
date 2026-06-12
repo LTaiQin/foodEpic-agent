@@ -1482,64 +1482,62 @@ class GraphAgent:
         raw_result: dict[str, Any],
         state: AgentState,
     ) -> bool:
-        index = self._coerce_choice_index(raw_result.get("best_index"), state.choices)
-        if index is None:
-            return False
-        choice_lc = str(state.choices[index]).strip().lower()
-        broad_generic_patterns = (
-            "to clean.",
-            "to dry.",
-            "to store.",
-            "to move.",
-            "to measure.",
-            "to measure the ingredients.",
-            "to free one hand.",
-            "to free up the right hand.",
-            "to free up the left hand.",
-            "so left hand is free.",
-            "so right hand is free.",
-        )
-        if not any(pattern in choice_lc for pattern in broad_generic_patterns):
+        if not isinstance(raw_result, dict):
             return False
         text = self._action_intent_observation_support_text(raw_result).lower()
         for item in raw_result.get("candidate_evidence") or []:
             if not isinstance(item, dict):
                 continue
             text = f"{text} {str(item.get('support') or '').lower()} {str(item.get('contradiction') or '').lower()}".strip()
-        if any(
-            token in text
-            for token in (
-                "least contradicted",
-                "broadest",
-                "could in principle",
-                "might broadly",
-                "compatible with",
-                "最宽泛",
-                "最不矛盾",
-            )
+        if not text.strip():
+            return False
+        broad_generic_markers = (
+            "least contradicted",
+            "broadest",
+            "broadest remaining explanation",
+            "broad generic",
+            "could in principle",
+            "might broadly",
+            "compatible with",
+            "somewhat compatible",
+            "最宽泛",
+            "最不矛盾",
+        )
+        generic_enablement_markers = (
+            "one hand becomes free",
+            "free hand",
+            "free-hand step",
+            "enablement structure",
+            "part of the setup",
+            "becomes free",
+            "left hand is free",
+            "right hand is free",
+            "腾出一只手",
+            "空出一只手",
+        )
+        unresolved_markers = (
+            "no actual",
+            "no visible",
+            "not shown",
+            "not visible",
+            "unclear",
+            "cannot tell",
+            "can't tell",
+            "没有看到",
+            "未显示",
+            "不明确",
+            "not the more direct visible",
+            "direct purpose visible",
+            "part of the setup",
+            "not the direct purpose",
+        )
+        if any(token in text for token in unresolved_markers) and any(
+            token in text for token in (*broad_generic_markers, *generic_enablement_markers)
         ):
             return True
-        if any(
-            token in text
-            for token in (
-                "no actual",
-                "no visible",
-                "not shown",
-                "not visible",
-                "unclear",
-                "cannot tell",
-                "can't tell",
-                "没有看到",
-                "未显示",
-                "不明确",
-                "not the more direct visible",
-                "direct purpose visible",
-                "part of the setup",
-                "not the direct purpose",
-            )
-            ):
-            return True
-        return not self._action_intent_text_has_direct_positive_evidence(text)
+        if self._action_intent_text_has_direct_positive_evidence(text):
+            return False
+        return any(token in text for token in broad_generic_markers)
 
     def _action_intent_resolution_should_withhold_mixed_horizon_overclaim(
         self,

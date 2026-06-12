@@ -275,6 +275,43 @@ Gap 只能来自 observation state，建议只保留以下通用类型：
 
 - [x] 已完成阶段：`7 / 9`
 - [ ] 进行中阶段：`Phase 4 / Phase 6`
+- [x] 本轮继续切掉 `graph_agent` 里一条 still answer-conditioned 的 `choice text category -> broad generic finalizer withhold` 旧链：
+  - 旧行为：
+    - `graph_agent._action_intent_resolution_should_withhold_broad_generic_claim_without_direct_evidence(...)`
+      仍先要求当前 `best choice`
+      命中：
+      - `to clean.`
+      - `to dry.`
+      - `to store.`
+      - `to move.`
+      - `to measure.`
+      - `so left/right hand is free.`
+      等固定 answer text category
+    - 然后才允许 finalizer 把它当作 broad generic overclaim withheld
+  - 当前变化：
+    - broad-generic detector 已改成 observation-side：
+      - 不再读取 choice text category
+      - 只看 observation/support text 是否自己暴露：
+        - `broadest / least contradicted / compatible with`
+          这类宽泛解释痕迹
+        - `part of the setup / not the direct purpose / no actual / unclear`
+          这类“直接目的并未被当前答案闭合”的痕迹
+        - 以及 generic enablement 文本
+          如 `one hand becomes free`
+          是否只是 setup 而非 direct purpose
+    - 这意味着：
+      - 换候选答案文本，
+        只要 observation-side broad/generic residue 不变，
+        finalizer 的 broad-generic withheld 不应改变
+      - `generic hand-free / broad clean / broad measure`
+        这类 broad explanation
+        不再依赖固定 answer category 才能被压回 observation-first withheld
+  - 本轮定向回归：
+    - `pytest -q tests/test_graph_agent.py -k 'generic_hand_free_when_specific_downstream_object_exists or broad_generic_withhold or finalizer_withholds_broad_generic_measure_claim_without_direct_evidence'`
+    - 结果：`4 passed, 1151 deselected`
+  - 本轮专项回归：
+    - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+    - 结果：`702 passed, 453 deselected`
 - [x] 本轮继续切掉 `graph_agent` 里一条 still answer-conditioned 的 `timeline review bias -> choice/category gated gap` 旧链：
   - 旧行为：
     - `graph_agent.py`
@@ -3597,6 +3634,28 @@ Phase 0 审计后的最小真实缺口已经明确：
 
 ### Phase 4 当前进展
 
+- [x] 本轮继续收掉 `graph_agent` 里一条 `choice category -> broad generic finalizer withhold` 的 live consumer 链：
+  - 旧行为：
+    - broad generic withheld 仍先依赖
+      `to clean / to dry / to measure / so left hand is free`
+      这类固定 answer text category
+    - 这会让 finalizer 是否保守 withheld
+      先由答案表面语义放行
+  - 当前变化：
+    - detector 已改成 observation-first：
+      - 只看 support/contradiction text 是否真的在说
+        `broadest / least contradicted / setup not direct purpose`
+      - generic enablement
+        例如 `one hand becomes free`
+        也必须由 observation-side residue 自己证明它只是 setup
+    - 因而 broad generic finalizer 不再需要固定 answer category
+      才能保持保守 withheld
+  - 本轮定向回归：
+    - `pytest -q tests/test_graph_agent.py -k 'generic_hand_free_when_specific_downstream_object_exists or broad_generic_withhold or finalizer_withholds_broad_generic_measure_claim_without_direct_evidence'`
+    - `4 passed, 1151 deselected`
+  - 本轮专项回归：
+    - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+    - `702 passed, 453 deselected`
 - [x] 本轮继续收掉 `graph_agent` 里一条 `timeline review bias -> choice/category -> unresolved/finalizer gate` 的 live consumer 链：
   - 旧行为：
     - timeline review 侧即使已经有 observation payload，
@@ -4339,6 +4398,18 @@ Phase 0 审计后的最小真实缺口已经明确：
 
 ### Phase 6 当前进展
 
+- [x] 本轮又迁移了 2 条 still answer-conditioned 的 broad-generic 旧契约测试：
+  - `broad_generic_withhold_ignores_choice_text_categories`
+  - `broad_generic_withhold_requires_observation_side_uncertainty`
+- [x] 新契约：
+  - 不再允许：
+    - `to clean / to dry / to measure / so left hand is free`
+      这类 choice text 自身决定 broad-generic withheld
+  - 只保护：
+    - 只有 observation-side 的 broad/generic residue
+      才能触发 broad-generic withheld
+    - 若 observation text 已给出 direct positive closure，
+      broad-generic withheld 必须消失
 - [x] 本轮又迁移了 3 条 still answer-conditioned 的 timeline-review 旧契约测试：
   - `timeline_review_bias_gap_detector_ignores_choice_categories_for_next_use`
   - `timeline_review_bias_gap_detector_clears_after_observed_followup_outcome`
