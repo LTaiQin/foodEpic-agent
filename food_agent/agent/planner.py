@@ -5572,94 +5572,30 @@ class GraphAgentPlanner:
         )
         return not any(token in text for token in direct_positive_terms)
 
-    def _action_intent_choice_is_generic_workspace_claim(self, choice: str) -> bool:
-        text = str(choice or "").strip().lower()
+    def _action_intent_state_describes_unclosed_post_action_outcome(self, state: AgentState) -> bool:
+        text = " ".join(
+            str(item)
+            for item in list(getattr(state, "evidence_bundle", []) or []) + list(getattr(state, "working_memory", []) or [])
+            if isinstance(item, str) and item
+        ).lower()
         if not text:
             return False
-        return any(
-            token in text
-            for token in (
-                "to make space",
-                "to make some space",
-                "to create space",
-                "to free up space",
-                "to clear space",
-                "to make room",
-                "to create room",
-                "to free up room",
-                "to clear room",
-                "to begin clearing up",
-                "腾出空间",
-                "让开",
-            )
+        unresolved_markers = (
+            "missing_direct_outcome",
+            "direct outcome is still not explicit",
+            "direct outcome after",
+            "direct outcome right after",
+            "direct outcome is not visible",
+            "direct outcome remains unresolved",
+            "still unclear",
+            "still unresolved",
+            "not yet visible",
+            "未显示",
+            "不明确",
+            "看不清",
         )
-
-    def _action_intent_choice_is_final_placement_candidate(self, choice: str) -> bool:
-        text = str(choice or "").lower()
-        if re.search(r"\bput(?:\s+(?:the|this|that|it|them|an|a))?(?:\s+[a-z0-9_-]+){0,4}\s+away\b", text):
-            return True
-        if re.search(r"\breturn(?:\s+(?:the|this|that|it|them|an|a))?(?:\s+[a-z0-9_-]+){0,4}\b", text):
-            return True
-        return any(
-            token in text
-            for token in (
-                "put away",
-                "store",
-                "put back",
-                "return it",
-                "return the",
-                "returned",
-                "hang back",
-                "right place",
-                "proper place",
-                "放回",
-                "收起来",
-                "收纳",
-                "归位",
-            )
-        )
-
-    def _action_intent_choice_is_exact_workspace_or_downstream_candidate(self, choice: str) -> bool:
-        text = str(choice or "").lower()
-        return any(
-            token in text
-            for token in (
-                "pick up",
-                "retrieve",
-                "reach",
-                "open the",
-                "turn on",
-                "turn off",
-                "switch on",
-                "switch off",
-                "wash",
-                "rinse",
-                "measure",
-                "weigh",
-                "put into",
-                "place into",
-                "put on the",
-                "to the sink",
-                "sink slot",
-                "slot",
-                "rack",
-                "freed area",
-                "free slot",
-                "exact slot",
-                "拿起",
-                "取出",
-                "伸手去拿",
-                "打开",
-                "开启",
-                "清洗",
-                "冲洗",
-                "称量",
-                "放进",
-                "放到",
-                "水槽",
-                "槽位",
-            )
-        )
+        direct_outcome_scope = ("direct outcome", "state_change_hint", "timeline_event", "post_action")
+        return any(marker in text for marker in unresolved_markers) and any(scope in text for scope in direct_outcome_scope)
 
     def _action_intent_result_is_workspace_or_final_placement_close_call(
         self,
@@ -5669,22 +5605,20 @@ class GraphAgentPlanner:
     ) -> bool:
         if not isinstance(result, dict):
             return False
-        try:
-            index = int(result.get("best_index"))
-        except Exception:  # noqa: BLE001
-            return False
-        choices = [str(choice) for choice in getattr(state, "choices", [])]
-        if index < 0 or index >= len(choices):
-            return False
-        choice_lc = choices[index].strip().lower()
-        generic_workspace = self._action_intent_choice_is_generic_workspace_claim(choice_lc)
-        final_placement = self._action_intent_choice_is_final_placement_candidate(choice_lc)
-        exact_workspace_or_downstream = self._action_intent_choice_is_exact_workspace_or_downstream_candidate(choice_lc)
-        if not any((generic_workspace, final_placement, exact_workspace_or_downstream)):
-            return False
         if self._action_intent_result_has_direct_post_action_evidence(result):
             return False
-        text = self._action_intent_result_support_text(result)
+        text = self._action_intent_result_support_text(result).lower()
+        if not text.strip():
+            return False
+        primary_gap = self._action_intent_primary_gap(state)
+        primary_gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
+        gap_supports_workspace_or_placement = primary_gap_type in {
+            "future_outcome",
+            "relation_confirmation",
+            "target_discovery",
+            "workspace_change_unconfirmed",
+        }
+        state_has_unclosed_post_action_outcome = self._action_intent_state_describes_unclosed_post_action_outcome(state)
         uncertainty_terms = (
             "unclear",
             "still unclear",
@@ -5710,7 +5644,7 @@ class GraphAgentPlanner:
             "暂时放在",
             "放在台面",
         )
-        weak_spatial_only_terms = (
+        workspace_or_placement_terms = (
             "more open",
             "extra room",
             "clears some room",
@@ -5727,14 +5661,16 @@ class GraphAgentPlanner:
             "更空了",
             "区域更开阔",
         )
-        has_weak_support_signal = any(token in text for token in uncertainty_terms) or any(
-            token in text for token in weak_spatial_only_terms
+        has_observation_signal = any(token in text for token in uncertainty_terms) or any(
+            token in text for token in workspace_or_placement_terms
         )
-        if not has_weak_support_signal:
+        if not has_observation_signal:
             return False
-        if generic_workspace or final_placement:
+        if any(token in text for token in workspace_or_placement_terms):
             return True
-        return exact_workspace_or_downstream
+        if gap_supports_workspace_or_placement:
+            return True
+        return state_has_unclosed_post_action_outcome
 
     def _stage_action_intent_frames(
         self,

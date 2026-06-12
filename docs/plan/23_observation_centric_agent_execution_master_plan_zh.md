@@ -275,6 +275,46 @@ Gap 只能来自 observation state，建议只保留以下通用类型：
 
 - [x] 已完成阶段：`7 / 9`
 - [ ] 进行中阶段：`Phase 4 / Phase 6`
+- [x] 本轮继续切掉 planner 里一条 still answer-conditioned 的 `best_index -> choice category -> close-call recovery` 旧链：
+  - 旧行为：
+    - `planner.py`
+      - `_action_intent_result_is_workspace_or_final_placement_close_call(...)`
+        会先读取：
+        - `best_index`
+        - 当前 `choice` 文本
+      - 再通过一组 choice-category helper 判定：
+        - `generic workspace`
+        - `final placement`
+        - `exact workspace / downstream`
+      - 然后把这个结论继续送进多个 live 恢复位点：
+        - transition probe gate
+        - resolution continue-search gate
+        - spatial probe gate
+        - extra followup gate
+  - 当前变化：
+    - 上述 close-call helper 已改成 observation-centric：
+      - 不再读取 `best_index -> choice` 语义类别
+      - 只看：
+        - `primary_gap`
+        - payload 的 observation-side support text
+        - state 中是否仍存在未闭合 post-action observation
+    - 三个只服务旧链的 choice-semantic helper 已从 planner runtime 删除：
+      - `_action_intent_choice_is_generic_workspace_claim(...)`
+      - `_action_intent_choice_is_final_placement_candidate(...)`
+      - `_action_intent_choice_is_exact_workspace_or_downstream_candidate(...)`
+  - 这意味着：
+    - planner 里一整组
+      `choice text category -> transition/followup/spatial recovery`
+      的 live runtime 入口已被 observation-side 判据替换
+    - 即使选项文本不命中旧的 workspace/final-placement 模式，
+      只要 observation gap 与 support text 表达了“workspace/final placement 仍未闭合”，
+      仍能继续保守搜证
+  - 本轮定向回归：
+    - `pytest -q tests/test_graph_agent.py -k 'future_use_weak_exact_sink_slot_prefers_transition_probe_before_finish or pairwise_weak_right_place_prefers_transition_probe_before_finish or workspace_or_final_placement_close_call_ignores_choice_text_without_observation_signal or workspace_or_final_placement_close_call_can_follow_observation_gap_without_choice_match'`
+    - 结果：`4 passed, 1144 deselected`
+  - 本轮专项回归：
+    - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+    - 结果：`695 passed, 453 deselected`
 - [x] 本轮继续切掉 verifier 里一条 still answer-conditioned 的 `textual rank -> resolution payload -> blocker/gap` 旧链：
   - 旧行为：
     - `verifier.py`
