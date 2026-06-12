@@ -8,15 +8,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from food_agent.agent.action_intent import (
-    action_intent_conflict_profile,
-    action_intent_followup_decision,
-    action_intent_needs_future_use_resolution,
-    action_intent_needs_pairwise_resolution,
-    action_intent_needs_precondition_context,
-    action_intent_requires_strict_visual_disambiguation,
-    selected_choice_categories,
-)
 from food_agent.agent.artifact_policy import artifact_reuse_prefixes_for_task
 from food_agent.agent.state import AgentState
 from food_agent.model_client import OpenAICompatibleModelClient
@@ -53,6 +44,20 @@ class GraphAgentPlanner:
         self.model_client = model_client
 
     def next_action(self, *, state: AgentState, tool_schemas: list[dict[str, Any]], hints: dict[str, Any]) -> PlannerDecision:
+        if self._search_budget_exhausted(state):
+            return self._sanitize_decision_args(self._decorate_finish_decision_with_metadata(state=state, decision=PlannerDecision(
+                thought="当前搜索预算已耗尽，停止继续扩窗与检索，交由 finish 路径和 verifier 做受控收口。",
+                tool="finish",
+                args={
+                    "prediction": state.final_prediction,
+                    "answer": state.final_answer,
+                    "confidence": float(getattr(state, "confidence", 0.0) or 0.0),
+                },
+                done=True,
+                answer=str(getattr(state, "final_answer", "") or ""),
+                prediction=getattr(state, "final_prediction", None),
+                confidence=float(getattr(state, "confidence", 0.0) or 0.0),
+            )))
         if self._prefer_heuristic_planning(state):
             decision = self._heuristic_fallback(state=state, hints=hints)
         else:
@@ -84,6 +89,7 @@ class GraphAgentPlanner:
         decision = self._recover_if_low_confidence(state=state, hints=hints, decision=decision)
         decision = self._stabilize_decision(state=state, hints=hints, decision=decision)
         decision = self._enforce_task_requirements(state=state, hints=hints, decision=decision)
+        decision = self._decorate_finish_decision_with_metadata(state=state, decision=decision)
         return self._sanitize_decision_args(decision)
 
     def _build_user_prompt(self, *, state: AgentState, tool_schemas: list[dict[str, Any]], hints: dict[str, Any]) -> str:
@@ -105,6 +111,61 @@ class GraphAgentPlanner:
             ),
         }
         return json.dumps(prompt, ensure_ascii=False, indent=2)
+
+    def _decorate_finish_decision_with_metadata(self, *, state: AgentState, decision: PlannerDecision) -> PlannerDecision:
+        if decision.tool != "finish":
+            return decision
+        args = dict(decision.args or {})
+        existing = args.get("final_metadata")
+        final_metadata = dict(existing) if isinstance(existing, dict) else {}
+        latest_verification = self._state_latest_verification(state)
+        sufficiency_decision = latest_verification.get("sufficiency_decision")
+        finish_reason = ""
+        if isinstance(sufficiency_decision, dict):
+            finish_reason = str(sufficiency_decision.get("finish_mode") or "").strip()
+        if not finish_reason:
+            conflicts = [
+                str(item)
+                for item in latest_verification.get("conflicts", [])
+                if isinstance(item, str) and item
+            ]
+            if self._search_budget_exhausted(state):
+                finish_reason = "finish_budget_exhausted_best_guess"
+            elif conflicts:
+                finish_reason = "resolve_conflict"
+            elif self._has_unresolved_evidence_gap(
+                state,
+                open_questions=list(getattr(state, "open_questions", []) or []),
+                task_family=state.task_family,
+            ):
+                finish_reason = "needs_more_evidence"
+            else:
+                finish_reason = "finish_insufficient_evidence"
+        budget = dict(getattr(state, "search_budget", {}) or {})
+        final_metadata.update(
+            {
+                "finish_reason": finish_reason,
+                "remaining_gaps": self._state_latest_evidence_gaps(state),
+                "final_support_summary": str(latest_verification.get("summary") or decision.thought or ""),
+                "used_budget": {
+                    "tool_steps_used": int(budget.get("tool_steps_used") or 0),
+                    "new_frames_observed": int(budget.get("new_frames_observed") or 0),
+                    "long_horizon_expansions_used": int(budget.get("long_horizon_expansions_used") or 0),
+                    "window_level": int(budget.get("window_level") or 0),
+                    "budget_exhausted": bool(budget.get("budget_exhausted") or self._search_budget_exhausted(state)),
+                },
+            }
+        )
+        args["final_metadata"] = final_metadata
+        return PlannerDecision(
+            thought=decision.thought,
+            tool=decision.tool,
+            args=args,
+            done=decision.done,
+            answer=decision.answer,
+            prediction=decision.prediction,
+            confidence=decision.confidence,
+        )
 
     def _is_weight_task(self, state: AgentState) -> bool:
         return str(getattr(state, "task_family", "")) == "ingredient_ingredient_weight"
@@ -198,87 +259,146 @@ class GraphAgentPlanner:
     def _is_action_intent_task(self, state: AgentState) -> bool:
         return str(getattr(state, "task_family", "")) == "fine_grained_why_recognition"
 
+    def _action_intent_disable_legacy_specialized_recovery(self, state: AgentState) -> bool:
+        if not self._is_action_intent_task(state):
+            return False
+        recent_memory = list(getattr(state, "working_memory", []) or [])[-24:]
+        return any(
+            isinstance(item, str) and item == "disable_legacy_specialized_recovery=1"
+            for item in recent_memory
+        )
+
     def _action_intent_followup_route(
         self,
         *,
         state: AgentState,
         result: dict[str, Any] | None = None,
         candidate_indices: list[int] | None = None,
+        allow_resolution_markers: bool = True,
     ) -> tuple[bool, str, float, str]:
         if not self._is_action_intent_task(state):
             return False, "", 4.0, ""
-        try:
-            confidence = float((result or {}).get("confidence") or 0.0)
-        except Exception:  # noqa: BLE001
-            confidence = 0.0
-        reason_text = str((result or {}).get("reason") or "")
-        indices = candidate_indices or self._latest_action_intent_candidate_indices(state, result=result)
-        semantic_indices = self._action_intent_route_candidate_indices(
-            state=state,
-            result=result,
-            candidate_indices=indices,
-            confidence=confidence,
-            reason_text=reason_text,
-        )
         timeline_hint = self._action_intent_timeline_review_resolver_hint(
             state=state,
-            candidate_indices=semantic_indices or indices,
+            candidate_indices=candidate_indices or [],
         )
-        if semantic_indices is not None:
-            needs, reason, window_s, resolver = action_intent_followup_decision(
-                question=str(getattr(state, "question", "") or ""),
-                choices=[str(choice) for choice in getattr(state, "choices", [])],
-                indices=semantic_indices,
-                confidence=confidence,
-                reason_text=reason_text,
+        if self._action_intent_result_has_direct_post_action_evidence(result) and not self._action_intent_direct_evidence_still_needs_resolution(
+            state=state,
+            result=result,
+            candidate_indices=candidate_indices,
+        ):
+            return False, "", 4.0, ""
+        primary_gap = self._action_intent_primary_gap(state)
+        gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
+        if gap_type in {"immediate_outcome", "state_transition_unconfirmed", "workspace_change_unconfirmed"}:
+            return (
+                True,
+                "primary_gap_post_action_resolution",
+                min(4.0, self._action_intent_close_call_followup_window(state, profile="pairwise")),
+                "pairwise",
             )
-            if needs:
-                if timeline_hint == "future_use":
-                    return needs, reason or "timeline_review_future_use_hint", max(window_s, 8.0), "future_use"
-                if timeline_hint == "pairwise":
-                    return needs, reason or "timeline_review_pairwise_hint", min(max(window_s, 4.0), 6.0), "pairwise"
-                return needs, reason, window_s, resolver
-            question_text = str(getattr(state, "question", "") or "").lower()
-            requires_full_choice_recheck = (
-                (
-                    any(token in question_text for token in ("paper towel", "tea towel", "dish cloth", "cloth", "towel", "napkin"))
-                    and any(token in question_text for token in ("<flip ", "<turn ", "<shake ", " flip ", " turn ", " shake "))
+        if gap_type in {"future_outcome", "relation_confirmation", "target_discovery"}:
+            return (
+                True,
+                "primary_gap_long_horizon_resolution",
+                self._action_intent_close_call_followup_window(state, profile="future_use"),
+                "future_use",
+            )
+        support_text = self._action_intent_result_support_text(result)
+        explicit_need_more = isinstance(result, dict) and (
+            bool(result.get("need_future_evidence"))
+            or bool(result.get("ambiguity"))
+            or bool(result.get("need_more_evidence"))
+        )
+        followup_focus_text = str((result or {}).get("followup_focus") or "").strip().lower()
+        first_pass_generic_future_use = (
+            self._action_intent_followup_attempt_count(state) < 1
+            and explicit_need_more
+            and not self._action_intent_has_next_use_followup_gap(state=state, result=result)
+            and not self._action_intent_result_has_immediate_post_action_uncertainty(result)
+            and not self._action_intent_prefers_result_driven_followup(state)
+            and "model_flagged_future_evidence" not in followup_focus_text
+            and "guess" not in support_text
+            and "guesses" not in support_text
+        )
+        downstream_uncertainty_markers = (
+            "later use",
+            "later target",
+            "downstream target",
+            "next use",
+            "enabled use",
+            "not shown yet",
+            "remain plausible",
+            "still plausible",
+            "plausible",
+            "used next",
+            "final location",
+            "后续用途",
+            "之后用途",
+            "仍未显示",
+        )
+        uncertainty_markers = (
+            "still unclear",
+            "unclear",
+            "not visible",
+            "not shown",
+            "cannot tell",
+            "can't tell",
+            "insufficient",
+            "缺少",
+            "看不清",
+            "不明确",
+            )
+        if timeline_hint == "pairwise":
+            return (
+                True,
+                "timeline_review_pairwise_hint",
+                min(4.0, self._action_intent_close_call_followup_window(state, profile="pairwise")),
+                "pairwise",
+            )
+        if timeline_hint == "future_use":
+            return (
+                True,
+                "timeline_review_future_use_hint",
+                self._action_intent_close_call_followup_window(state, profile="future_use"),
+                "future_use",
+            )
+        if explicit_need_more or any(marker in support_text for marker in uncertainty_markers):
+            if explicit_need_more and not self._action_intent_result_has_immediate_post_action_uncertainty(result):
+                return (
+                    True,
+                    "future_use_evidence_needed",
+                    4.0 if first_pass_generic_future_use else self._action_intent_close_call_followup_window(state, profile="future_use"),
+                    "future_use",
                 )
-                or any(token in question_text for token in ("<tap kitchen scale>", "tap kitchen scale"))
-            )
-            if requires_full_choice_recheck:
-                needs, reason, window_s, resolver = action_intent_followup_decision(
-                    question=str(getattr(state, "question", "") or ""),
-                    choices=[str(choice) for choice in getattr(state, "choices", [])],
-                    indices=None,
-                    confidence=confidence,
-                    reason_text=reason_text,
+            if timeline_hint == "future_use" or self._action_intent_has_next_use_followup_gap(state=state, result=result):
+                return (
+                    True,
+                    "timeline_review_future_use_hint" if timeline_hint == "future_use" else "future_use_evidence_needed",
+                    self._action_intent_close_call_followup_window(state, profile="future_use"),
+                    "future_use",
                 )
-                if needs:
-                    if timeline_hint == "future_use":
-                        return needs, reason or "timeline_review_future_use_hint", max(window_s, 8.0), "future_use"
-                    if timeline_hint == "pairwise":
-                        return needs, reason or "timeline_review_pairwise_hint", min(max(window_s, 4.0), 6.0), "pairwise"
-                    return needs, reason, window_s, resolver
-        if semantic_indices is None:
-            needs, reason, window_s, resolver = action_intent_followup_decision(
-                question=str(getattr(state, "question", "") or ""),
-                choices=[str(choice) for choice in getattr(state, "choices", [])],
-                indices=None,
-                confidence=confidence,
-                reason_text=reason_text,
+            if timeline_hint == "pairwise" or self._action_intent_prefers_followup_state_change_only(state):
+                return (
+                    True,
+                    "timeline_review_pairwise_hint" if timeline_hint == "pairwise" else "post_action_evidence_needed",
+                    min(4.0, self._action_intent_close_call_followup_window(state, profile="pairwise")),
+                    "pairwise",
+                )
+        if any(marker in support_text for marker in downstream_uncertainty_markers):
+            return (
+                True,
+                "future_use_evidence_needed",
+                4.0 if first_pass_generic_future_use else self._action_intent_close_call_followup_window(state, profile="future_use"),
+                "future_use",
             )
-            if needs:
-                if timeline_hint == "future_use":
-                    return needs, reason or "timeline_review_future_use_hint", max(window_s, 8.0), "future_use"
-                if timeline_hint == "pairwise":
-                    return needs, reason or "timeline_review_pairwise_hint", min(max(window_s, 4.0), 6.0), "pairwise"
-                return needs, reason, window_s, resolver
-        pending_tool = self._action_intent_pending_resolution_tool(state)
-        if pending_tool == "resolve_action_intent_future_use":
-            return True, "pending_future_use_resolution", 8.0, "future_use"
-        if pending_tool == "resolve_action_intent_pairwise":
-            return True, "pending_pairwise_resolution", 4.0, "pairwise"
+        if "guess" in support_text or "guesses" in support_text:
+            return (
+                True,
+                "future_use_evidence_needed",
+                self._action_intent_close_call_followup_window(state, profile="future_use"),
+                "future_use",
+            )
         return False, "", 4.0, ""
 
     def _action_intent_timeline_review_resolver_hint(
@@ -290,83 +410,12 @@ class GraphAgentPlanner:
         bias_profile = self._action_intent_timeline_review_bias_profile(state)
         if bias_profile["resolver_hint"]:
             return str(bias_profile["resolver_hint"])
-        timeline_text = self._action_intent_timeline_review_text(state)
-        if not timeline_text:
-            return ""
-        choices = [str(choice) for choice in getattr(state, "choices", [])]
-        indices = candidate_indices if candidate_indices else list(range(len(choices)))
-        categories_by_index = selected_choice_categories(choices, indices if indices else None)
-        active_categories = set()
-        for cats in categories_by_index.values():
-            active_categories.update(cats)
-        future_use_markers = (
-            "next use",
-            "used next",
-            "use again",
-            "put back",
-            "return",
-            "returned",
-            "placed on",
-            "placed into",
-            "pick up",
-            "poured",
-            "pour",
-            "weigh",
-            "scale",
-            "later use",
-            "后续用途",
-            "放回",
-            "放到",
-            "称",
-        )
-        pairwise_markers = (
-            "free hand",
-            "freed hand",
-            "other hand",
-            "right hand",
-            "left hand",
-            "reach toward",
-            "tap area",
-            "sink area",
-            "turn on",
-            "turn off",
-            "open",
-            "close",
-            "reveal",
-            "visible behind",
-            "make space",
-            "clear space",
-            "right place",
-            "露出",
-            "腾出",
-            "另一只手",
-            "后面",
-            "空位",
-        )
-        if any(marker in timeline_text for marker in future_use_markers):
-            if active_categories & {
-                "measure_weigh",
-                "transfer_contents",
-                "serve_consume",
-                "inspect_check",
-                "open_close",
-                "food_prep",
-                "discard",
-                "final_place_return",
-                "access_retrieve",
-                "hand_free_enablement",
-            }:
-                return "future_use"
-        if any(marker in timeline_text for marker in pairwise_markers):
-            if active_categories & {
-                "hand_free_enablement",
-                "access_retrieve",
-                "space_clear",
-                "final_place_return",
-                "generic_relocation",
-                "open_close",
-            }:
-                return "pairwise"
+        primary_gap = self._action_intent_primary_gap(state)
+        gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
+        if gap_type in {"future_outcome", "relation_confirmation", "target_discovery"}:
+            return "future_use"
+        if gap_type in {"immediate_outcome", "state_transition_unconfirmed", "workspace_change_unconfirmed"}:
+            return "pairwise"
         return ""
 
     def _action_intent_route_candidate_indices(
@@ -381,81 +430,20 @@ class GraphAgentPlanner:
         indices = candidate_indices if len(candidate_indices) >= 2 else []
         if len(indices) < 2:
             return None
-        question = str(getattr(state, "question", "") or "")
-        choices = [str(choice) for choice in getattr(state, "choices", [])]
         if len(indices) <= 2 or not isinstance(result, dict):
             return indices
-        try:
-            best_index = int(result.get("best_index"))
-            second_best_index = int(result.get("second_best_index"))
-        except Exception:  # noqa: BLE001
-            return indices
-        if best_index not in indices or second_best_index not in indices or best_index == second_best_index:
-            return indices
-        top_pair = [best_index, second_best_index]
-        rescued_top_pair = self._action_intent_semantic_rescue_candidate_indices(
+        observation_ranked = self._action_intent_observation_ranked_candidate_indices(
             state=state,
-            indices=top_pair,
-            result=result,
+            payload=result,
         )
-        if len(rescued_top_pair) >= 2:
-            top_pair = rescued_top_pair
-        full_needs, _, _, full_resolver = action_intent_followup_decision(
-            question=question,
-            choices=choices,
-            indices=indices,
-            confidence=confidence,
-            reason_text=reason_text,
-        )
-        pair_needs, _, _, pair_resolver = action_intent_followup_decision(
-            question=question,
-            choices=choices,
-            indices=top_pair,
-            confidence=confidence,
-            reason_text=reason_text,
-        )
-        full_profile = action_intent_conflict_profile(question=question, choices=choices, indices=indices)
-        if not (full_needs and pair_needs):
-            pair_profile = action_intent_conflict_profile(question=question, choices=choices, indices=top_pair)
-        else:
-            pair_profile = action_intent_conflict_profile(question=question, choices=choices, indices=top_pair)
-        if (
-            pair_resolver == "future_use"
-            and full_resolver == "pairwise"
-            and "hand_free_enablement" in set(pair_profile["active_categories"])
-        ):
-            return top_pair
-        if "hand_free_enablement" in set(full_profile["active_categories"]):
-            hand_free_candidates = [
-                index
-                for index in indices
-                if "hand_free_enablement" in set(full_profile["categories_by_index"].get(index) or set())
-            ]
-            best_categories = set(full_profile["categories_by_index"].get(best_index) or set())
-            if hand_free_candidates and (
-                "access_retrieve" in best_categories
-                or "final_place_return" in best_categories
-                or "generic_relocation" in best_categories
-            ):
-                hand_free_pair = next(
-                    ([best_index, index] for index in hand_free_candidates if index != best_index),
-                    None,
-                )
-                if hand_free_pair is not None:
-                    alt_needs, _, _, alt_resolver = action_intent_followup_decision(
-                        question=question,
-                        choices=choices,
-                        indices=hand_free_pair,
-                        confidence=confidence,
-                        reason_text=reason_text,
-                    )
-                    alt_profile = action_intent_conflict_profile(question=question, choices=choices, indices=hand_free_pair)
-                    if (
-                        alt_needs
-                        and alt_resolver == "future_use"
-                        and "hand_free_enablement" in set(alt_profile["active_categories"])
-                    ):
-                        return hand_free_pair
+        if len(observation_ranked) >= 2:
+            rescued_top_pair = self._action_intent_semantic_rescue_candidate_indices(
+                state=state,
+                indices=observation_ranked[:2],
+                result=result,
+            )
+            if len(rescued_top_pair) >= 2:
+                return rescued_top_pair
         rescued_indices = self._action_intent_semantic_rescue_candidate_indices(
             state=state,
             indices=indices,
@@ -464,6 +452,43 @@ class GraphAgentPlanner:
         if len(rescued_indices) >= 2:
             return rescued_indices
         return indices
+
+    def _action_intent_observation_ranked_candidate_indices(
+        self,
+        *,
+        state: AgentState,
+        payload: dict[str, Any] | None,
+    ) -> list[int]:
+        choices = [str(choice) for choice in getattr(state, "choices", [])]
+        if not choices or not isinstance(payload, dict):
+            return []
+        ranked: list[int] = []
+        best_index = self._coerce_choice_index(payload.get("best_index"), choices)
+        if best_index is not None:
+            ranked.append(best_index)
+        scored_candidates: list[tuple[float, int]] = []
+        for item in payload.get("candidate_evidence") or []:
+            if not isinstance(item, dict):
+                continue
+            index = self._coerce_choice_index(item.get("index"), choices)
+            if index is None:
+                continue
+            try:
+                score = float(item.get("score") or 0.0)
+            except Exception:  # noqa: BLE001
+                score = 0.0
+            scored_candidates.append((score, index))
+        for _score, index in sorted(scored_candidates, key=lambda item: (-item[0], item[1])):
+            if index not in ranked:
+                ranked.append(index)
+        for value in payload.get("candidate_indices") or []:
+            try:
+                index = int(value)
+            except Exception:  # noqa: BLE001
+                continue
+            if 0 <= index < len(choices) and index not in ranked:
+                ranked.append(index)
+        return ranked
 
     def _action_intent_semantic_rescue_candidate_indices(
         self,
@@ -478,65 +503,15 @@ class GraphAgentPlanner:
         for index in normalized:
             if index not in deduped:
                 deduped.append(index)
-        if len(deduped) < 2:
-            return deduped
-        question = str(getattr(state, "question", "") or "").lower()
-        full_categories = selected_choice_categories(choices, range(len(choices)))
-        current_categories = selected_choice_categories(choices, deduped)
-        full_union = set().union(*(full_categories.get(index) or set() for index in full_categories))
-        current_union = set().union(*(current_categories.get(index) or set() for index in current_categories))
-        best_index = self._coerce_choice_index((result or {}).get("best_index"), state.choices)
-        if best_index is None or best_index not in range(len(choices)):
-            best_index = deduped[0]
-
-        def first_index_for_missing_semantic(kind: str) -> int | None:
-            for index, cats in full_categories.items():
-                if index == best_index:
-                    continue
-                categories = set(cats or set())
-                if kind == "transfer_contents" and "transfer_contents" in categories:
-                    return index
-                if kind == "clean_dry" and "clean_dry" in categories:
-                    return index
-                if kind == "relocation" and categories & {"generic_relocation", "final_place_return"}:
-                    return index
-                if kind == "measure_weigh" and "measure_weigh" in categories:
-                    return index
-                if kind == "open_close" and "open_close" in categories:
-                    return index
-            return None
-
-        if any(token in question for token in ("<flip ", "<turn ", "<shake ", "<tilt ", "<tip ", "<tap ", "<hit ", "<knock ")):
-            if "clean_dry" in full_union and "transfer_contents" in full_union:
-                if not ("clean_dry" in current_union and "transfer_contents" in current_union):
-                    missing_kind = "transfer_contents" if "transfer_contents" not in current_union else "clean_dry"
-                    alt_index = first_index_for_missing_semantic(missing_kind)
-                    if alt_index is not None and alt_index != best_index:
-                        return [best_index, alt_index]
-
-        if any(token in question for token in ("towel", "cloth", "napkin", "paper towel", "tea towel", "dish cloth", "hand towel")):
-            if any(token in question for token in ("<pick up ", "<grab ", "<lift ", "<take ", "<move ", "<shift ")):
-                if "clean_dry" in full_union and {"generic_relocation", "final_place_return"} & full_union:
-                    current_has_relocation = bool({"generic_relocation", "final_place_return"} & current_union)
-                    if not ("clean_dry" in current_union and current_has_relocation):
-                        missing_kind = "relocation" if not current_has_relocation else "clean_dry"
-                        alt_index = first_index_for_missing_semantic(missing_kind)
-                        if alt_index is not None and alt_index != best_index:
-                            return [best_index, alt_index]
-
-        if any(token in question for token in ("<tap ", "<press ", "<push ")):
-            if any(token in question for token in ("scale", "button", "switch", "knob")):
-                if "measure_weigh" in full_union and "open_close" in full_union:
-                    if not ("measure_weigh" in current_union and "open_close" in current_union):
-                        missing_kind = "measure_weigh" if "measure_weigh" not in current_union else "open_close"
-                        alt_index = first_index_for_missing_semantic(missing_kind)
-                        if alt_index is not None and alt_index != best_index:
-                            return [best_index, alt_index]
         return deduped
 
     def _action_intent_requires_followup(self, state: AgentState, result: dict[str, Any] | None = None) -> bool:
         if isinstance(result, dict):
             if bool(result.get("need_future_evidence")) or bool(result.get("ambiguity")):
+                return True
+            if self._action_intent_result_has_indecisive_post_action_support(result):
+                return True
+            if self._action_intent_result_points_to_later_outcome_uncertainty(result):
                 return True
             if self._action_intent_result_has_direct_post_action_evidence(result) and not self._action_intent_direct_evidence_still_needs_resolution(
                 state=state,
@@ -552,15 +527,12 @@ class GraphAgentPlanner:
                 confidence = float(result.get("confidence") or 0.0)
             except Exception:  # noqa: BLE001
                 confidence = 0.0
-            candidate_indices = self._latest_action_intent_candidate_indices(state, result=result)
-            profile = action_intent_conflict_profile(
-                question=str(getattr(state, "question", "") or ""),
-                choices=[str(choice) for choice in getattr(state, "choices", [])],
-                indices=candidate_indices if candidate_indices else None,
-            )
             if (
                 self._action_intent_prefers_result_driven_followup(state)
-                and len(set(profile["active_categories"])) >= 2
+                and self._action_intent_needs_observation_centric_transition_recovery(
+                    state=state,
+                    result=result,
+                )
                 and confidence < 0.9
             ):
                 return True
@@ -579,8 +551,6 @@ class GraphAgentPlanner:
                 "decisive_observation",
                 "direct_effect",
                 "downstream_action",
-                "needed_observation",
-                "answer",
             )
         ).strip().lower()
 
@@ -601,6 +571,8 @@ class GraphAgentPlanner:
             "afterwards",
             "placed on the scale",
             "used on the scale",
+            "used at the scale",
+            "being used at the scale",
             "display changes",
             "changes to 0",
             "wiped",
@@ -762,6 +734,9 @@ class GraphAgentPlanner:
             "picked up but not yet used",
             "picked up but the next use is not shown",
             "moved aside",
+            "guess",
+            "guesses",
+            "model guesses",
             "becomes visible",
             "becomes reachable",
             "reveals the area",
@@ -775,6 +750,87 @@ class GraphAgentPlanner:
         )
         return any(term in text for term in weak_terms)
 
+    def _action_intent_result_points_to_later_outcome_uncertainty(
+        self,
+        result: dict[str, Any] | None,
+    ) -> bool:
+        support_text = self._action_intent_result_support_text(result)
+        if not support_text:
+            return False
+        later_markers = (
+            "later",
+            "later target",
+            "afterwards",
+            "next use",
+            "used again",
+            "not visible",
+            "not shown",
+            "in hand",
+            "visible in hand",
+            "returned to",
+            "put back",
+            "stored",
+            "final location",
+            "target",
+            "最终",
+            "之后",
+            "后续",
+            "放回",
+            "归位",
+        )
+        uncertainty_markers = (
+            "not shown",
+            "not visible",
+            "cannot tell",
+            "can't tell",
+            "unclear",
+            "uncertain",
+            "missing",
+            "lack",
+            "still unclear",
+            "later target is unclear",
+            "later outcome is still unclear",
+            "final location remains unclear",
+            "exact target use is still unclear",
+            "未显示",
+            "没有看到",
+            "看不清",
+            "不明确",
+        )
+        return any(term in support_text for term in later_markers) and any(
+            term in support_text for term in uncertainty_markers
+        )
+
+    def _action_intent_payload_supports_late_taken_outcome(
+        self,
+        payload: dict[str, Any] | None,
+    ) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        support_text = self._action_intent_result_support_text(payload)
+        candidate_support = " ".join(
+            str(item.get("support") or "")
+            for item in (payload.get("candidate_evidence") or [])
+            if isinstance(item, dict)
+        ).lower()
+        combined = f"{support_text} {candidate_support}".strip()
+        return "taken afterwards" in combined or "taken shortly afterwards" in combined
+
+    def _action_intent_recovery_prefers_future_profile(
+        self,
+        *,
+        state: AgentState,
+        blocker_hint: str,
+        primary_gap: dict[str, Any] | None,
+        payload: dict[str, Any] | None,
+    ) -> bool:
+        gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
+        if gap_type in {"future_outcome", "relation_confirmation", "target_discovery"}:
+            return True
+        if self._action_intent_blocker_is_future_gap_family(state=state, blocker_hint=blocker_hint):
+            return True
+        return self._action_intent_result_points_to_later_outcome_uncertainty(payload)
+
     def _action_intent_best_choice_is_broad_relative_to_competitors(
         self,
         *,
@@ -782,37 +838,7 @@ class GraphAgentPlanner:
         result: dict[str, Any],
         candidate_indices: list[int],
     ) -> bool:
-        try:
-            best_index = int(result.get("best_index"))
-        except Exception:  # noqa: BLE001
-            return False
-        if best_index < 0 or best_index >= len(getattr(state, "choices", [])):
-            return False
-        categories_by_index = selected_choice_categories(
-            [str(choice) for choice in getattr(state, "choices", [])],
-            candidate_indices if candidate_indices else None,
-        )
-        best_categories = set(categories_by_index.get(best_index) or set())
-        broad_categories = {"generic_relocation", "access_retrieve", "space_clear", "inspect_check", "open_close"}
-        if not (best_categories & broad_categories):
-            return False
-        other_categories = set()
-        for index, categories in categories_by_index.items():
-            if index == best_index:
-                continue
-            other_categories.update(categories)
-        best_choice = str(state.choices[best_index]).strip().lower()
-        broad_choice_markers = (
-            "to move.",
-            "to make space",
-            "to access",
-            "access what's behind",
-            "to check",
-            "to inspect",
-            "to open",
-            "to close",
-        )
-        return bool((other_categories - best_categories) or any(marker in best_choice for marker in broad_choice_markers))
+        return False
 
     def _action_intent_direct_evidence_still_needs_resolution(
         self,
@@ -848,75 +874,93 @@ class GraphAgentPlanner:
             return False
         if best_index < 0 or best_index >= len(getattr(state, "choices", [])):
             return False
-        candidate_indices = self._latest_action_intent_candidate_indices(state, result=result)
-        profile = action_intent_conflict_profile(
-            question=str(getattr(state, "question", "") or ""),
-            choices=[str(choice) for choice in getattr(state, "choices", [])],
-            indices=candidate_indices if len(candidate_indices) >= 2 else None,
-        )
-        if not bool(profile["post_action_sensitive"]):
+        primary_gap = self._action_intent_primary_gap(state)
+        primary_gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
+        blocker_hint = self._action_intent_verifier_blocker_hint(state)
+        if not primary_gap_type and blocker_hint not in {
+            "precondition_context",
+            "post_action_evidence",
+            "future_gap_family",
+        }:
             return False
+        candidate_indices = self._latest_action_intent_candidate_indices(state, result=result)
         if self._action_intent_result_has_direct_post_action_evidence(result) and not self._action_intent_direct_evidence_still_needs_resolution(
             state=state,
             result=result,
             candidate_indices=candidate_indices,
         ):
             return False
-        active_categories = set(profile["active_categories"])
-        has_multi_candidate_conflict = (
-            len(candidate_indices) >= 2
-            or bool(profile["has_pairwise_outcome_conflict"])
-            or bool(profile["has_future_use_conflict"])
-            or len(active_categories) >= 2
-        )
-        if not has_multi_candidate_conflict:
-            return False
+        if primary_gap_type == "precondition":
+            return not self._action_intent_has_precondition_grounding(state)
         if self._action_intent_result_has_indecisive_post_action_support(result):
-            return True
-        if self._action_intent_best_choice_is_broad_relative_to_competitors(
-            state=state,
-            result=result,
-            candidate_indices=candidate_indices,
-        ):
             return True
         try:
             confidence = float(result.get("confidence") or 0.0)
         except Exception:  # noqa: BLE001
             confidence = 0.0
-        if (bool(profile["has_pairwise_outcome_conflict"]) or bool(profile["has_future_use_conflict"])) and confidence < 0.97:
-            return True
-        return len(active_categories) >= 2 and confidence < 0.94
+        if primary_gap_type in {"future_outcome", "relation_confirmation", "target_discovery"}:
+            if not self._action_intent_has_post_action_grounding(state):
+                return True
+            if self._action_intent_result_looks_nonexclusive_concrete_late_anchor_support(state=state, result=result):
+                return True
+            return confidence < 0.9
+        if primary_gap_type in {"immediate_outcome", "state_transition_unconfirmed", "workspace_change_unconfirmed"}:
+            if not self._action_intent_result_has_direct_post_action_evidence(result):
+                return True
+            if self._action_intent_best_choice_is_broad_relative_to_competitors(
+                state=state,
+                result=result,
+                candidate_indices=candidate_indices,
+            ):
+                return True
+            return confidence < 0.9
+        if blocker_hint == "future_gap_family":
+            return not self._action_intent_has_post_action_grounding(state) or confidence < 0.9
+        if blocker_hint == "post_action_evidence":
+            return not self._action_intent_result_has_direct_post_action_evidence(result) or confidence < 0.9
+        if blocker_hint == "precondition_context":
+            return not self._action_intent_has_precondition_grounding(state)
+        return confidence < 0.97
 
     def _build_action_intent_followup_sampling_decision(
         self,
         *,
         state: AgentState,
         hints: dict[str, Any],
+        result: dict[str, Any] | None = None,
     ) -> PlannerDecision | None:
+        if self._search_budget_exhausted(state):
+            return None
         combined_times = sorted([float(value) for value in hints.get("times") or []] + [float(value) for value in hints.get("input_times") or []])
         if not combined_times:
             return None
-        _, focus, semantic_window_s, semantic_resolver = self._action_intent_followup_route(state=state, result=None)
+        _, focus, semantic_window_s, semantic_resolver = self._action_intent_followup_route(state=state, result=result)
         window_s = semantic_window_s
         dense_near_followup = self._action_intent_prefers_dense_near_followup(state)
+        followup_attempt_count = self._action_intent_followup_attempt_count(state)
+        if not semantic_resolver and isinstance(result, dict):
+            if self._action_intent_needs_future_use_evidence(state=state, result=result):
+                semantic_resolver = "future_use"
+                focus = focus or "future_use_evidence_needed"
+                window_s = max(window_s, 4.0 if followup_attempt_count < 1 else 8.0)
+            elif self._action_intent_pair_needs_outcome_resolution(state=state, result=result):
+                semantic_resolver = "pairwise"
+                focus = focus or "post_action_evidence_needed"
+                window_s = max(window_s, 4.0)
+            elif self._action_intent_result_has_indecisive_post_action_support(result):
+                semantic_resolver = "future_use"
+                focus = focus or "generic_post_action_followup"
+                window_s = max(window_s, 4.0 if followup_attempt_count < 1 else 8.0)
         if semantic_resolver == "future_use":
-            window_s = max(window_s, 8.0)
+            window_s = max(window_s, 4.0 if followup_attempt_count < 1 else 8.0)
         elif semantic_resolver == "pairwise":
-            window_s = max(window_s, 4.0)
-        for item in reversed(list(getattr(state, "working_memory", []))):
-            if not isinstance(item, str) or not item.startswith("action_intent_need_future_evidence=1"):
-                continue
-            focus_match = re.search(r"focus=(.*)$", item)
-            if focus_match:
-                focus = focus_match.group(1).strip()
-            window_match = re.search(r"window_s=([0-9.]+)", item)
-            if window_match:
-                try:
-                    window_s = max(2.0, min(8.0, float(window_match.group(1))))
-                except Exception:  # noqa: BLE001
-                    window_s = 4.0
-            break
-        if self._action_intent_needs_future_use_evidence(state=state, result=None) and not dense_near_followup:
+            late_outcome_like = self._action_intent_result_points_to_later_outcome_uncertainty(result)
+            window_s = max(window_s, 8.0 if (self._action_intent_prefers_result_driven_followup(state) or late_outcome_like) else 4.0)
+        if (
+            self._action_intent_needs_future_use_evidence(state=state, result=result)
+            and not dense_near_followup
+            and followup_attempt_count >= 1
+        ):
             window_s = max(8.0, window_s)
         start_time = max(combined_times)
         end_time = start_time + window_s
@@ -925,13 +969,22 @@ class GraphAgentPlanner:
             end_time = max(end_time, start_time + 8.0)
         if dense_near_followup:
             end_time = min(end_time, start_time + 3.0)
+        window_level = self._search_window_level(state)
+        if window_level == 1:
+            end_time = max(end_time, start_time + 6.0)
+        elif window_level >= 2:
+            end_time = max(end_time, start_time + 8.5)
         sample_count = 6 if dense_near_followup else 4
         if self._action_intent_prefers_result_driven_followup(state):
             sample_count = max(sample_count, 5)
+        if window_level >= 1:
+            sample_count = max(sample_count, 5)
+        if window_level >= 2:
+            sample_count = max(sample_count, 6)
         return PlannerDecision(
             thought=(
                 (
-                    "why 题当前仍存在意图歧义，先补动作后紧邻的高密度结果帧，检查物体是否立刻被用于擦手/擦台面，"
+                "why 题当前仍存在意图歧义，先补动作后紧邻的高密度结果帧，检查物体是否立刻被用于擦手/擦台面，"
                     "还是只是短暂拿起后被放到别处。"
                     if dense_near_followup
                     else "why 题当前仍存在意图歧义，补动作后的结果帧，检查后续是继续取后方物体，还是只是腾空间/整理。"
@@ -955,33 +1008,173 @@ class GraphAgentPlanner:
     ) -> bool:
         if not self._is_action_intent_task(state):
             return False
-        candidate_indices = self._latest_action_intent_candidate_indices(state, result=result)
-        if action_intent_needs_precondition_context(
-            question=str(getattr(state, "question", "") or ""),
-            choices=[str(choice) for choice in getattr(state, "choices", [])],
-            indices=candidate_indices if candidate_indices else None,
+        primary_gap = self._action_intent_primary_gap(state)
+        gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
+        blocker_hint = self._action_intent_verifier_blocker_hint(state)
+        if gap_type == "precondition" or blocker_hint == "precondition_context":
+            return True
+        if any(
+            isinstance(item, str)
+            and item.startswith("action_intent_resolution_withheld_for_missing_state_change_prereq=1")
+            for item in list(getattr(state, "working_memory", []))[-16:]
         ):
             return True
-        # Full-set fallback is intentionally limited to clean/dry style options.
-        # Safety/hazard choices that are not in the current top candidates should
-        # not globally force precontext sampling, or they will swamp access/space
-        # and other pairwise routes whenever a distractor "avoid heat/spill" option
-        # exists somewhere in the full candidate list.
-        full_profile = action_intent_conflict_profile(
-            question=str(getattr(state, "question", "") or ""),
-            choices=[str(choice) for choice in getattr(state, "choices", [])],
-            indices=None,
-        )
-        if "clean_dry" not in set(full_profile["active_categories"]):
+        if self._action_intent_precondition_dependency_is_observation_grounded(state=state, result=result):
+            return True
+        return False
+
+    def _action_intent_precondition_dependency_is_observation_grounded(
+        self,
+        *,
+        state: AgentState,
+        result: dict[str, Any] | None,
+    ) -> bool:
+        if not self._is_action_intent_task(state):
             return False
-        # Precondition-dependent options such as "dry hands" can be missed by the
-        # first-pass top-2 guess, so also scan the full candidate set for that
-        # narrower class.
-        return action_intent_needs_precondition_context(
-            question=str(getattr(state, "question", "") or ""),
-            choices=[str(choice) for choice in getattr(state, "choices", [])],
-            indices=None,
+        bias_profile = self._action_intent_timeline_review_bias_profile(state)
+        if bias_profile["state_change_focus"] or bias_profile["immediate_transition_focus"]:
+            return True
+        question_object = self._action_intent_question_object_hint(state).strip().lower()
+        if self._action_intent_object_has_generic_precondition_dependency(question_object):
+            return True
+        object_anchor_tokens = (
+            "towel",
+            "cloth",
+            "napkin",
+            "tea towel",
+            "dish cloth",
+            "paper towel",
+            "hand towel",
+            "spoon",
+            "ladle",
+            "board",
+            "tray",
+            "scale",
+            "button",
+            "switch",
+            "tap",
+            "faucet",
         )
+        text_parts = [
+            question_object,
+            self._action_intent_result_support_text(result),
+            self._action_intent_timeline_review_text(state),
+            " ".join(str(item) for item in list(getattr(state, "evidence_bundle", []))[-8:]),
+        ]
+        combined = " ".join(part for part in text_parts if part).lower()
+        if not combined.strip():
+            return False
+        precondition_markers = (
+            "before the tap",
+            "before tapping",
+            "already on",
+            "already lit",
+            "display was already lit",
+            "scale was already on",
+            "container was already on the scale",
+            "container already on the scale",
+            "container on the scale before the tap",
+            "bowl already on the scale",
+            "dry hands",
+            "drying hands",
+            "hand drying",
+            "wet hands",
+            "applied to the hands",
+            "hands after pickup",
+            "wipe",
+            "wiping",
+            "wiped",
+            "washed",
+            "wash",
+            "rinsed",
+            "dirty",
+            "messy",
+            "spill",
+            "already visible before",
+            "动作前",
+            "按之前",
+            "点击前",
+            "已经亮",
+            "已经开机",
+            "容器已经在秤上",
+            "碗已经在秤上",
+            "干手",
+            "湿手",
+            "擦手",
+            "清洗",
+        )
+        uncertainty_markers = (
+            "missing",
+            "lack",
+            "not shown",
+            "not visible",
+            "unclear",
+            "still unclear",
+            "cannot tell",
+            "can't tell",
+            "need",
+            "absence",
+            "缺少",
+            "没有",
+            "未看到",
+            "不明确",
+            "需要",
+        )
+        object_anchor_hit = any(token in question_object for token in object_anchor_tokens) if question_object else False
+        if object_anchor_hit and any(term in combined for term in precondition_markers):
+            return True
+        return any(term in combined for term in precondition_markers) and any(
+            term in combined for term in uncertainty_markers
+        )
+
+    def _action_intent_has_precondition_grounding(self, state: AgentState) -> bool:
+        if not self._is_action_intent_task(state):
+            return False
+        for path in self._filter_visual_image_paths(list(getattr(state, "retrieved_frames", []) or [])):
+            if "_precontext_" in Path(path).name.lower():
+                return True
+        for item in list(getattr(state, "working_memory", []))[-16:]:
+            if not isinstance(item, str):
+                continue
+            lowered = item.lower()
+            if "precondition" in lowered or "_precontext_" in lowered:
+                return True
+        return False
+
+    def _action_intent_object_has_generic_precondition_dependency(self, object_hint: str) -> bool:
+        normalized = " ".join(str(object_hint or "").strip().lower().split())
+        if not normalized:
+            return False
+        cleaning_or_wetness_sensitive = (
+            "towel",
+            "cloth",
+            "napkin",
+            "tea towel",
+            "dish cloth",
+            "paper towel",
+            "hand towel",
+        )
+        state_change_sensitive = (
+            "scale",
+            "button",
+            "switch",
+            "tap",
+            "faucet",
+            "knob",
+            "dial",
+        )
+        spill_or_mess_sensitive = (
+            "spoon",
+            "ladle",
+            "board",
+            "tray",
+        )
+        token_groups = (
+            cleaning_or_wetness_sensitive,
+            state_change_sensitive,
+            spill_or_mess_sensitive,
+        )
+        return any(token in normalized for group in token_groups for token in group)
 
     def _build_action_intent_precondition_sampling_decision(
         self,
@@ -1058,6 +1251,18 @@ class GraphAgentPlanner:
             latest_end = end_time if latest_end is None else max(latest_end, end_time)
         return latest_end
 
+    def _action_intent_has_any_query_object_nodes(self, state: AgentState) -> bool:
+        for entry in reversed(getattr(state, "tool_trace", [])):
+            if not isinstance(entry, dict) or entry.get("tool") != "query_object":
+                continue
+            raw_result = entry.get("raw_result")
+            if not isinstance(raw_result, dict):
+                continue
+            nodes = raw_result.get("nodes") or []
+            if any(isinstance(node, dict) for node in nodes):
+                return True
+        return False
+
     def _build_action_intent_extra_followup_sampling_decision(
         self,
         *,
@@ -1066,6 +1271,8 @@ class GraphAgentPlanner:
         focus: str = "",
         window_s: float = 8.0,
     ) -> PlannerDecision | None:
+        if self._search_budget_exhausted(state):
+            return None
         combined_times = sorted(
             [float(value) for value in hints.get("times") or []]
             + [float(value) for value in hints.get("input_times") or []]
@@ -1078,10 +1285,15 @@ class GraphAgentPlanner:
         if start_time is None:
             start_time = action_end
         window_s = max(4.0, min(10.0, float(window_s)))
-        needed_profile = self._action_intent_needed_observation_profile(state=state)
         bias_profile = self._action_intent_timeline_review_bias_profile(state)
         dense_near_followup = self._action_intent_prefers_dense_near_followup(state)
         result_driven_followup = self._action_intent_prefers_result_driven_followup(state)
+        state_change_only_followup = self._action_intent_prefers_followup_state_change_only(state)
+        reveal_access_followup = bool(
+            bias_profile["revealed_target_retrieval"]
+            or bias_profile["revealed_slot_placement"]
+            or bias_profile["revealed_fixture_enablement"]
+        )
         review_transition_focus = (
             bias_profile["revealed_target_retrieval"]
             or bias_profile["revealed_slot_placement"]
@@ -1092,21 +1304,26 @@ class GraphAgentPlanner:
             )
         )
         review_late_focus = bias_profile["next_use_unclear"] or bias_profile["final_location_unclear"]
-        if needed_profile["prefer_mixed_horizon"]:
-            start_time = max(0.0, max(action_end - 0.15, start_time - 0.75))
-            window_s = max(window_s, 7.0)
-        elif needed_profile["prefer_reveal_access"]:
+        future_evidence_marker = any(
+            isinstance(item, str) and item.startswith("action_intent_need_future_evidence=1")
+            for item in list(getattr(state, "working_memory", [])) + list(getattr(state, "evidence_bundle", []))
+        )
+        observation_late_followup = review_late_focus or future_evidence_marker
+        observation_result_driven_followup = result_driven_followup and observation_late_followup
+        if reveal_access_followup:
             start_time = max(0.0, max(action_end - 0.18, start_time - 0.8))
             window_s = max(window_s, 4.6)
-        if needed_profile["prefer_state_change_only"]:
+        if state_change_only_followup:
             start_time = max(0.0, max(action_end - 0.2, start_time - 1.0))
             window_s = min(max(window_s, 4.0), 4.8)
-        elif needed_profile["prefer_final_placement"] or needed_profile["prefer_future_use_outcome"]:
+        elif review_late_focus:
             window_s = max(window_s, 8.8 if attempt_count <= 1 else 8.5)
+        elif future_evidence_marker:
+            window_s = max(window_s, 8.0)
         if dense_near_followup:
             start_time = max(action_end - 0.15, start_time - 1.2)
             window_s = min(window_s, 5.5)
-        if result_driven_followup:
+        if observation_result_driven_followup and not state_change_only_followup:
             window_s = max(window_s, 8.5)
         if review_transition_focus and not review_late_focus:
             start_time = max(0.0, max(action_end - 0.12, start_time - 0.9))
@@ -1114,20 +1331,23 @@ class GraphAgentPlanner:
         if review_late_focus:
             window_s = max(window_s, 8.8 if not bias_profile["final_location_unclear"] else 9.0)
         sample_count = 6 if dense_near_followup and attempt_count <= 1 else 4
-        if result_driven_followup:
+        if observation_result_driven_followup and not state_change_only_followup:
             sample_count = max(sample_count, 5 if attempt_count <= 1 else 4)
         if review_transition_focus:
             sample_count = max(sample_count, 6)
         if review_late_focus:
             sample_count = max(sample_count, 5 if attempt_count <= 1 else 4)
-        if (
-            needed_profile["prefer_state_change_only"]
-            or needed_profile["prefer_mixed_horizon"]
-            or needed_profile["prefer_reveal_access"]
-        ):
+        if state_change_only_followup or reveal_access_followup:
             sample_count = max(sample_count, 6)
-        elif needed_profile["prefer_final_placement"] or needed_profile["prefer_future_use_outcome"]:
+        elif observation_late_followup:
             sample_count = max(sample_count, 5)
+        window_level = self._search_window_level(state)
+        if window_level == 1:
+            window_s = max(window_s, 6.5)
+            sample_count = max(sample_count, 5)
+        elif window_level >= 2:
+            window_s = max(window_s, 8.8)
+            sample_count = max(sample_count, 6)
         return PlannerDecision(
             thought=(
                 "why 题专用裁决仍报告证据不足，继续向后补帧，检查动作后的最终放置、使用或取回结果。"
@@ -1150,9 +1370,17 @@ class GraphAgentPlanner:
             args = entry.get("args")
             if not isinstance(args, dict):
                 continue
-            tag = str(args.get("tag") or "")
-            if tag.startswith("fine_grained_why_recognition_followup"):
-                count += 1
+            tag = str(args.get("tag") or "").strip().lower()
+            if not tag.startswith("fine_grained_why_recognition_followup"):
+                continue
+            stage = 1
+            match = re.search(r"_followup_ext(\d+)$", tag)
+            if match:
+                try:
+                    stage = max(1, int(match.group(1)))
+                except Exception:  # noqa: BLE001
+                    stage = 1
+            count = max(count, stage)
         return count
 
     def _action_intent_peak_probe_count(self, state: AgentState) -> int:
@@ -1178,6 +1406,8 @@ class GraphAgentPlanner:
         hints: dict[str, Any],
         result: dict[str, Any] | None = None,
     ) -> tuple[float, float, float, int] | None:
+        if self._search_budget_exhausted(state):
+            return None
         combined_times: list[float] = []
         for key in ("times", "input_times"):
             for value in hints.get(key) or []:
@@ -1188,16 +1418,9 @@ class GraphAgentPlanner:
         if not combined_times:
             return None
         action_end = max(combined_times)
-        candidate_indices = self._latest_action_intent_candidate_indices(state, result=result)
-        profile = action_intent_conflict_profile(
-            question=str(getattr(state, "question", "") or ""),
-            choices=[str(choice) for choice in getattr(state, "choices", [])],
-            indices=candidate_indices if len(candidate_indices) >= 2 else None,
-        )
         mode = self._action_intent_transition_probe_mode(
             state=state,
             result=result,
-            profile=profile,
         )
         if mode == "state_change":
             start_time = max(0.0, action_end - 0.1)
@@ -1259,6 +1482,13 @@ class GraphAgentPlanner:
             end_time = action_end + 2.4
             stride_s = 0.4
             max_frames = 6
+        window_level = self._search_window_level(state)
+        if window_level == 1:
+            end_time = max(end_time, start_time + 4.0)
+            max_frames = max(max_frames, 7)
+        elif window_level >= 2:
+            end_time = max(end_time, start_time + 6.0)
+            max_frames = max(max_frames, 9)
         return start_time, end_time, stride_s, max_frames
 
     def _action_intent_transition_probe_mode(
@@ -1266,40 +1496,138 @@ class GraphAgentPlanner:
         *,
         state: AgentState,
         result: dict[str, Any] | None,
-        profile: dict[str, Any],
+        profile: dict[str, Any] | None = None,
     ) -> str:
-        needed_profile = self._action_intent_needed_observation_profile(state=state, result=result)
         bias_profile = self._action_intent_timeline_review_bias_profile(state)
-        reveal_subtype = (
-            self._action_intent_reveal_conflict_subtype(state=state, result=result)
-            if bool(profile["has_hidden_access_exact_use_conflict"])
-            else self._action_intent_reveal_conflict_subtype(state=state, result=result)
+        observation_support_text = " ".join(
+            str((result or {}).get(key) or "")
+            for key in ("reason", "decisive_observation", "direct_effect", "downstream_action")
+        ).strip().lower()
+        reveal_subtype = self._action_intent_reveal_conflict_subtype(state=state, result=result)
+        has_explicit_hand_free_conflict = self._action_intent_has_next_use_followup_gap(state=state, result=result)
+        primary_gap = self._action_intent_primary_gap(state)
+        primary_gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
+        reveal_target_markers = (
+            "behind",
+            "hidden",
+            "reveals",
+            "revealed",
+            "reveal",
+            "visible behind",
+            "becomes visible",
+            "area behind becomes visible",
+            "freed area",
+            "freed slot",
+            "后面",
+            "露出",
+            "露出来",
+            "空位",
         )
-        has_explicit_hand_free_conflict = self._action_intent_has_hand_free_future_use_conflict(state=state, result=result)
-        if bias_profile["revealed_target_retrieval"]:
+        reveal_uncertainty_markers = (
+            "exact target use is still unclear",
+            "target use is still unclear",
+            "still unclear",
+            "not yet visible",
+            "not visible",
+            "immediately taken",
+            "taken after the reveal",
+            "taken after reveal",
+            "later use",
+            "未看到",
+            "不明确",
+            "仍不清楚",
+        )
+        hand_free_observation_markers = (
+            "applied to the hands",
+            "applied to the hand",
+            "hands after pickup",
+            "wipe the hands",
+            "dry the hands",
+            "set down for later use",
+            "set down",
+            "later use",
+            "hand area",
+            "擦手",
+            "手上",
+            "放回",
+            "放到台面",
+        )
+        receptacle_observation_markers = (
+            "crumb drops into the sink",
+            "drops into the sink",
+            "drop into the sink",
+            "falls into the sink",
+            "fall into the sink",
+            "only flipped to another side",
+            "flipped to another side",
+            "cloth is only flipped",
+            "crumb",
+            "sink",
+            "碎屑",
+            "水槽",
+            "翻到另一面",
+        )
+        immediate_effect_uncertainty_markers = (
+            "missing_direct_effect",
+            "direct physical effect",
+            "direct effect",
+            "immediate effect",
+            "right after the move",
+            "right after",
+            "动作后立刻",
+            "直接物理效果",
+        )
+        if bias_profile["revealed_target_retrieval"] and not (
+            has_explicit_hand_free_conflict
+            or self._action_intent_pair_spans_immediate_and_later_outcomes(state=state, result=result)
+        ):
             return "revealed_target_retrieval"
-        if bias_profile["revealed_slot_placement"]:
+        if bias_profile["revealed_slot_placement"] and not has_explicit_hand_free_conflict:
             return "revealed_slot_placement"
         if bias_profile["revealed_fixture_enablement"] and not has_explicit_hand_free_conflict:
             return "revealed_fixture_enablement"
+        if reveal_subtype == "revealed_slot_placement" and not has_explicit_hand_free_conflict:
+            return "revealed_slot_placement"
+        if reveal_subtype == "revealed_target_retrieval" and not (
+            has_explicit_hand_free_conflict
+            or self._action_intent_pair_spans_immediate_and_later_outcomes(state=state, result=result)
+        ):
+            return "revealed_target_retrieval"
         if self._action_intent_prefers_followup_state_change_only(state):
             return "state_change"
         if reveal_subtype == "revealed_fixture_enablement" and not has_explicit_hand_free_conflict:
             return reveal_subtype
         if (
-            needed_profile["prefer_mixed_horizon"]
-            or self._action_intent_pair_spans_immediate_and_later_outcomes(state=state, result=result)
+            self._action_intent_pair_spans_immediate_and_later_outcomes(state=state, result=result)
             or (result is None and self._action_intent_initial_pair_spans_immediate_and_later_outcomes(state))
         ):
             return "mixed_temporal_horizon"
         if bias_profile["hand_free_next_action"]:
             return "hand_free_next_action"
-        if (needed_profile["prefer_hand_free_next_action"] or has_explicit_hand_free_conflict) and not (
+        if (
+            has_explicit_hand_free_conflict
+            or any(marker in observation_support_text for marker in hand_free_observation_markers)
+        ) and not (
             reveal_subtype == "revealed_fixture_enablement" and not has_explicit_hand_free_conflict
         ):
             return "hand_free_next_action"
-        if needed_profile["prefer_receptacle_outcome"]:
+        if (
+            not reveal_subtype
+            and any(marker in observation_support_text for marker in reveal_target_markers)
+            and (
+            self._action_intent_result_points_to_later_outcome_uncertainty(result)
+            or any(marker in observation_support_text for marker in reveal_uncertainty_markers)
+            )
+        ):
+            return "revealed_target_retrieval"
+        if any(marker in observation_support_text for marker in receptacle_observation_markers):
             return "receptacle_outcome"
+        if (
+            primary_gap_type in {"immediate_outcome", "state_transition_unconfirmed", "workspace_change_unconfirmed"}
+            or self._action_intent_result_has_immediate_post_action_uncertainty(result)
+            or any(marker in observation_support_text for marker in immediate_effect_uncertainty_markers)
+        ):
+            return "immediate_result"
         if bias_profile["final_location_unclear"]:
             return "final_placement_result"
         if bias_profile["next_use_unclear"]:
@@ -1307,9 +1635,30 @@ class GraphAgentPlanner:
         timeline_text = self._action_intent_timeline_review_text(state)
         support_text = self._action_intent_result_support_text(result)
         combined_text = f"{timeline_text} {support_text}".lower()
-        active_categories = set(profile["active_categories"])
+        if reveal_subtype or (
+            primary_gap_type in {"relation_confirmation", "target_discovery", "workspace_change_unconfirmed"}
+            and any(
+                marker in combined_text
+                for marker in (
+                    "behind",
+                    "hidden",
+                    "reveals",
+                    "revealed",
+                    "reveal",
+                    "slot",
+                    "freed area",
+                    "freed slot",
+                    "后面",
+                    "露出",
+                    "空位",
+                )
+            )
+        ):
+            if reveal_subtype:
+                return reveal_subtype
+            return "reveal_or_access_result"
         if (
-            "safety_avoid" in active_categories
+            primary_gap_type in {"immediate_outcome", "state_transition_unconfirmed", "workspace_change_unconfirmed"}
             and any(
                 marker in combined_text
                 for marker in (
@@ -1328,10 +1677,6 @@ class GraphAgentPlanner:
             )
         ):
             return "safety_or_spill_result"
-        if bool(profile["has_hidden_access_exact_use_conflict"]):
-            if reveal_subtype:
-                return reveal_subtype
-            return "reveal_or_access_result"
         final_placement_markers = (
             "put back",
             "return",
@@ -1378,27 +1723,12 @@ class GraphAgentPlanner:
             "检查",
             "清洗",
         )
-        if any(marker in combined_text for marker in final_placement_markers) and active_categories & {
-            "final_place_return",
-            "generic_relocation",
-        }:
+        if any(marker in combined_text for marker in final_placement_markers):
             return "final_placement_result"
         if self._action_intent_needs_future_use_evidence(state=state, result=result):
-            if any(marker in combined_text for marker in final_placement_markers) and active_categories & {
-                "final_place_return",
-                "generic_relocation",
-            }:
+            if any(marker in combined_text for marker in final_placement_markers):
                 return "final_placement_result"
-            if any(marker in combined_text for marker in future_use_markers) or active_categories & {
-                "measure_weigh",
-                "transfer_contents",
-                "serve_consume",
-                "inspect_check",
-                "clean_dry",
-                "open_close",
-                "food_prep",
-                "discard",
-            }:
+            if any(marker in combined_text for marker in future_use_markers):
                 return "future_use_outcome"
         return "immediate_result"
 
@@ -1408,19 +1738,9 @@ class GraphAgentPlanner:
         state: AgentState,
         result: dict[str, Any] | None,
     ) -> str:
-        candidate_indices = self._latest_action_intent_candidate_indices(state, result=result)
-        choices = [str(choice) for choice in getattr(state, "choices", [])]
-        if len(candidate_indices) < 2:
-            candidate_indices = list(range(len(choices)))
-        candidate_choices = [
-            choices[index].lower()
-            for index in candidate_indices
-            if 0 <= index < len(choices)
-        ]
-        if not candidate_choices:
-            return ""
         support_text = self._action_intent_result_support_text(result)
-        reveal_context_text = " ".join(candidate_choices) + " " + support_text + " " + str(getattr(state, "question", "") or "").lower()
+        timeline_text = self._action_intent_timeline_review_text(state)
+        reveal_context_text = f"{support_text} {timeline_text}".lower()
         if not any(
             token in reveal_context_text
             for token in (
@@ -1443,63 +1763,52 @@ class GraphAgentPlanner:
         ):
             return ""
         has_slot_placement = any(
-            any(
-                token in choice
-                for token in (
-                    "put into the freed slot",
-                    "place into the freed slot",
-                    "put the",
-                    "place the",
-                    "freed slot",
-                    "slot behind",
-                    "right place",
-                    "proper place",
-                    "放进腾出的槽位",
-                    "放到腾出的槽位",
-                    "归位",
-                )
+            token in reveal_context_text
+            for token in (
+                "put into the freed slot",
+                "place into the freed slot",
+                "placed into the freed slot",
+                "placed into the revealed slot",
+                "put into the revealed slot",
+                "freed slot",
+                "right place",
+                "proper place",
+                "放进腾出的槽位",
+                "放到腾出的槽位",
+                "归位",
             )
-            for choice in candidate_choices
         )
         has_hidden_target_retrieval = any(
-            any(
-                token in choice
-                for token in (
-                    "retrieve",
-                    "take the hidden",
-                    "take the small jar",
-                    "pick up the hidden",
-                    "pick up the small jar",
-                    "take the spice jar",
-                    "hidden behind",
-                    "retrieve the red curry paste",
-                    "retrieve the",
-                    "取出后面的",
-                    "拿后面的",
-                    "取到后面",
-                )
+            token in reveal_context_text
+            for token in (
+                "retrieve",
+                "taken from behind",
+                "retrieved from behind",
+                "picked up from behind",
+                "small jar",
+                "spice jar",
+                "red curry paste",
+                "hidden item",
+                "取出后面的",
+                "拿后面的",
+                "取到后面",
             )
-            for choice in candidate_choices
         )
         has_fixture_enablement = any(
-            any(
-                token in choice
-                for token in (
-                    "turn on",
-                    "switch on",
-                    "open the",
-                    "open ",
-                    "turn off",
-                    "switch off",
-                    "tap",
-                    "use the scale",
-                    "turn on the scale",
-                    "打开",
-                    "开启",
-                    "开机",
-                )
+            token in reveal_context_text
+            for token in (
+                "turn on",
+                "switch on",
+                "open the",
+                "turn off",
+                "switch off",
+                "tap",
+                "use the scale",
+                "turn on the scale",
+                "打开",
+                "开启",
+                "开机",
             )
-            for choice in candidate_choices
         )
         if has_hidden_target_retrieval and any(
             token in support_text
@@ -1563,43 +1872,61 @@ class GraphAgentPlanner:
     ) -> bool:
         if not self._is_action_intent_task(state) or not isinstance(result, dict):
             return False
-        best_index = self._coerce_choice_index(result.get("best_index"), state.choices)
-        competitor_index = self._action_intent_competing_candidate_index(result, state)
-        if competitor_index is None:
-            for index in self._latest_action_intent_candidate_indices(state, result=result):
-                if best_index is not None and index != best_index:
-                    competitor_index = index
-                    break
-        if best_index is None or competitor_index is None or best_index == competitor_index:
-            return False
-        categories = selected_choice_categories(
-            [str(choice) for choice in getattr(state, "choices", [])],
-            [best_index, competitor_index],
+        primary_gap = self._action_intent_primary_gap(state)
+        primary_gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
+        bias_profile = self._action_intent_timeline_review_bias_profile(state)
+        support_text = self._action_intent_result_support_text(result).lower()
+        immediate_markers = (
+            "turns on",
+            "turned on",
+            "turn on",
+            "turn off",
+            "opened",
+            "closed",
+            "moved aside",
+            "reveals the area",
+            "revealed area",
+            "display",
+            "0",
+            "zero",
+            "归零",
+            "露出",
+            "打开",
+            "关闭",
         )
-        best_categories = set(categories.get(best_index) or set())
-        competitor_categories = set(categories.get(competitor_index) or set())
-        later_outcome_categories = {
-            "final_place_return",
-            "measure_weigh",
-            "transfer_contents",
-            "serve_consume",
-            "clean_dry",
-            "food_prep",
-            "discard",
-        }
-        best_choice = str(getattr(state, "choices", [])[best_index] if 0 <= best_index < len(getattr(state, "choices", [])) else "")
-        competitor_choice = str(
-            getattr(state, "choices", [])[competitor_index] if 0 <= competitor_index < len(getattr(state, "choices", [])) else ""
+        later_markers = (
+            "later use",
+            "next use",
+            "used next",
+            "put back",
+            "returned",
+            "weigh",
+            "measure",
+            "pour",
+            "empty",
+            "serve",
+            "wash",
+            "rinse",
+            "dry",
+            "still unclear",
+            "not yet shown",
+            "not visible",
+            "后续用途",
+            "放回",
+            "称",
+            "倒",
+            "清洗",
         )
-        best_is_immediate = self._action_intent_choice_is_immediate_micro_outcome_candidate(best_choice, best_categories)
-        competitor_is_immediate = self._action_intent_choice_is_immediate_micro_outcome_candidate(
-            competitor_choice,
-            competitor_categories,
+        immediate_signal = primary_gap_type in {"immediate_outcome", "state_transition_unconfirmed"} or any(
+            marker in support_text for marker in immediate_markers
         )
-        return bool(
-            (best_is_immediate and competitor_categories & later_outcome_categories)
-            or (competitor_is_immediate and best_categories & later_outcome_categories)
+        later_signal = (
+            bias_profile["next_use_unclear"]
+            or bias_profile["final_location_unclear"]
+            or self._action_intent_result_points_to_later_outcome_uncertainty(result)
+            or any(marker in support_text for marker in later_markers)
         )
+        return bool(immediate_signal and later_signal)
 
     def _action_intent_choice_is_immediate_micro_outcome_candidate(
         self,
@@ -1651,35 +1978,14 @@ class GraphAgentPlanner:
     def _action_intent_initial_pair_spans_immediate_and_later_outcomes(self, state: AgentState) -> bool:
         if not self._is_action_intent_task(state):
             return False
-        choices = [str(choice) for choice in getattr(state, "choices", [])]
-        if len(choices) < 2:
-            return False
-        categories_by_index = selected_choice_categories(choices, None)
-        later_outcome_categories = {
-            "final_place_return",
-            "measure_weigh",
-            "transfer_contents",
-            "serve_consume",
-            "clean_dry",
-            "food_prep",
-            "discard",
-        }
-        immediate_indices = [
-            index
-            for index, categories in categories_by_index.items()
-            if self._action_intent_choice_is_immediate_micro_outcome_candidate(
-                choices[index],
-                set(categories or set()),
-            )
-        ]
-        if not immediate_indices:
-            return False
-        return any(
-            index not in immediate_indices and set(categories or set()) & later_outcome_categories
-            for index, categories in categories_by_index.items()
-        )
+        primary_gap = self._action_intent_primary_gap(state)
+        primary_gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
+        if primary_gap_type in {"immediate_outcome", "state_transition_unconfirmed"}:
+            blocker_hint = self._action_intent_verifier_blocker_hint(state)
+            return blocker_hint in {"future_gap_family", "post_action_evidence"}
+        return False
 
-    def _action_intent_has_hand_free_future_use_conflict(
+    def _action_intent_has_next_use_followup_gap(
         self,
         *,
         state: AgentState,
@@ -1687,30 +1993,53 @@ class GraphAgentPlanner:
     ) -> bool:
         if not self._is_action_intent_task(state):
             return False
-        try:
-            confidence = float((result or {}).get("confidence") or 0.0)
-        except Exception:  # noqa: BLE001
-            confidence = 0.0
-        reason_text = str((result or {}).get("reason") or "")
-        indices = self._latest_action_intent_candidate_indices(state, result=result)
-        semantic_indices = self._action_intent_route_candidate_indices(
-            state=state,
-            result=result,
-            candidate_indices=indices,
-            confidence=confidence,
-            reason_text=reason_text,
-        )
-        if not semantic_indices or len(semantic_indices) < 2:
+        if self._action_intent_result_has_direct_post_action_evidence(result):
             return False
-        profile = action_intent_conflict_profile(
-            question=str(getattr(state, "question", "") or ""),
-            choices=[str(choice) for choice in getattr(state, "choices", [])],
-            indices=semantic_indices,
+        bias_profile = self._action_intent_timeline_review_bias_profile(state)
+        if bias_profile["hand_free_next_action"]:
+            return True
+        support_text = self._action_intent_result_support_text(result)
+        observation_markers = (
+            "free hand",
+            "other hand",
+            "one hand",
+            "holding in one hand",
+            "transfer to one hand",
+            "left hand",
+            "right hand",
+            "wipe the hands",
+            "dry the hands",
+            "set down for later use",
+            "set down",
+            "later use",
+            "next use",
+            "used next",
+            "拿在一只手上",
+            "另一只手",
+            "腾出",
+            "擦手",
+            "放到台面",
+            "后续用途",
         )
-        categories = set(profile["active_categories"])
-        if "hand_free_enablement" not in categories:
-            return False
-        return bool(categories & {"access_retrieve", "final_place_return", "generic_relocation", "open_close"})
+        if any(marker in support_text for marker in observation_markers):
+            return True
+        return self._action_intent_pair_spans_immediate_and_later_outcomes(state=state, result=result) and any(
+            marker in support_text
+            for marker in (
+                "holding",
+                "held",
+                "one hand",
+                "left hand",
+                "right hand",
+                "free hand",
+                "other hand",
+                "拿着",
+                "一只手",
+                "左手",
+                "右手",
+                "另一只手",
+            )
+        )
 
     def _action_intent_should_try_transition_probe(
         self,
@@ -1723,33 +2052,28 @@ class GraphAgentPlanner:
             return False
         if self._action_intent_has_transition_followup_frames(state):
             return False
-        if self._action_intent_followup_attempt_count(state) < 1 and not self._action_intent_should_preempt_initial_followup_with_transition(
+        preempt_initial_transition = self._action_intent_should_preempt_initial_followup_with_transition(
             state=state,
             hints=hints,
             result=result,
-        ):
+        )
+        if self._action_intent_followup_attempt_count(state) < 1 and not preempt_initial_transition:
             return False
         if self._action_intent_transition_probe_window(state=state, hints=hints, result=result) is None:
             return False
-        needed_profile = self._action_intent_needed_observation_profile(state=state, result=result)
+        if self._action_intent_followup_attempt_count(state) < 1 and preempt_initial_transition:
+            return True
+        if self._action_intent_result_has_direct_post_action_evidence(result):
+            return False
         bias_profile = self._action_intent_timeline_review_bias_profile(state)
-        candidate_indices = self._latest_action_intent_candidate_indices(state, result=result)
-        profile = action_intent_conflict_profile(
-            question=str(getattr(state, "question", "") or ""),
-            choices=[str(choice) for choice in getattr(state, "choices", [])],
-            indices=candidate_indices if len(candidate_indices) >= 2 else None,
-        )
-        hand_free_future_use = self._action_intent_has_hand_free_future_use_conflict(state=state, result=result)
-        mixed_temporal_horizon = self._action_intent_pair_spans_immediate_and_later_outcomes(
-            state=state,
-            result=result,
-        )
-        if bias_profile["needs_more_evidence"] and (
-            bias_profile["revealed_target_retrieval"]
-            or bias_profile["revealed_slot_placement"]
-            or bias_profile["revealed_fixture_enablement"]
-            or bias_profile["hand_free_next_action"]
-            or bias_profile["final_location_unclear"]
+        primary_gap = self._action_intent_primary_gap(state)
+        gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
+        if bool(bias_profile.get("needs_more_evidence")) and (
+            bool(bias_profile.get("revealed_target_retrieval"))
+            or bool(bias_profile.get("revealed_slot_placement"))
+            or bool(bias_profile.get("revealed_fixture_enablement"))
+            or bool(bias_profile.get("hand_free_next_action"))
+            or bool(bias_profile.get("final_location_unclear"))
         ):
             return True
         support_text = self._action_intent_result_support_text(result)
@@ -1764,83 +2088,49 @@ class GraphAgentPlanner:
             "看不清",
             "不明确",
         )
-        if (
-            mixed_temporal_horizon
-            and any(marker in support_text for marker in uncertainty_markers)
-            and isinstance(result, dict)
-            and (
-                bool(result.get("need_future_evidence"))
-                or bool(result.get("ambiguity"))
-                or bool(result.get("need_more_evidence"))
-            )
-        ):
-            return True
-        if (
-            isinstance(result, dict)
-            and (
-                bool(result.get("need_future_evidence"))
-                or bool(result.get("ambiguity"))
-                or bool(result.get("need_more_evidence"))
-            )
-            and (
-                needed_profile["prefer_mixed_horizon"]
-                or needed_profile["prefer_hand_free_next_action"]
-                or needed_profile["prefer_receptacle_outcome"]
-            )
-        ):
-            return True
-        if self._action_intent_result_has_direct_post_action_evidence(result):
-            return False
-        if bool(profile["has_hidden_access_exact_use_conflict"]) and not hand_free_future_use:
-            return False
-        if self._action_intent_needs_future_use_evidence(state=state, result=result) and not hand_free_future_use:
-            if bias_profile["final_location_unclear"]:
-                return True
-            if isinstance(result, dict) and "decisive_observation" in result:
-                decisive_observation = str(result.get("decisive_observation") or "").strip()
-                if not decisive_observation:
-                    score_gap = self._action_intent_future_use_score_gap(result)
-                    if score_gap < 0.18 or any(marker in support_text for marker in uncertainty_markers):
-                        return True
-            return False
-        immediate_transition_markers = (
-            "moved aside",
-            "becomes visible",
-            "becomes reachable",
-            "reveals the area",
-            "revealed area",
-            "freed slot",
-            "腾出",
-            "露出",
-            "显露",
+        explicit_need_more = isinstance(result, dict) and (
+            bool(result.get("need_future_evidence"))
+            or bool(result.get("ambiguity"))
+            or bool(result.get("need_more_evidence"))
         )
-        hand_free_transition_markers = (
-            "left hand",
-            "right hand",
-            "other hand",
-            "free hand",
-            "freed hand",
-            "free the",
-            "freed the",
-            "腾出",
-            "另一只手",
-            "左手",
-            "右手",
-            "去拿",
-            "去开",
-            "reach",
-            "pick up",
-            "turn on",
-            "open",
-            "close",
-            "use the right hand",
-            "use the left hand",
-        )
-        if hand_free_future_use and any(marker in support_text for marker in uncertainty_markers + hand_free_transition_markers):
+        if gap_type in {"immediate_outcome", "state_transition_unconfirmed", "workspace_change_unconfirmed"}:
             return True
-        if self._action_intent_pair_needs_outcome_resolution(state=state, result=result) and any(
-            marker in support_text for marker in immediate_transition_markers
+        pairwise_coverage_short = self._action_intent_pairwise_needs_more_post_action_coverage(
+            state=state,
+            hints=hints,
+            result=result,
+        )
+        future_use_coverage_short = self._action_intent_future_use_needs_more_post_action_coverage(
+            state=state,
+            hints=hints,
+            result=result,
+        )
+        if pairwise_coverage_short or future_use_coverage_short:
+            reveal_subtype = self._action_intent_reveal_conflict_subtype(state=state, result=result)
+            if reveal_subtype in {
+                "revealed_target_retrieval",
+                "revealed_slot_placement",
+                "revealed_fixture_enablement",
+            }:
+                return False
+        if pairwise_coverage_short:
+            return True
+        if explicit_need_more and self._action_intent_pair_spans_immediate_and_later_outcomes(
+            state=state,
+            result=result,
         ) and any(marker in support_text for marker in uncertainty_markers):
+            if future_use_coverage_short:
+                return False
+            return True
+        if explicit_need_more and self._action_intent_prefers_followup_state_change_only(state):
+            return True
+        if self._action_intent_has_next_use_followup_gap(state=state, result=result) and (
+            explicit_need_more or any(marker in support_text for marker in uncertainty_markers)
+        ):
+            if future_use_coverage_short:
+                return False
+            return True
+        if explicit_need_more and self._action_intent_pair_needs_outcome_resolution(state=state, result=result):
             return True
         if isinstance(result, dict) and (
             self._action_intent_result_is_weak_generic_claim(state=state, result=result)
@@ -1886,7 +2176,7 @@ class GraphAgentPlanner:
             return None
         if self._action_intent_peak_probe_count(state) >= 1:
             return None
-        if not self._action_intent_has_hand_free_future_use_conflict(state=state, result=result):
+        if not self._action_intent_has_next_use_followup_gap(state=state, result=result):
             return None
         args = last_tool.get("args") or {}
         if not isinstance(args, dict):
@@ -1944,17 +2234,31 @@ class GraphAgentPlanner:
         names = [Path(path).name.lower() for path in frames]
         if not any("_followup_transition_" in name or "_followup_peaks_" in name for name in names):
             latest_intent = self._latest_successful_action_intent_result(state)
-            needed_profile = self._action_intent_needed_observation_profile(state=state, result=latest_intent if latest_intent else None)
+            bias_profile = self._action_intent_timeline_review_bias_profile(state)
+            future_evidence_marker = any(
+                isinstance(item, str) and item.startswith("action_intent_need_future_evidence=1")
+                for item in list(getattr(state, "working_memory", [])) + list(getattr(state, "evidence_bundle", []))
+            )
             allow_late_followup_review = (
-                needed_profile["prefer_mixed_horizon"]
-                or needed_profile["prefer_future_use_outcome"]
-                or needed_profile["prefer_final_placement"]
+                bias_profile["next_use_unclear"]
+                or bias_profile["final_location_unclear"]
+                or future_evidence_marker
             )
             if not allow_late_followup_review and latest_intent:
-                allow_late_followup_review = (
-                    self._action_intent_needs_future_use_evidence(state=state, result=latest_intent)
-                    or self._action_intent_pair_spans_immediate_and_later_outcomes(state=state, result=latest_intent)
+                allow_late_followup_review = self._action_intent_pair_spans_immediate_and_later_outcomes(
+                    state=state,
+                    result=latest_intent,
                 )
+            if not allow_late_followup_review:
+                primary_gap = self._action_intent_primary_gap(state)
+                gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
+                allow_late_followup_review = gap_type == "future_outcome"
+                if not allow_late_followup_review and gap_type in {
+                    "immediate_outcome",
+                    "relation_confirmation",
+                    "target_discovery",
+                }:
+                    allow_late_followup_review = True
             if not allow_late_followup_review:
                 return []
             has_segment = any("_segment_" in name for name in names)
@@ -2010,8 +2314,15 @@ class GraphAgentPlanner:
         if tool_name == "sample_frames_around_peaks" and not tag.endswith("_followup_peaks"):
             return False
         if tool_name == "sample_sparse_frames":
+            structured_specialized_tool = self._action_intent_structured_specialized_recovery_tool(state)
+            primary_gap = self._action_intent_primary_gap(state)
             if "_followup_ext" not in tag and not (
-                tag.endswith("_followup") and self._action_intent_pending_resolution_tool(state)
+                tag.endswith("_followup")
+                and (
+                    self._action_intent_pending_resolution_tool(state)
+                    or structured_specialized_tool
+                    or isinstance(primary_gap, dict)
+                )
             ):
                 return False
         if tool_name == "retrieve_cached_artifacts" and not any(
@@ -2022,8 +2333,17 @@ class GraphAgentPlanner:
             return False
         latest_intent = result if isinstance(result, dict) and result.get("best_index") is not None else self._latest_successful_action_intent_result(state)
         if not isinstance(latest_intent, dict) or latest_intent.get("best_index") is None:
+            if self._action_intent_has_explicit_pending_resolution_marker(state):
+                primary_gap = self._action_intent_primary_gap(state)
+                gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
+                if gap_type not in {"future_outcome", "immediate_outcome", "relation_confirmation", "target_discovery"}:
+                    return False
+            if self._action_intent_pending_resolution_tool(state):
+                return True
+            if self._action_intent_primary_gap(state) is not None:
+                return True
             return False
-        if self._action_intent_has_hand_free_future_use_conflict(state=state, result=latest_intent):
+        if self._action_intent_has_next_use_followup_gap(state=state, result=latest_intent):
             return True
         if self._action_intent_needs_future_use_evidence(state=state, result=latest_intent):
             return True
@@ -2358,372 +2678,6 @@ class GraphAgentPlanner:
             "immediate_transition_focus": immediate_transition_focus,
         }
 
-    def _action_intent_needed_observation_text(
-        self,
-        *,
-        state: AgentState,
-        result: dict[str, Any] | None = None,
-    ) -> str:
-        if isinstance(result, dict):
-            text = str(result.get("needed_observation") or "").strip().lower()
-            if text:
-                return text
-        latest = self._latest_action_intent_resolution_payload(state)
-        if latest is not None:
-            _tool, payload = latest
-            text = str(payload.get("needed_observation") or "").strip().lower()
-            if text:
-                return text
-        for item in reversed(list(getattr(state, "working_memory", []))[-16:]):
-            if not isinstance(item, str) or not item.startswith("action_intent_needed_observation="):
-                continue
-            return str(item.split("=", 1)[1] or "").strip().lower()
-        return ""
-
-    def _action_intent_needed_observation_target_hint(
-        self,
-        *,
-        state: AgentState,
-        result: dict[str, Any] | None = None,
-    ) -> tuple[str, str] | None:
-        if self._action_intent_followup_attempt_count(state) < 2 and not any(
-            isinstance(item, str) and item.startswith("action_intent_needed_observation=")
-            for item in list(getattr(state, "working_memory", []))[-16:]
-        ):
-            return None
-        text = self._action_intent_needed_observation_text(state=state, result=result)
-        if not text:
-            return None
-        action_object = self._action_intent_question_object_hint(state)
-        fixture_targets = self._action_intent_choice_fixture_target_candidates(choice=text, action_object=action_object)
-        object_targets = [
-            token
-            for token in self._action_intent_choice_target_object_candidates(choice=text, action_object=action_object)
-            if token not in set(fixture_targets)
-        ]
-        unique_targets: list[tuple[str, str]] = []
-        seen_targets: set[str] = set()
-        for target in fixture_targets:
-            if not target or target == action_object or target in seen_targets:
-                continue
-            seen_targets.add(target)
-            unique_targets.append((target, "fixture"))
-        for target in object_targets:
-            if not target or target == action_object or target in seen_targets:
-                continue
-            seen_targets.add(target)
-            unique_targets.append((target, "object"))
-        if len(unique_targets) == 1:
-            return unique_targets[0]
-        if len(unique_targets) > 1:
-            text_lc = text
-            reason_lc = self._action_intent_result_support_text(result) if isinstance(result, dict) else ""
-            revealed_slot_terms = (
-                "freed slot",
-                "free slot",
-                "sink slot",
-                "specific freed slot",
-                "target position",
-                "placed into the freed slot",
-                "put into the freed slot",
-                "placed into the sink",
-                "put into the sink",
-            )
-            if any(term in text_lc or term in reason_lc for term in revealed_slot_terms):
-                for target, kind in unique_targets:
-                    if kind == "object":
-                        return target, kind
-            inspection_vs_later_use_terms = (
-                "tilted to pour",
-                "toward the sink",
-                "carried over the plate",
-                "briefly checked near the hob",
-                "stays near the hob",
-                "checked near the hob",
-            )
-            if any(term in text_lc for term in inspection_vs_later_use_terms):
-                preferred_targets = ("sink", "plate", "bowl")
-                for preferred in preferred_targets:
-                    for target, kind in unique_targets:
-                        if target == preferred:
-                            return target, kind
-        return None
-
-    def _action_intent_needed_observation_relation_hint(
-        self,
-        *,
-        state: AgentState,
-        result: dict[str, Any] | None = None,
-    ) -> tuple[str, str, str] | None:
-        if self._action_intent_followup_attempt_count(state) < 2 and not any(
-            isinstance(item, str) and item.startswith("action_intent_needed_observation=")
-            for item in list(getattr(state, "working_memory", []))[-16:]
-        ):
-            return None
-        target_hint = self._action_intent_needed_observation_target_hint(state=state, result=result)
-        if target_hint is None:
-            return None
-        text = self._action_intent_needed_observation_text(state=state, result=result)
-        if not text:
-            return None
-        if (
-            target_hint[1] == "object"
-            and any(marker in text for marker in ("freed slot", "free slot", "sink slot", "target position"))
-        ):
-            return None
-        relation_matches: list[str] = []
-        relation_specs = (
-            (
-                "on_target",
-                (
-                    "placed onto the scale",
-                    "placed on the scale",
-                    "put on the scale",
-                    "used on the scale",
-                    "onto the scale",
-                    "on the scale",
-                ),
-            ),
-            (
-                "return_to_target",
-                (
-                    "put back in the fridge",
-                    "back in the fridge",
-                    "returned to the fridge",
-                    "returned into the fridge",
-                    "returned to the shelf",
-                    "placed back on the shelf",
-                ),
-            ),
-            (
-                "into_target",
-                (
-                    "placed into the sink",
-                    "put into the sink",
-                    "into the sink",
-                    "in the sink",
-                    "sink wash area",
-                    "into the sink area",
-                ),
-            ),
-            (
-                "over_target",
-                (
-                    "carried over the plate",
-                    "moved over the plate",
-                    "over the plate",
-                    "carried over the bowl",
-                    "over the bowl",
-                    "over the sink",
-                    "toward the sink",
-                ),
-            ),
-        )
-        for relation_name, markers in relation_specs:
-            if any(marker in text for marker in markers):
-                relation_matches.append(relation_name)
-        unique_relations = list(dict.fromkeys(relation_matches))
-        if len(unique_relations) != 1:
-            return None
-        target_name, target_kind = target_hint
-        return target_name, target_kind, unique_relations[0]
-
-    def _action_intent_needed_observation_profile(
-        self,
-        *,
-        state: AgentState,
-        result: dict[str, Any] | None = None,
-    ) -> dict[str, bool]:
-        text = self._action_intent_needed_observation_text(state=state, result=result)
-        if not text:
-            return {
-                "prefer_dense_near": False,
-                "prefer_result_driven": False,
-                "prefer_state_change_only": False,
-                "prefer_mixed_horizon": False,
-                "prefer_reveal_access": False,
-                "prefer_receptacle_outcome": False,
-                "prefer_future_use_outcome": False,
-                "prefer_final_placement": False,
-                "prefer_hand_free_next_action": False,
-                "prefer_safety_or_spill": False,
-            }
-        immediate_terms = (
-            "read/checked first",
-            "checked first",
-            "read first",
-            "check first",
-            "label",
-            "date",
-            "expiry",
-            "opened",
-            "turn on",
-            "turn off",
-            "switch",
-            "direct physical effect",
-            "state change",
-            "display",
-            "starts running",
-            "stops running",
-            "applied to the hands",
-            "wipe",
-            "dry hands",
-        )
-        future_use_terms = (
-            "put back",
-            "returned",
-            "back in the fridge",
-            "final placement",
-            "placed on the scale",
-            "put on the scale",
-            "used to pour",
-            "actual use",
-            "used again",
-            "weigh",
-            "scale",
-            "measure",
-            "serve",
-            "plate",
-            "drain",
-            "retrieved from behind",
-            "taken from behind",
-        )
-        reveal_terms = (
-            "behind the glass",
-            "behind the area",
-            "hidden item",
-            "after the reveal",
-            "picked up before the area is closed",
-            "picked up before the door is closed",
-            "object behind",
-        )
-        hand_free_terms = (
-            "hand",
-            "tap",
-            "switch",
-            "turn on",
-            "turn off",
-        )
-        safety_terms = (
-            "messy",
-            "spill",
-            "unstable",
-            "full",
-            "burn",
-            "hot",
-            "boiling",
-            "counter",
-        )
-        state_change_terms = (
-            "direct physical effect",
-            "state change",
-            "display",
-            "turned on",
-            "turned off",
-            "opened",
-            "starts running",
-            "stops running",
-            "becomes full",
-            "becomes empty",
-        )
-        final_placement_terms = (
-            "put back",
-            "returned",
-            "back in the fridge",
-            "final placement",
-            "returned to the fridge",
-            "returned to the shelf",
-            "placed back",
-            "placed into",
-        )
-        receptacle_terms = (
-            "sink",
-            "pan",
-            "pot",
-            "bowl",
-            "cup",
-            "jar",
-            "container",
-            "水槽",
-            "锅",
-            "碗",
-            "杯",
-            "容器",
-        )
-        residue_action_terms = (
-            "crumb",
-            "residue",
-            "drop",
-            "fall",
-            "release",
-            "drain",
-            "碎屑",
-            "残渣",
-            "掉",
-            "落",
-            "沥",
-        )
-        immediate = any(term in text for term in immediate_terms)
-        future_use = any(term in text for term in future_use_terms)
-        reveal_access = any(term in text for term in reveal_terms)
-        hand_free = any(term in text for term in hand_free_terms)
-        safety_or_spill = any(term in text for term in safety_terms)
-        state_change_only = any(term in text for term in state_change_terms)
-        final_placement = any(term in text for term in final_placement_terms)
-        question_text = str(getattr(state, "question", "") or "").lower()
-        choices_text = " ".join(str(choice) for choice in getattr(state, "choices", []) or []).lower()
-        receptacle_outcome = any(term in text for term in receptacle_terms) and any(
-            term in text for term in residue_action_terms
-        )
-        if not receptacle_outcome and any(token in question_text for token in ("<flip ", "<turn ", "<shake ", "<tilt ", "<tip ", "<tap ", "<hit ", "<knock ")):
-            if any(
-                term in choices_text
-                for term in (
-                    "into the sink",
-                    "into the pan",
-                    "into the bowl",
-                    "into the pot",
-                    "into the container",
-                    "掉进水槽",
-                    "掉回锅",
-                    "掉回碗",
-                    "落回",
-                )
-            ) and any(
-                term in choices_text
-                for term in (
-                    "drop",
-                    "fall",
-                    "release",
-                    "crumb",
-                    "residue",
-                    "drain",
-                    "掉",
-                    "落",
-                    "碎屑",
-                    "残渣",
-                    "沥",
-                )
-            ):
-                receptacle_outcome = True
-        contrastive = ("whether" in text or "是否" in text) and any(
-            token in text for token in (" or ", " first ", " before ", " after ", " versus ", " vs ")
-        )
-        mixed_horizon = (immediate and future_use) or (contrastive and immediate and (future_use or final_placement))
-        dense_near = immediate or reveal_access or receptacle_outcome or hand_free or safety_or_spill or state_change_only
-        return {
-            "prefer_dense_near": dense_near,
-            "prefer_result_driven": future_use or final_placement or mixed_horizon,
-            "prefer_state_change_only": state_change_only and not (future_use or final_placement or reveal_access),
-            "prefer_mixed_horizon": mixed_horizon,
-            "prefer_reveal_access": reveal_access,
-            "prefer_receptacle_outcome": receptacle_outcome,
-            "prefer_future_use_outcome": future_use and not final_placement,
-            "prefer_final_placement": final_placement,
-            "prefer_hand_free_next_action": hand_free and (immediate or future_use),
-            "prefer_safety_or_spill": safety_or_spill,
-        }
-
     def _action_intent_peak_probe_window(
         self,
         *,
@@ -2747,18 +2701,31 @@ class GraphAgentPlanner:
         peak_end = latest_followup_end if latest_followup_end is not None else action_end + max(4.0, float(window_s))
         if peak_end <= peak_start + 0.2:
             peak_end = peak_start + max(2.5, float(window_s))
-        needed_profile = self._action_intent_needed_observation_profile(state=state)
+        latest_result = self._latest_successful_action_intent_result(state)
+        mixed_temporal_horizon = self._action_intent_pair_spans_immediate_and_later_outcomes(
+            state=state,
+            result=latest_result if latest_result else None,
+        ) or (not latest_result and self._action_intent_initial_pair_spans_immediate_and_later_outcomes(state))
         if self._action_intent_prefers_followup_state_change_only(state):
             peak_start = max(0.0, action_end - 0.15)
             peak_end = max(peak_end, action_end + 5.5)
-        elif needed_profile["prefer_mixed_horizon"]:
+        elif mixed_temporal_horizon:
             peak_start = max(0.0, action_end - 0.15)
             peak_end = max(peak_end, action_end + 6.2)
-        elif self._action_intent_prefers_result_driven_followup(state) and not (
-            needed_profile["prefer_future_use_outcome"] or needed_profile["prefer_final_placement"]
-        ):
+        elif self._action_intent_prefers_result_driven_followup(state):
             peak_start = max(0.0, action_start - 0.2)
             peak_end = max(peak_end, action_end + 6.0)
+        window_level = self._search_window_level(state)
+        if window_level == 1:
+            peak_end = max(
+                peak_end,
+                action_end + self._action_intent_close_call_followup_window(state, profile="pairwise"),
+            )
+        elif window_level >= 2:
+            peak_end = max(
+                peak_end,
+                action_end + self._action_intent_close_call_followup_window(state, profile="future_use"),
+            )
         return peak_start, peak_end
 
     def _action_intent_should_try_peak_guided_followup(
@@ -2791,6 +2758,9 @@ class GraphAgentPlanner:
         focus: str,
     ) -> PlannerDecision | None:
         if not self._action_intent_should_try_peak_guided_followup(state=state, result=last_result):
+            return None
+        support_text = self._action_intent_result_support_text(last_result)
+        if "enough post-action coverage to run pairwise outcome resolution" in support_text:
             return None
         if str(last_tool.get("tool") or "") == "detect_audio_peaks" and isinstance(last_result, dict):
             peaks = last_result.get("peaks") or []
@@ -2834,7 +2804,6 @@ class GraphAgentPlanner:
     def _action_intent_prefers_dense_near_followup(self, state: AgentState) -> bool:
         if not self._is_action_intent_task(state):
             return False
-        needed_profile = self._action_intent_needed_observation_profile(state=state)
         bias_profile = self._action_intent_timeline_review_bias_profile(state)
         if (
             bias_profile["revealed_target_retrieval"]
@@ -2842,13 +2811,6 @@ class GraphAgentPlanner:
             or bias_profile["revealed_fixture_enablement"]
             or bias_profile["hand_free_next_action"]
             or bias_profile["immediate_transition_focus"]
-        ):
-            return True
-        if (
-            needed_profile["prefer_dense_near"]
-            or needed_profile["prefer_mixed_horizon"]
-            or needed_profile["prefer_reveal_access"]
-            or needed_profile["prefer_safety_or_spill"]
         ):
             return True
         question_text = str(getattr(state, "question", "") or "").lower()
@@ -2879,6 +2841,8 @@ class GraphAgentPlanner:
             )
         ):
             return True
+        if self._action_intent_prefers_followup_state_change_only(state):
+            return True
         return any(
             token in question_text
             for token in (
@@ -2895,11 +2859,8 @@ class GraphAgentPlanner:
     def _action_intent_prefers_result_driven_followup(self, state: AgentState) -> bool:
         if not self._is_action_intent_task(state):
             return False
-        needed_profile = self._action_intent_needed_observation_profile(state=state)
         bias_profile = self._action_intent_timeline_review_bias_profile(state)
         if bias_profile["next_use_unclear"] or bias_profile["final_location_unclear"]:
-            return True
-        if needed_profile["prefer_future_use_outcome"] or needed_profile["prefer_final_placement"]:
             return True
         question_text = str(getattr(state, "question", "") or "").lower()
         timeline_text = self._action_intent_timeline_review_text(state)
@@ -2941,9 +2902,16 @@ class GraphAgentPlanner:
     def _action_intent_prefers_followup_state_change_only(self, state: AgentState) -> bool:
         if not self._is_action_intent_task(state):
             return False
+        primary_gap = self._action_intent_primary_gap(state)
+        if isinstance(primary_gap, dict) and str(primary_gap.get("gap_type") or "").strip() in {
+            "future_outcome",
+            "relation_confirmation",
+            "target_discovery",
+        }:
+            return False
         bias_profile = self._action_intent_timeline_review_bias_profile(state)
-        if bias_profile["state_change_focus"] and not (
-            bias_profile["next_use_unclear"] or bias_profile["final_location_unclear"]
+        if bool(bias_profile.get("state_change_focus")) and not (
+            bool(bias_profile.get("next_use_unclear")) or bool(bias_profile.get("final_location_unclear"))
         ):
             return True
         question_text = str(getattr(state, "question", "") or "").lower()
@@ -2979,9 +2947,18 @@ class GraphAgentPlanner:
         )
 
     def _action_intent_prefers_specialized_open_question_recovery(self, state: AgentState) -> bool:
+        if self._action_intent_disable_legacy_specialized_recovery(state):
+            return False
         if not self._is_action_intent_task(state):
             return False
-        if self._action_intent_pending_resolution_tool(state):
+        primary_gap = self._action_intent_primary_gap(state)
+        if isinstance(primary_gap, dict) and str(primary_gap.get("gap_type") or "").strip() in {
+            "precondition",
+            "immediate_outcome",
+            "future_outcome",
+            "relation_confirmation",
+            "target_discovery",
+        }:
             return True
         latest_result = self._latest_successful_action_intent_result(state)
         if latest_result:
@@ -2998,6 +2975,17 @@ class GraphAgentPlanner:
             return True
         return self._action_intent_prefers_followup_state_change_only(state)
 
+    def _action_intent_structured_specialized_recovery_tool(self, state: AgentState) -> str:
+        if not self._is_action_intent_task(state):
+            return ""
+        if not self._should_continue_search_from_sufficiency(state):
+            return ""
+        latest_result = self._latest_successful_action_intent_result(state)
+        if not isinstance(latest_result, dict) or latest_result.get("best_index") is None:
+            if not self._action_intent_has_explicit_pending_resolution_marker(state):
+                return ""
+        return self._action_intent_resolution_mode(state)
+
     def _action_intent_candidate_inference_frames(
         self,
         *,
@@ -3008,8 +2996,13 @@ class GraphAgentPlanner:
         if not self._is_action_intent_task(state):
             return []
         latest_result = self._latest_successful_action_intent_result(state)
+        structured_specialized_tool = self._action_intent_structured_specialized_recovery_tool(state)
+        primary_gap = self._action_intent_primary_gap(state)
+        gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
         include_followup = (
             bool(self._action_intent_pending_resolution_tool(state))
+            or bool(structured_specialized_tool)
+            or gap_type in {"future_outcome", "relation_confirmation", "target_discovery"}
             or self._action_intent_followup_attempt_count(state) > 0
             or self._action_intent_has_transition_followup_frames(state)
             or self._action_intent_has_peak_guided_followup_frames(state)
@@ -3025,7 +3018,32 @@ class GraphAgentPlanner:
         )
 
     def _action_intent_initial_followup_budget(self, state: AgentState) -> int:
-        return 2 if self._action_intent_prefers_result_driven_followup(state) else 1
+        base_budget = 2 if self._action_intent_prefers_result_driven_followup(state) else 1
+        window_level = self._search_window_level(state)
+        return min(3, base_budget + max(0, window_level))
+
+    def _action_intent_extra_followup_budget(self, state: AgentState) -> int:
+        return min(3, self._action_intent_initial_followup_budget(state) + 1)
+
+    def _action_intent_close_call_followup_window(self, state: AgentState, *, profile: str) -> float:
+        window_level = self._search_window_level(state)
+        if profile == "pairwise":
+            if window_level >= 2:
+                return 8.0
+            if window_level == 1:
+                return 6.8
+            return 6.0
+        if profile == "post_action":
+            if window_level >= 2:
+                return 9.5
+            if window_level == 1:
+                return 9.0
+            return 8.5
+        if window_level >= 2:
+            return 9.0
+        if window_level == 1:
+            return 8.6
+        return 8.0
 
     def _action_intent_should_preempt_initial_followup_with_transition(
         self,
@@ -3044,86 +3062,67 @@ class GraphAgentPlanner:
             return False
         if self._action_intent_transition_probe_window(state=state, hints=hints, result=result) is None:
             return False
-        needed_profile = self._action_intent_needed_observation_profile(state=state, result=result)
-        if not needed_profile["prefer_receptacle_outcome"]:
-            question_text = str(getattr(state, "question", "") or "").lower()
-            support_text = self._action_intent_result_support_text(result)
-            needed_observation = str(result.get("needed_observation") or "").lower()
-            combined_text = f"{support_text} {needed_observation}"
-            state_change_markers = (
-                "display",
-                "turns on",
-                "turned on",
-                "turn on",
-                "reset",
-                "resets",
-                "zero",
-                "0",
-                "tare",
-                "readout",
-                "显示",
-                "归零",
-                "开机",
-            )
-            towel_like = any(
-                token in question_text
-                for token in ("paper towel", "tea towel", "dish cloth", "cloth", "towel", "napkin", "hand towel")
-            )
-            towel_transport_action = towel_like and any(
-                token in question_text
-                for token in ("<pick up ", "<grab ", "<lift ", "<take ", "<move ", "<shift ")
-            )
-            candidate_indices = self._latest_action_intent_candidate_indices(state, result=result)
-            profile = action_intent_conflict_profile(
-                question=str(getattr(state, "question", "") or ""),
-                choices=[str(choice) for choice in getattr(state, "choices", [])],
-                indices=candidate_indices if len(candidate_indices) >= 2 else None,
-            )
-            active_categories = set(profile["active_categories"])
-            transport_vs_use = towel_transport_action and "clean_dry" in active_categories and bool(
-                active_categories & {"generic_relocation", "final_place_return"}
-            )
-            explicit_need_more = (
-                bool(result.get("need_more_evidence"))
-                or bool(result.get("ambiguity"))
-                or bool(result.get("need_future_evidence"))
-                or "whether" in needed_observation
-                or "是否" in needed_observation
-            )
-            transport_markers = (
-                "applied to the hands",
-                "applied to the hand",
-                "hand area",
-                "hands after pickup",
-                "wipe",
-                "wiping",
-                "dry hand",
-                "dry hands",
-                "set down",
-                "put away",
-                "placed on the counter",
-                "placed on the worktop",
-                "later use",
-                "counter",
-                "worktop",
-                "left on the side",
-                "手上",
-                "擦手",
-                "擦台面",
-                "放到台面",
-                "放回",
-            )
-            if explicit_need_more and needed_profile["prefer_state_change_only"] and any(
-                marker in combined_text for marker in state_change_markers
-            ):
-                return True
-            if explicit_need_more and transport_vs_use and any(marker in combined_text for marker in transport_markers):
-                return True
-            return False
+        primary_gap = self._action_intent_primary_gap(state)
+        if (
+            isinstance(primary_gap, dict)
+            and str(primary_gap.get("gap_type") or "").strip() == "immediate_outcome"
+            and not self._action_intent_result_has_direct_post_action_evidence(result)
+        ):
+            return True
+        support_text = self._action_intent_result_support_text(result)
+        explicit_need_more = (
+            bool(result.get("need_more_evidence"))
+            or bool(result.get("ambiguity"))
+            or bool(result.get("need_future_evidence"))
+        )
+        receptacle_markers = (
+            "sink",
+            "crumb",
+            "residue",
+            "drop",
+            "fall",
+            "release",
+            "碎屑",
+            "残渣",
+            "掉",
+            "落",
+        )
+        bias_profile = self._action_intent_timeline_review_bias_profile(state)
+        if explicit_need_more and self._action_intent_prefers_followup_state_change_only(state):
+            return True
+        if explicit_need_more and self._action_intent_result_has_immediate_post_action_uncertainty(result):
+            return True
+        if explicit_need_more and (
+            bool(bias_profile.get("hand_free_next_action"))
+            or bool(bias_profile.get("immediate_transition_focus"))
+        ):
+            return True
+        hand_free_transition_markers = (
+            "applied to the hands",
+            "dry hands",
+            "wipe the hands",
+            "set down for later use",
+            "free the right hand",
+            "free the left hand",
+            "right hand",
+            "left hand",
+            "另一只手",
+            "右手",
+            "左手",
+            "擦手",
+        )
+        if explicit_need_more and self._action_intent_has_next_use_followup_gap(state=state, result=result) and any(
+            marker in support_text for marker in hand_free_transition_markers
+        ):
+            return True
+        if explicit_need_more and any(marker in support_text for marker in receptacle_markers):
+            return True
         if self._action_intent_result_has_direct_post_action_evidence(result):
             return False
-        support_text = self._action_intent_result_support_text(result)
-        needed_observation = str(result.get("needed_observation") or "").lower()
+        support_text = " ".join(
+            str((result or {}).get(key) or "")
+            for key in ("reason", "decisive_observation", "direct_effect", "downstream_action")
+        ).strip().lower()
         uncertainty_markers = (
             "still unclear",
             "unclear",
@@ -3135,44 +3134,228 @@ class GraphAgentPlanner:
             "看不清",
             "不明确",
         )
-        receptacle_markers = (
-            "sink",
-            "pan",
-            "pot",
-            "bowl",
-            "container",
-            "crumb",
-            "residue",
-            "drop",
-            "fall",
-            "release",
-            "碎屑",
-            "残渣",
-            "掉",
-            "落",
-        )
-        if any(marker in needed_observation for marker in receptacle_markers):
-            return True
-        return (
-            (
-                bool(result.get("need_more_evidence"))
-                or bool(result.get("ambiguity"))
-                or bool(result.get("need_future_evidence"))
-            )
-            and any(marker in support_text for marker in uncertainty_markers)
-        )
+        return False
 
     def _action_intent_pending_resolution_tool(self, state: AgentState) -> str:
+        return self._action_intent_resolution_mode(state, include_memory_marker=True)
+
+    def _action_intent_resolution_mode(
+        self,
+        state: AgentState,
+        *,
+        include_memory_marker: bool = False,
+    ) -> str:
+        if not self._is_action_intent_task(state):
+            return ""
+        primary_gap = self._action_intent_primary_gap(state)
+        gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
+        gap_source = str(primary_gap.get("source") or "").strip() if isinstance(primary_gap, dict) else ""
+        if gap_type == "future_outcome" and gap_source != "sufficiency_missing_gap_types":
+            return "resolve_action_intent_future_use"
+        latest_result = self._latest_successful_action_intent_result(state)
+        if isinstance(latest_result, dict) and latest_result.get("best_index") is not None:
+            if self._action_intent_pair_needs_outcome_resolution(state=state, result=latest_result):
+                return "resolve_action_intent_pairwise"
+            if self._action_intent_needs_future_use_evidence(state=state, result=latest_result):
+                return "resolve_action_intent_future_use"
+        if include_memory_marker:
+            latest_result_for_marker = latest_result if isinstance(latest_result, dict) else None
+            latest = self._state_latest_verification(state)
+            decision = latest.get("sufficiency_decision")
+            missing_gap_types: list[str] = []
+            if isinstance(decision, dict):
+                missing_gap_types = [
+                    str(item).strip()
+                    for item in decision.get("missing_gap_types", [])
+                    if isinstance(item, str) and str(item).strip()
+                ]
+            for item in reversed(list(getattr(state, "working_memory", []))):
+                if not isinstance(item, str):
+                    continue
+                match = re.search(r"action_intent_pending_resolution=(\w+)", item)
+                if not match:
+                    continue
+                tool = match.group(1)
+                if tool == "resolve_action_intent_future_use" and (
+                    self._action_intent_needs_future_use_evidence(state=state, result=latest_result_for_marker)
+                    or gap_type == "future_outcome"
+                    or "future_outcome" in missing_gap_types
+                ):
+                    return tool
+                if tool == "resolve_action_intent_pairwise" and (
+                    self._action_intent_pair_needs_outcome_resolution(state=state, result=latest_result_for_marker)
+                    or gap_type in {"relation_confirmation", "target_discovery"}
+                    or bool({"relation_confirmation", "target_discovery"} & set(missing_gap_types))
+                ):
+                    return tool
+        return ""
+
+    def _action_intent_has_explicit_pending_resolution_marker(self, state: AgentState) -> bool:
         for item in reversed(list(getattr(state, "working_memory", []))):
             if not isinstance(item, str):
                 continue
-            match = re.search(r"action_intent_pending_resolution=(\w+)", item)
-            if not match:
-                continue
-            tool = match.group(1)
-            if tool in {"resolve_action_intent_pairwise", "resolve_action_intent_future_use"}:
-                return tool
-        return ""
+            if re.search(r"action_intent_pending_resolution=(\w+)", item):
+                return True
+        return False
+
+    def _resume_action_intent_specialized_resolution_from_followup_artifacts(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        last_tool: dict[str, Any],
+        last_result: dict[str, Any],
+    ) -> PlannerDecision | None:
+        if (
+            not isinstance(last_result, dict)
+            or last_tool.get("tool") not in {"sample_sparse_frames", "extract_frames_for_range", "retrieve_cached_artifacts", "sample_frames_around_peaks"}
+            or not self._is_action_intent_task(state)
+            or not state.retrieved_frames
+        ):
+            return None
+        transition_peak_probe = self._build_action_intent_peak_probe_after_transition_decision(
+            state=state,
+            last_tool=last_tool,
+            result=self._latest_successful_action_intent_result(state),
+        )
+        if transition_peak_probe is not None:
+            return transition_peak_probe
+        if (
+            self._action_intent_needs_precondition_context(state=state, result=None)
+            and not self._action_intent_has_precondition_frames(state=state, hints=hints)
+        ):
+            precondition = self._build_action_intent_precondition_sampling_decision(
+                state=state,
+                hints=hints,
+                focus="precondition_before_action_intent_resolution",
+            )
+            if precondition is not None:
+                return precondition
+        return None
+
+    def _resume_action_intent_specialized_resolution_from_timeline_review(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        timeline_review_result: dict[str, Any],
+    ) -> PlannerDecision | None:
+        if not self._action_intent_is_timeline_review_payload(timeline_review_result):
+            return None
+        latest_intent = self._latest_successful_action_intent_result(state)
+        timeline_review_context = latest_intent if isinstance(latest_intent, dict) and latest_intent else timeline_review_result
+        resolution_mode = self._action_intent_resolution_mode(state, include_memory_marker=True)
+        if self._action_intent_timeline_review_needs_more_evidence(timeline_review_result):
+            primary_gap = self._action_intent_primary_gap(state)
+            gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
+            primary_gap_source = str(primary_gap.get("source") or "").strip() if isinstance(primary_gap, dict) else ""
+            bias_profile = self._action_intent_timeline_review_bias_profile(state)
+            if (
+                bias_profile["next_use_unclear"]
+                and not bias_profile["final_location_unclear"]
+                and not self._latest_action_intent_long_horizon_nodes(state)
+                and self._action_intent_followup_attempt_count(state) < self._action_intent_extra_followup_budget(state)
+            ):
+                extra_followup = self._build_action_intent_extra_followup_sampling_decision(
+                    state=state,
+                    hints=hints,
+                    focus="timeline_review_requested_more_evidence",
+                    window_s=6.0,
+                )
+                if extra_followup is not None:
+                    return PlannerDecision(
+                        thought="why 题短时序复核明确说仍有多个解释成立；继续向后补更远一点的结果帧，再决定动作真实目的。",
+                        tool=extra_followup.tool,
+                        args=extra_followup.args,
+                        done=extra_followup.done,
+                        answer=extra_followup.answer,
+                        prediction=extra_followup.prediction,
+                        confidence=extra_followup.confidence,
+                    )
+            if (
+                gap_type in {"future_outcome", "relation_confirmation", "target_discovery"}
+                and primary_gap_source in {"verification_gap", "resolution_followup_gap", "verifier"}
+            ):
+                cached_revisit = self._build_action_intent_cached_long_horizon_revisit_decision(
+                    state=state,
+                    hints=hints,
+                    thought="why 题局部 timeline review 之后仍是 close call；若已有可复用的长时域对象轨迹缓存，优先沿缓存继续追更晚证据。",
+                )
+                if cached_revisit is not None:
+                    return cached_revisit
+            if bool(timeline_review_result.get("needs_more_evidence")) and gap_type in {
+                "future_outcome",
+                "relation_confirmation",
+                "target_discovery",
+            }:
+                gap_routed_recovery = self._recover_action_intent_via_primary_gap(
+                    state=state,
+                    hints=hints,
+                    result=timeline_review_context,
+                    blocker_hint="timeline_review_requested_more_evidence",
+                    primary_gap=primary_gap,
+                )
+                if gap_routed_recovery is not None:
+                    if gap_routed_recovery.tool in {"query_object", "query_spatial_context"}:
+                        self._state_add_memory(
+                            state,
+                            (
+                                "planner_guard=timeline_review_prefers_primary_gap_long_horizon="
+                                f"{gap_routed_recovery.tool}"
+                            ),
+                        )
+                    return gap_routed_recovery
+            long_horizon_revisit = self._build_action_intent_cached_long_horizon_revisit_decision(
+                state=state,
+                hints=hints,
+                thought="why 题在当前长时域关键帧上仍有多个 plausible 解释；继续沿目标对象更晚的再次出现位置向后追，确认它到底被放回、继续使用，还是只是暂时移开。",
+            )
+            if long_horizon_revisit is not None:
+                return long_horizon_revisit
+            transition_probe = self._build_action_intent_transition_probe_decision(
+                state=state,
+                hints=hints,
+                result=timeline_review_context,
+                thought="why 题短时序复核已经明确当前仍有多种解释；先在动作尾部和紧随其后的短窗口主动密采样关键帧，优先寻找能立刻排除竞争目的的决定性瞬间。",
+            )
+            if transition_probe is not None:
+                return transition_probe
+            if self._action_intent_followup_attempt_count(state) < self._action_intent_extra_followup_budget(state):
+                extra_followup = self._build_action_intent_extra_followup_sampling_decision(
+                    state=state,
+                    hints=hints,
+                    focus="timeline_review_requested_more_evidence",
+                    window_s=6.0,
+                )
+                if extra_followup is not None:
+                    return PlannerDecision(
+                        thought="why 题短时序复核明确说仍有多个解释成立；继续向后补更远一点的结果帧，再决定动作真实目的。",
+                        tool=extra_followup.tool,
+                        args=extra_followup.args,
+                        done=extra_followup.done,
+                        answer=extra_followup.answer,
+                        prediction=extra_followup.prediction,
+                        confidence=extra_followup.confidence,
+                    )
+        action_frames = self._select_action_intent_frames(
+            state,
+            hints,
+            limit=8,
+            include_followup=True,
+            require_current_scope=True,
+        )
+        if action_frames:
+            return PlannerDecision(
+                thought="why 题已完成短时序复核；先把当前 segment、followup、transition 等原始证据重新汇总，再做一次 observation-first 的动作目的判断。",
+                tool="infer_action_intent",
+                args={
+                    "question": state.question,
+                    "choices": [str(choice) for choice in state.choices],
+                    "image_paths": action_frames,
+                    "context_notes": self._action_intent_context_notes(state, limit=12),
+                },
+            )
+        return None
 
     def _action_intent_resolution_needs_more_evidence(self, *, tool_name: str, result: dict[str, Any]) -> bool:
         if bool(result.get("need_more_evidence")):
@@ -3203,7 +3386,11 @@ class GraphAgentPlanner:
         )
         if any(term in text for term in hard_uncertainty_terms):
             return True
-        if tool_name == "resolve_action_intent_future_use" and not decisive.strip() and confidence < 0.85:
+        if (
+            not decisive.strip()
+            and self._action_intent_result_points_to_later_outcome_uncertainty(result)
+            and confidence < 0.85
+        ):
             return True
         if confidence < 0.78 and any(term in text for term in weak_missing_terms):
             return True
@@ -3220,31 +3407,11 @@ class GraphAgentPlanner:
             return False
         if self._action_intent_has_precondition_frames(state=state, hints=hints):
             return False
-        question_text = str(getattr(state, "question", "") or "").lower()
         text = " ".join(
             str(result.get(key) or "")
-            for key in ("reason", "decisive_observation", "needed_observation", "answer")
+            for key in ("reason", "decisive_observation")
         ).lower()
-        if any(token in question_text for token in ("<tap kitchen scale>", "tap kitchen scale")) and any(
-            term in text
-            for term in (
-                "before the tap",
-                "before tapping",
-                "already on",
-                "already lit",
-                "display was already lit",
-                "scale was already on",
-                "container was already on the scale",
-                "container already on the scale",
-                "bowl already on the scale",
-                "按之前",
-                "点击前",
-                "已经亮",
-                "已经开机",
-                "容器已经在秤上",
-                "碗已经在秤上",
-            )
-        ):
+        if self._action_intent_precondition_dependency_is_observation_grounded(state=state, result=result):
             return True
         if not self._action_intent_needs_precondition_context(state=state, result=result):
             return False
@@ -3352,25 +3519,43 @@ class GraphAgentPlanner:
     ) -> PlannerDecision | None:
         if not self._is_action_intent_task(state):
             return None
+        blocker_hint = self._action_intent_verifier_blocker_hint(state)
+        primary_gap = self._action_intent_primary_gap(state)
+        prefers_future_profile = self._action_intent_recovery_prefers_future_profile(
+            state=state,
+            blocker_hint=blocker_hint,
+            primary_gap=primary_gap,
+            payload=result,
+        )
+        try:
+            confidence = float(result.get("confidence") or 0.0)
+        except Exception:  # noqa: BLE001
+            confidence = 0.0
+        decisive_observation = str(result.get("decisive_observation") or "").strip()
+        missing_profile_grounding = prefers_future_profile and (confidence < 0.84 or not decisive_observation)
         if not (
             self._action_intent_resolution_needs_more_evidence(tool_name=tool_name, result=result)
             or self._action_intent_result_is_weak_generic_claim(state=state, result=result)
             or self._action_intent_result_is_workspace_or_final_placement_close_call(state=state, result=result)
+            or missing_profile_grounding
         ):
             return None
-        if tool_name == "resolve_action_intent_future_use":
+        if (
+            prefers_future_profile
+            and self._action_intent_reveal_conflict_subtype(state=state, result=result) == "revealed_target_retrieval"
+            and self._latest_action_intent_long_horizon_nodes(state)
+        ):
+            return None
+        if prefers_future_profile:
             thought = (
-                "why 题后续用途专用裁决仍缺决定性动作后证据；先围绕动作尾部后的短窗口主动补关键帧，"
-                "确认是否真的出现称重、倒空、检查、放回或具体下游使用。"
+                "why 题当前更晚结果或最终落点仍缺决定性观测；先围绕动作尾部后的短窗口主动补关键帧，"
+                "确认是否真的出现下游使用、最终归位或明确目标变化。"
             )
         else:
             thought = (
-                "why 题二选一后果裁决仍缺决定性结果证据；先围绕动作尾部后的短窗口主动补关键帧，"
-                "确认是否真的出现取后方物体、腾空间后的下一步、最终归位或直接物理效果。"
+                "why 题当前近窗结果仍缺决定性观测；先围绕动作尾部后的短窗口主动补关键帧，"
+                "确认是否真的出现直接物理效果、状态变化或明确后续动作。"
             )
-        needed = str(result.get("needed_observation") or "").strip()
-        if needed:
-            thought = f"{thought} needed_observation={needed}"
         transition_probe = self._build_action_intent_transition_probe_decision(
             state=state,
             hints=hints,
@@ -3381,7 +3566,7 @@ class GraphAgentPlanner:
             return transition_probe
         if self._action_intent_has_transition_followup_frames(state):
             return None
-        if self._action_intent_result_has_direct_post_action_evidence(result):
+        if self._action_intent_result_has_direct_post_action_evidence(result) and not missing_profile_grounding:
             return None
         probe_window = self._action_intent_transition_probe_window(state=state, hints=hints, result=result)
         if probe_window is None:
@@ -3400,92 +3585,10 @@ class GraphAgentPlanner:
         )
 
     def _latest_action_intent_candidate_indices(self, state: AgentState, result: dict[str, Any] | None = None) -> list[int]:
-        indices: list[int] = []
-        if isinstance(result, dict):
-            for value in result.get("candidate_indices") or []:
-                try:
-                    index = int(value)
-                except Exception:  # noqa: BLE001
-                    continue
-                if 0 <= index < len(state.choices) and index not in indices:
-                    indices.append(index)
-            for key in ("best_index", "second_best_index"):
-                try:
-                    index = int(result.get(key))
-                except Exception:  # noqa: BLE001
-                    continue
-                if 0 <= index < len(state.choices) and index not in indices:
-                    indices.append(index)
-        latest_trace = state.tool_trace[-1] if state.tool_trace else {}
-        latest_raw = latest_trace.get("raw_result") if isinstance(latest_trace, dict) else {}
-        if not indices and isinstance(latest_raw, dict):
-            for value in latest_raw.get("candidate_indices") or []:
-                try:
-                    index = int(value)
-                except Exception:  # noqa: BLE001
-                    continue
-                if 0 <= index < len(state.choices) and index not in indices:
-                    indices.append(index)
-            for key in ("best_index", "second_best_index"):
-                try:
-                    index = int(latest_raw.get(key))
-                except Exception:  # noqa: BLE001
-                    continue
-                if 0 <= index < len(state.choices) and index not in indices:
-                    indices.append(index)
-        if (
-            not indices
-            and isinstance(latest_trace, dict)
-            and isinstance(latest_raw, dict)
-            and latest_raw.get("tool_failed")
-            and latest_trace.get("tool") in {"resolve_action_intent_pairwise", "resolve_action_intent_future_use"}
-        ):
-            args = latest_trace.get("args") or {}
-            if isinstance(args, dict):
-                for value in args.get("candidate_indices") or []:
-                    try:
-                        index = int(value)
-                    except Exception:  # noqa: BLE001
-                        continue
-                    if 0 <= index < len(state.choices) and index not in indices:
-                        indices.append(index)
-        for index in self._action_intent_pending_candidate_indices(state):
-            if index not in indices:
-                indices.append(index)
-        for item in reversed(list(getattr(state, "working_memory", []))):
-            if not isinstance(item, str):
-                continue
-            if item.startswith("action_intent_best_index="):
-                match = re.search(r"action_intent_best_index=(\d+)", item)
-                if match:
-                    index = int(match.group(1))
-                    if 0 <= index < len(state.choices) and index not in indices:
-                        indices.append(index)
-            if item.startswith("action_intent_second_best_index="):
-                match = re.search(r"action_intent_second_best_index=(\d+)", item)
-                if match:
-                    index = int(match.group(1))
-                    if 0 <= index < len(state.choices) and index not in indices:
-                        indices.append(index)
-            if len(indices) >= len(state.choices):
-                break
-        return indices
+        return []
 
     def _action_intent_pending_candidate_indices(self, state: AgentState) -> list[int]:
-        indices: list[int] = []
-        for item in reversed(list(getattr(state, "working_memory", []))):
-            if not isinstance(item, str) or not item.startswith("action_intent_pending_candidates="):
-                continue
-            for match in re.finditer(r"\d+", item):
-                try:
-                    index = int(match.group(0))
-                except Exception:  # noqa: BLE001
-                    continue
-                if 0 <= index < len(getattr(state, "choices", [])) and index not in indices:
-                    indices.append(index)
-            if indices:
-                break
-        return indices
+        return []
 
     def _action_intent_pair_needs_outcome_resolution(
         self,
@@ -3495,6 +3598,8 @@ class GraphAgentPlanner:
         candidate_indices: list[int] | None = None,
     ) -> bool:
         if not self._is_action_intent_task(state):
+            return False
+        if self._action_intent_result_points_to_later_outcome_uncertainty(result):
             return False
         if self._action_intent_result_has_direct_post_action_evidence(result) and not self._action_intent_direct_evidence_still_needs_resolution(
             state=state,
@@ -3507,62 +3612,19 @@ class GraphAgentPlanner:
             state=state,
             result=result,
             candidate_indices=indices,
+            allow_resolution_markers=False,
         )
         if needs_followup and resolver == "pairwise":
             return True
         if needs_followup and resolver == "future_use":
             return False
-        if len(indices) < 2:
-            return False
-        if action_intent_needs_pairwise_resolution(
-            question=str(getattr(state, "question", "") or ""),
-            choices=[str(choice) for choice in getattr(state, "choices", [])],
-            indices=indices,
-        ):
-            return True
-        question_text = str(getattr(state, "question", "") or "").lower()
-        action_terms = (
-            "move ",
-            "moved ",
-            "shift ",
-            "clear ",
-            "put ",
-            "place ",
-            "pick up",
-            "take out",
-            "remove ",
-            "open ",
-            "close ",
-        )
-        if not any(term in question_text for term in action_terms):
-            return False
-        choice_texts = [
-            str(state.choices[index]).lower()
-            for index in indices
-            if 0 <= index < len(getattr(state, "choices", []))
-        ]
-        if len(choice_texts) < 2:
-            return False
-        outcome_terms = (
-            "make space",
-            "space",
-            "access",
-            "behind",
-            "clear the way",
-            "right place",
-            "put back",
-            "put",
-            "place",
-            "pick up",
-            "remove",
-            "rearrange",
-        )
-        hit_count = sum(1 for text in choice_texts if any(term in text for term in outcome_terms))
-        joined = " | ".join(choice_texts)
-        return hit_count >= 2 or (
-            hit_count >= 1
-            and any(pair_left in joined and pair_right in joined for pair_left, pair_right in (("behind", "space"), ("access", "space"), ("right place", "space")))
-        )
+        primary_gap = self._action_intent_primary_gap(state)
+        gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
+        return gap_type in {
+            "immediate_outcome",
+            "state_transition_unconfirmed",
+            "workspace_change_unconfirmed",
+        }
 
     def _action_intent_needs_future_use_evidence(
         self,
@@ -3572,6 +3634,8 @@ class GraphAgentPlanner:
     ) -> bool:
         if not self._is_action_intent_task(state):
             return False
+        if self._action_intent_result_points_to_later_outcome_uncertainty(result):
+            return True
         if self._action_intent_result_has_direct_post_action_evidence(result) and not self._action_intent_direct_evidence_still_needs_resolution(
             state=state,
             result=result,
@@ -3582,66 +3646,15 @@ class GraphAgentPlanner:
             state=state,
             result=result,
             candidate_indices=candidate_indices,
+            allow_resolution_markers=False,
         )
         if needs_followup and resolver == "future_use":
             return True
         if needs_followup and resolver == "pairwise":
             return False
-        if action_intent_needs_future_use_resolution(
-            question=str(getattr(state, "question", "") or ""),
-            choices=[str(choice) for choice in getattr(state, "choices", [])],
-            indices=candidate_indices if len(candidate_indices) >= 2 else None,
-        ):
-            return True
-        question_text = str(getattr(state, "question", "") or "").lower()
-        manipulation_terms = (
-            "pick up",
-            "picked up",
-            "pick ",
-            "lift ",
-            "lifted ",
-            "take ",
-            "took ",
-            "transfer ",
-            "transferred ",
-            "carry ",
-            "carried ",
-            "grab ",
-            "grabbed ",
-        )
-        if not any(term in question_text for term in manipulation_terms):
-            return False
-        use_terms = (
-            "weigh",
-            "measure",
-            "use ",
-            "serve",
-            "empty",
-            "drain",
-            "pour",
-            "check",
-            "retrieve",
-            "get ",
-            "fill",
-            "wash",
-            "clean",
-            "dry",
-            "record",
-            "scan",
-            "put ",
-            "place ",
-            "return",
-            "close",
-            "open",
-            "turn",
-            "mix",
-            "stir",
-        )
-        choices = [str(choice).lower() for choice in getattr(state, "choices", [])]
-        matched_choices = [choice for choice in choices if any(term in choice for term in use_terms)]
-        if len(matched_choices) < 2:
-            return False
-        return True
+        primary_gap = self._action_intent_primary_gap(state)
+        gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
+        return gap_type in {"future_outcome", "relation_confirmation", "target_discovery"}
 
     def _build_action_intent_pairwise_resolution_decision(
         self,
@@ -3652,10 +3665,11 @@ class GraphAgentPlanner:
         thought: str = "why 题存在动作后果型歧义，改为只在前两名候选之间结合结果帧裁决。",
     ) -> PlannerDecision | None:
         candidate_indices = self._action_intent_pairwise_candidate_indices(state=state, result=result)
+        frame_limit = self._action_intent_specialized_resolution_frame_limit(state)
         action_frames = self._select_action_intent_frames(
             state,
             hints,
-            limit=8,
+            limit=frame_limit,
             require_current_scope=True,
         )
         if len(candidate_indices) < 2 or not action_frames:
@@ -3668,16 +3682,15 @@ class GraphAgentPlanner:
         )
         if missing_followup is not None:
             return missing_followup
-        if self._action_intent_pairwise_requires_extended_followup(
+        if self._action_intent_pairwise_needs_more_post_action_coverage(
             state=state,
             hints=hints,
             result=result,
-            candidate_indices=candidate_indices,
         ):
             extra_followup = self._build_action_intent_extra_followup_sampling_decision(
                 state=state,
                 hints=hints,
-                focus="hidden_access_pairwise_outcome_resolution",
+                focus="pairwise_post_action_coverage_extension",
                 window_s=8.0,
             )
             if extra_followup is not None:
@@ -3695,6 +3708,80 @@ class GraphAgentPlanner:
             },
         )
 
+    def _action_intent_pairwise_observation_focus(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        result: dict[str, Any] | None = None,
+        phase: str,
+    ) -> str:
+        primary_gap = self._action_intent_primary_gap(state) if self._is_action_intent_task(state) else None
+        gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
+        missing_state_change_prereq = any(
+            isinstance(item, str)
+            and item.startswith("action_intent_resolution_withheld_for_missing_state_change_prereq=1")
+            for item in list(getattr(state, "working_memory", []))[-12:]
+        )
+        if phase == "precondition":
+            if missing_state_change_prereq:
+                return "verifier_blocked_missing_state_change_prereq"
+            if self._action_intent_resolution_should_backfill_precondition(
+                state=state,
+                hints=hints,
+                result=result or {},
+            ):
+                return "pairwise_precondition_context"
+            return "precondition_before_pairwise_followup"
+        if gap_type == "immediate_outcome":
+            return "pairwise_immediate_outcome_resolution"
+        if gap_type == "state_transition_unconfirmed":
+            return "pairwise_state_transition_resolution"
+        if gap_type == "relation_confirmation":
+            return "pairwise_relation_confirmation_resolution"
+        if gap_type == "workspace_change_unconfirmed":
+            return "pairwise_workspace_change_resolution"
+        if gap_type == "future_outcome":
+            return "pairwise_future_outcome_resolution"
+        return "pairwise_outcome_resolution"
+
+    def _action_intent_future_use_observation_focus(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        result: dict[str, Any] | None = None,
+        phase: str,
+    ) -> str:
+        primary_gap = self._action_intent_primary_gap(state) if self._is_action_intent_task(state) else None
+        gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
+        missing_state_change_prereq = any(
+            isinstance(item, str)
+            and item.startswith("action_intent_resolution_withheld_for_missing_state_change_prereq=1")
+            for item in list(getattr(state, "working_memory", []))[-12:]
+        )
+        if phase == "precondition":
+            if missing_state_change_prereq:
+                return "verifier_blocked_missing_state_change_prereq"
+            if self._action_intent_resolution_should_backfill_precondition(
+                state=state,
+                hints=hints,
+                result=result or {},
+            ):
+                return "future_use_precondition_context"
+            return "precondition_before_additional_followup"
+        if gap_type == "immediate_outcome":
+            return "future_use_immediate_outcome_resolution"
+        if gap_type == "state_transition_unconfirmed":
+            return "future_use_state_transition_resolution"
+        if gap_type == "relation_confirmation":
+            return "future_use_relation_confirmation_resolution"
+        if gap_type == "workspace_change_unconfirmed":
+            return "future_use_workspace_change_resolution"
+        if gap_type == "future_outcome":
+            return "future_use_outcome_resolution"
+        return "future_use_resolution"
+
     def _action_intent_pairwise_candidate_indices(
         self,
         *,
@@ -3702,210 +3789,69 @@ class GraphAgentPlanner:
         result: dict[str, Any] | None = None,
     ) -> list[int]:
         choices = [str(choice) for choice in getattr(state, "choices", [])]
+        if not choices:
+            return []
         indices = self._latest_action_intent_candidate_indices(state, result=result)
         if len(indices) < 2:
-            return indices
-        rescued_indices = self._action_intent_semantic_rescue_candidate_indices(
-            state=state,
-            indices=indices,
-            result=result,
-        )
-        if len(rescued_indices) >= 2:
-            indices = rescued_indices
-        timeline_text = self._action_intent_timeline_review_text(state)
-        if not timeline_text:
-            return indices
-        categories_by_index = selected_choice_categories(choices, indices)
-        prioritized_categories: set[str] = set()
-        if any(
-            token in timeline_text
-            for token in (
-                "free hand",
-                "freed hand",
-                "other hand",
-                "right hand",
-                "left hand",
-                "reach toward",
-                "tap area",
-                "sink area",
-                "turn on",
-                "turn off",
-                "open",
-                "close",
-                "露出",
-                "腾出",
-                "另一只手",
-                "龙头",
-                "水槽",
-            )
-        ):
-            prioritized_categories.update(
-                {
-                    "hand_free_enablement",
-                    "access_retrieve",
-                    "space_clear",
-                    "final_place_return",
-                    "generic_relocation",
-                    "open_close",
-                }
-            )
-        if any(
-            token in timeline_text
-            for token in (
-                "reveal",
-                "visible behind",
-                "behind",
-                "slot",
-                "put back",
-                "return",
-                "returned",
-                "make space",
-                "clear space",
-                "right place",
-                "露出",
-                "后面",
-                "空位",
-                "放回",
-            )
-        ):
-            prioritized_categories.update(
-                {
-                    "access_retrieve",
-                    "space_clear",
-                    "final_place_return",
-                    "generic_relocation",
-                }
-            )
-        if not prioritized_categories:
-            return indices
-        prioritized = [
-            index
-            for index in indices
-            if categories_by_index.get(index, set()) & prioritized_categories
-        ]
-        if len(prioritized) >= 2:
-            return prioritized[:2]
-        safety_pair = self._action_intent_pairwise_safety_space_candidate_indices(
-            state=state,
-            result=result,
-            indices=indices,
-        )
-        if safety_pair:
-            return safety_pair
+            indices = list(range(len(choices)))
         return indices
 
-    def _action_intent_pairwise_safety_space_candidate_indices(
-        self,
-        *,
-        state: AgentState,
-        result: dict[str, Any] | None,
-        indices: list[int],
-    ) -> list[int]:
-        if len(indices) < 2:
-            return []
-        question = str(getattr(state, "question", "") or "").lower()
-        if not any(token in question for token in ("move ", "pick up ", "shift ", "remove ", "lift ", "transfer ")):
-            return []
-        choices = [str(choice) for choice in getattr(state, "choices", [])]
-        full_categories = selected_choice_categories(choices, range(len(choices)))
-        current_categories = selected_choice_categories(choices, indices)
-        current_union = set().union(*(current_categories.get(index, set()) for index in indices))
-        if "safety_avoid" in current_union:
-            return []
-        if not current_union:
-            return []
-        allowed_current = {"space_clear", "final_place_return", "generic_relocation", "food_prep"}
-        if not current_union.issubset(allowed_current):
-            return []
-        safety_candidates = [
-            index
-            for index, categories in full_categories.items()
-            if "safety_avoid" in categories and index not in indices
-        ]
-        if not safety_candidates:
-            return []
-        if not any(
-            token in " ".join(choices[index].lower() for index in safety_candidates)
-            for token in ("burn", "burning", "hot", "stove", "hob", "spill", "烫", "烧焦")
-        ):
-            return []
-        timeline_text = self._action_intent_timeline_review_text(state)
-        reason_text = " ".join(
-            str((result or {}).get(key) or "")
-            for key in ("reason", "followup_focus")
-        )
-        combined_context = f"{reason_text} {timeline_text}".lower()
-        has_workspace_signal = any(
-            token in combined_context
-            for token in (
-                "crowded counter",
-                "prep area",
-                "chopping",
-                "prepping",
-                "workspace",
-                "counter",
-                "make space",
-                "worktop",
-                "crowded",
-                "备料",
-                "台面",
-                "切菜",
-                "腾空间",
-            )
-        )
-        has_safety_signal = any(
-            token in combined_context
-            for token in (
-                "hot stove",
-                "kitchen stove",
-                "burner",
-                "hob",
-                "heat",
-                "hot surface",
-                "too close to the stove",
-                "avoid burn",
-                "avoid burning",
-                "burn risk",
-                "spill risk",
-                "烫",
-                "热源",
-                "灶台",
-                "火边",
-                "烧焦",
-            )
-        )
-        if not has_workspace_signal and not has_safety_signal:
-            return []
-        best_index = indices[0]
-        safety_candidates.sort(key=lambda index: index)
-        return [best_index, safety_candidates[0]]
-
-    def _action_intent_pairwise_requires_extended_followup(
+    def _action_intent_pairwise_needs_more_post_action_coverage(
         self,
         *,
         state: AgentState,
         hints: dict[str, Any],
         result: dict[str, Any] | None = None,
-        candidate_indices: list[int] | None = None,
     ) -> bool:
         if not self._is_action_intent_task(state):
             return False
-        indices = candidate_indices or self._latest_action_intent_candidate_indices(state, result=result)
-        if len(indices) < 2:
+        if self._action_intent_result_has_direct_post_action_evidence(result):
             return False
-        profile = action_intent_conflict_profile(
-            question=str(getattr(state, "question", "") or ""),
-            choices=[str(choice) for choice in getattr(state, "choices", [])],
-            indices=indices,
+        support_text = self._action_intent_result_support_text(result)
+        if "enough post-action coverage to run pairwise outcome resolution" in support_text:
+            return False
+        support_text_lc = support_text.lower()
+        if any(
+            marker in support_text_lc
+            for marker in (
+                "free the right hand",
+                "free the left hand",
+                "free the hand",
+                "next manipulation",
+                "opened immediately",
+                "used shortly after for weighing",
+                "opened immediately or used shortly after",
+                "open the jar",
+                "weighing",
+                "right hand",
+                "left hand",
+            )
+        ):
+            return False
+        unresolved_post_action_markers = (
+            "still unclear",
+            "still contested",
+            "exact target use is still unclear",
+            "direct result right after",
+            "later hidden target is still unclear",
+            "becomes visible",
+            "reveals the area",
+            "revealed area",
+            "后续仍不清楚",
+            "露出",
         )
-        if not bool(profile["has_hidden_access_exact_use_conflict"]):
+        if not self._action_intent_pair_needs_outcome_resolution(state=state, result=result) and not any(
+            marker in support_text for marker in unresolved_post_action_markers
+        ):
             return False
         if self._action_intent_has_peak_guided_followup_frames(state):
             return False
         attempt_count = self._action_intent_followup_attempt_count(state)
         if attempt_count < 1 or attempt_count >= 2:
             return False
-        if self._action_intent_pairwise_text_has_explicit_hidden_outcome(result=result):
+        if self._action_intent_has_transition_followup_frames(state):
+            return False
+        if self._latest_action_intent_timeline_review(state):
             return False
         combined_times: list[float] = []
         for key in ("times", "input_times"):
@@ -3918,63 +3864,216 @@ class GraphAgentPlanner:
         latest_end = self._latest_action_intent_followup_end_time(state)
         if latest_end is None or action_end is None:
             return True
+        if not support_text and latest_end < action_end + 7.5:
+            return True
         return latest_end < action_end + 7.5
 
-    def _action_intent_pairwise_text_has_explicit_hidden_outcome(
+    def _action_intent_post_action_followup_window_is_short(
         self,
         *,
+        state: AgentState,
+        hints: dict[str, Any],
+        min_window_s: float = 7.5,
+    ) -> bool:
+        if not self._is_action_intent_task(state):
+            return False
+        combined_times: list[float] = []
+        for key in ("times", "input_times"):
+            for value in hints.get(key) or []:
+                try:
+                    combined_times.append(float(value))
+                except Exception:  # noqa: BLE001
+                    continue
+        action_end = max(combined_times) if combined_times else None
+        latest_end = self._latest_action_intent_followup_end_time(state)
+        if latest_end is None or action_end is None:
+            return True
+        return latest_end < action_end + float(min_window_s)
+
+    def _action_intent_future_use_needs_more_post_action_coverage(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
         result: dict[str, Any] | None = None,
     ) -> bool:
-        text = " ".join(
-            str((result or {}).get(key) or "")
-            for key in ("reason", "direct_effect", "downstream_action", "needed_observation", "answer")
-        ).lower()
-        if not text.strip():
+        if not self._is_action_intent_task(state):
             return False
-        explicit_target_use = any(
-            token in text
-            for token in (
-                "picked up from behind",
-                "taken from behind",
-                "retrieved from behind",
-                "hidden item is then picked up",
-                "specific hidden target is reached",
-                "small jar is taken from behind",
-                "revealed target is immediately used",
-                "revealed slot is immediately used",
-                "placed into the freed slot",
-                "put into the freed slot",
-                "placed into the revealed slot",
-                "right after the reveal",
-                "immediately after the reveal",
-                "revealed area is immediately used",
-                "拿到后面的",
-                "取到后面的",
-                "露出的卡槽立刻被使用",
-                "立刻放进腾出的空位",
-            )
+        support_text = self._action_intent_result_support_text(result)
+        reveal_access_markers = (
+            "door opens",
+            "opens the door",
+            "opened the door",
+            "reveals",
+            "revealed",
+            "becomes visible",
+            "visible behind",
+            "behind the door",
+            "behind it",
+            "露出",
+            "后面",
         )
-        if not explicit_target_use:
+        support_text_lc = support_text.lower()
+        if any(
+            marker in support_text_lc
+            for marker in (
+                "free the right hand",
+                "free the left hand",
+                "free the hand",
+                "next manipulation",
+                "opened immediately",
+                "used shortly after for weighing",
+                "opened immediately or used shortly after",
+                "open the jar",
+                "weighing",
+                "right hand",
+                "left hand",
+            )
+        ):
             return False
-        unresolved_or_negative = any(
-            token in text
-            for token in (
-                "unclear",
-                "cannot tell",
-                "can't tell",
-                "no hidden item",
-                "no item behind",
-                "no object is placed",
-                "not visible",
-                "not shown",
-                "later target is unclear",
-                "没有后方物体被取走",
-                "没有物体被放进",
-                "看不清",
-                "不明确",
-            )
+        combined_times: list[float] = []
+        for key in ("times", "input_times"):
+            for value in hints.get(key) or []:
+                try:
+                    combined_times.append(float(value))
+                except Exception:  # noqa: BLE001
+                    continue
+        action_end = max(combined_times) if combined_times else None
+        latest_end = self._latest_action_intent_followup_end_time(state)
+        if (
+            self._action_intent_result_points_to_later_outcome_uncertainty(result)
+            and any(marker in support_text for marker in reveal_access_markers)
+            and latest_end is not None
+            and action_end is not None
+            and latest_end < action_end + 7.5
+        ):
+            return True
+        if (
+            self._action_intent_result_points_to_later_outcome_uncertainty(result)
+            and not self._action_intent_result_has_direct_post_action_evidence(result)
+        ):
+            return False
+        if self._action_intent_result_has_direct_post_action_evidence(result):
+            return False
+        explicit_need_more = isinstance(result, dict) and (
+            bool(result.get("need_future_evidence"))
+            or bool(result.get("ambiguity"))
+            or bool(result.get("need_more_evidence"))
         )
-        return not unresolved_or_negative
+        future_uncertainty_markers = (
+            "later use",
+            "next use",
+            "used next",
+            "final location",
+            "put back",
+            "returned",
+            "not yet visible whether",
+            "remain plausible",
+            "之后用途",
+            "后续用途",
+            "放回",
+        )
+        if not self._action_intent_needs_future_use_evidence(state=state, result=result) and not (
+            explicit_need_more or any(marker in support_text for marker in future_uncertainty_markers)
+        ):
+            return False
+        if self._action_intent_has_peak_guided_followup_frames(state):
+            return False
+        attempt_count = self._action_intent_followup_attempt_count(state)
+        if attempt_count < 1 or attempt_count >= 2:
+            return False
+        if self._action_intent_has_transition_followup_frames(state):
+            return False
+        if self._latest_action_intent_timeline_review(state):
+            return False
+        return self._action_intent_post_action_followup_window_is_short(
+            state=state,
+            hints=hints,
+        )
+
+    def _action_intent_first_followup_needs_more_observation_coverage(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        result: dict[str, Any] | None,
+        pairwise_coverage_short: bool,
+        future_use_coverage_short: bool,
+    ) -> bool:
+        if not self._is_action_intent_task(state):
+            return False
+        if self._action_intent_followup_attempt_count(state) != 1:
+            return False
+        if self._action_intent_has_transition_followup_frames(state):
+            return False
+        if self._action_intent_has_peak_guided_followup_frames(state):
+            return False
+        if self._latest_action_intent_timeline_review(state):
+            return False
+        if self._action_intent_result_has_direct_post_action_evidence(result):
+            return False
+        if self._action_intent_result_has_immediate_post_action_uncertainty(result):
+            return False
+        if not self._action_intent_post_action_followup_window_is_short(state=state, hints=hints):
+            return False
+        support_text = self._action_intent_result_support_text(result)
+        return bool(pairwise_coverage_short or future_use_coverage_short or not support_text)
+
+    def _action_intent_result_has_immediate_post_action_uncertainty(
+        self,
+        result: dict[str, Any] | None,
+    ) -> bool:
+        support_text = self._action_intent_result_support_text(result)
+        if not support_text:
+            return False
+        immediate_markers = (
+            "direct result right after",
+            "right after the move",
+            "immediate result",
+            "right after",
+            "紧接着",
+            "立刻结果",
+            "动作后立刻",
+        )
+        uncertainty_markers = (
+            "still unclear",
+            "unclear",
+            "not visible",
+            "not shown",
+            "不明确",
+            "未显示",
+        )
+        direct_transition_markers = (
+            "drops into the sink",
+            "only flipped to another side",
+            "direct physical effect",
+            "direct effect",
+            "missing_direct_effect",
+            "state change is still unclear",
+            "immediate effect is still unclear",
+            "still remains plausible right after",
+            "remains plausible right after",
+            "直接物理效果",
+            "立刻结果仍不清楚",
+        )
+        return (
+            any(marker in support_text for marker in direct_transition_markers)
+            or any(marker in support_text for marker in immediate_markers)
+        ) and any(
+            marker in support_text for marker in uncertainty_markers
+        )
+
+    def _action_intent_specialized_resolution_frame_limit(self, state: AgentState) -> int:
+        if not self._is_action_intent_task(state):
+            return 8
+        primary_gap = self._action_intent_primary_gap(state)
+        if isinstance(primary_gap, dict) and str(primary_gap.get("gap_type") or "").strip() in {
+            "future_outcome",
+            "relation_confirmation",
+            "target_discovery",
+        }:
+            return 10
+        return 8
 
     def _build_action_intent_future_use_resolution_decision(
         self,
@@ -3983,11 +4082,13 @@ class GraphAgentPlanner:
         hints: dict[str, Any],
         result: dict[str, Any] | None = None,
         thought: str = "why 题属于后续用途型意图判断，必须显式比较动作后的使用证据再收口。",
+        allow_post_action_coverage_extension: bool = True,
     ) -> PlannerDecision | None:
+        frame_limit = self._action_intent_specialized_resolution_frame_limit(state)
         action_frames = self._select_action_intent_frames(
             state,
             hints,
-            limit=8,
+            limit=frame_limit,
             require_current_scope=True,
         )
         if not action_frames:
@@ -4000,6 +4101,19 @@ class GraphAgentPlanner:
         )
         if missing_followup is not None:
             return missing_followup
+        if allow_post_action_coverage_extension and self._action_intent_future_use_needs_more_post_action_coverage(
+            state=state,
+            hints=hints,
+            result=result,
+        ):
+            extra_followup = self._build_action_intent_extra_followup_sampling_decision(
+                state=state,
+                hints=hints,
+                focus="future_use_post_action_coverage_extension",
+                window_s=8.0,
+            )
+            if extra_followup is not None:
+                return extra_followup
         candidate_indices = self._action_intent_future_use_candidate_indices(state=state, result=result)
         context_notes = self._action_intent_context_notes(state, limit=12)
         return PlannerDecision(
@@ -4023,93 +4137,7 @@ class GraphAgentPlanner:
         choices = [str(choice) for choice in getattr(state, "choices", [])]
         if not choices:
             return []
-        latest_indices = self._latest_action_intent_candidate_indices(state, result=result)
-        full_indices = list(range(len(choices)))
-        base_indices = latest_indices if len(latest_indices) >= 2 else full_indices
-        timeline_text = self._action_intent_timeline_review_text(state)
-        if not timeline_text:
-            return full_indices
-        categories_by_index = selected_choice_categories(choices, base_indices)
-        prioritized_categories: set[str] = set()
-        if any(
-            token in timeline_text
-            for token in (
-                "free hand",
-                "freed hand",
-                "other hand",
-                "right hand",
-                "left hand",
-                "reach toward",
-                "tap area",
-                "sink area",
-                "turn on",
-                "turn off",
-                "open",
-                "close",
-                "reveal",
-                "visible behind",
-                "露出",
-                "腾出",
-                "另一只手",
-            )
-        ):
-            prioritized_categories.update(
-                {
-                    "hand_free_enablement",
-                    "access_retrieve",
-                    "space_clear",
-                    "final_place_return",
-                    "open_close",
-                    "generic_relocation",
-                }
-            )
-        if any(
-            token in timeline_text
-            for token in (
-                "next use",
-                "used next",
-                "use again",
-                "put back",
-                "return",
-                "returned",
-                "placed on",
-                "placed into",
-                "pick up",
-                "poured",
-                "pour",
-                "weigh",
-                "scale",
-                "later use",
-                "后续用途",
-                "放回",
-                "放到",
-                "称",
-            )
-        ):
-            prioritized_categories.update(
-                {
-                    "measure_weigh",
-                    "transfer_contents",
-                    "serve_consume",
-                    "inspect_check",
-                    "open_close",
-                    "food_prep",
-                    "discard",
-                    "final_place_return",
-                    "access_retrieve",
-                    "hand_free_enablement",
-                }
-            )
-        if not prioritized_categories:
-            return base_indices
-        prioritized_indices = [
-            index
-            for index in base_indices
-            if categories_by_index.get(index, set()) & prioritized_categories
-        ]
-        if len(prioritized_indices) >= 2:
-            return prioritized_indices[:4]
-        return base_indices
+        return list(range(len(choices)))
 
     def _build_action_intent_specialized_resolution_before_text_fallback(
         self,
@@ -4119,12 +4147,12 @@ class GraphAgentPlanner:
     ) -> PlannerDecision | None:
         if not self._is_action_intent_task(state):
             return None
+        if self._action_intent_disable_legacy_specialized_recovery(state):
+            return None
         if not self._select_action_intent_frames(state, hints, limit=8, require_current_scope=True):
             return None
-        choices = [str(choice) for choice in getattr(state, "choices", [])]
-        question = str(getattr(state, "question", "") or "")
         if (
-            action_intent_needs_precondition_context(question=question, choices=choices, indices=None)
+            self._action_intent_needs_precondition_context(state=state, result=None)
             and not self._action_intent_has_precondition_frames(state=state, hints=hints)
         ):
             return self._build_action_intent_precondition_sampling_decision(
@@ -4132,89 +4160,34 @@ class GraphAgentPlanner:
                 hints=hints,
                 focus="precondition_before_repeated_failure_resolution",
             )
-        pairwise_candidates = self._fallback_action_intent_pairwise_candidate_indices(state)
-        pairwise_ready = len(pairwise_candidates) >= 2 and action_intent_needs_pairwise_resolution(
-            question=question,
-            choices=choices,
-            indices=pairwise_candidates,
-        )
-        future_use_ready = action_intent_needs_future_use_resolution(question=question, choices=choices, indices=None)
-        if pairwise_ready and self._action_intent_question_prefers_pairwise_resolution(question):
-            return self._build_action_intent_pairwise_resolution_decision(
+        primary_gap = self._action_intent_primary_gap(state)
+        primary_gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
+        if primary_gap_type in {
+            "precondition",
+            "immediate_outcome",
+            "future_outcome",
+            "relation_confirmation",
+            "target_discovery",
+        }:
+            gap_routed_recovery = self._recover_action_intent_via_primary_gap(
                 state=state,
                 hints=hints,
-                result={"candidate_indices": pairwise_candidates},
-                thought="why 题专用视觉判断连续失败，但当前题已有足够原始帧；先走二选一后果裁决，不直接退回通用文本排序。",
+                result={},
+                blocker_hint=self._action_intent_verifier_blocker_hint(state),
+                primary_gap=primary_gap,
             )
-        if future_use_ready:
-            return self._build_action_intent_future_use_resolution_decision(
-                state=state,
-                hints=hints,
-                thought="why 题专用视觉判断连续失败，但当前题已有足够原始帧；先走后续用途专用裁决，不直接退回通用文本排序。",
-            )
-        if pairwise_ready:
-            return self._build_action_intent_pairwise_resolution_decision(
-                state=state,
-                hints=hints,
-                result={"candidate_indices": pairwise_candidates},
-                thought="why 题专用视觉判断连续失败，但当前题已有足够原始帧；先走二选一后果裁决，不直接退回通用文本排序。",
-            )
+            if gap_routed_recovery is not None:
+                self._state_add_memory(
+                    state,
+                    f"planner_guard=before_text_fallback_prefers_primary_gap={gap_routed_recovery.tool}",
+                )
+                return gap_routed_recovery
+            return None
         return None
-
-    def _action_intent_question_prefers_pairwise_resolution(self, question: str) -> bool:
-        text = str(question or "").lower()
-        pairwise_markers = (
-            "<move ",
-            "<shift ",
-            "<remove ",
-            "<clear ",
-            "<open ",
-            "<close ",
-            "<put ",
-            "<place ",
-            "<return ",
-        )
-        return any(marker in text for marker in pairwise_markers)
 
     def _fallback_action_intent_pairwise_candidate_indices(self, state: AgentState) -> list[int]:
         choices = [str(choice) for choice in getattr(state, "choices", [])]
-        question = str(getattr(state, "question", "") or "").lower()
-        categories_by_index = selected_choice_categories(choices)
-        preferred_pairs: tuple[tuple[str, str], ...] = (
-            ("access_retrieve", "space_clear"),
-            ("access_retrieve", "final_place_return"),
-            ("space_clear", "final_place_return"),
-            ("safety_avoid", "space_clear"),
-            ("safety_avoid", "access_retrieve"),
-        )
-        if any(token in question for token in ("<flip ", "<turn ", "<shake ", "<tilt ", "<tip ", "<tap ", "<hit ", "<knock ")):
-            preferred_pairs = (
-                ("clean_dry", "transfer_contents"),
-                ("open_close", "measure_weigh"),
-            ) + preferred_pairs
-        if any(token in question for token in ("towel", "cloth", "napkin", "paper towel", "tea towel", "dish cloth", "hand towel")):
-            if any(token in question for token in ("<pick up ", "<grab ", "<lift ", "<take ", "<move ", "<shift ")):
-                preferred_pairs = (
-                    ("clean_dry", "generic_relocation"),
-                    ("clean_dry", "final_place_return"),
-                ) + preferred_pairs
-        for left_category, right_category in preferred_pairs:
-            left_index = next((index for index, cats in categories_by_index.items() if left_category in cats), None)
-            right_index = next((index for index, cats in categories_by_index.items() if right_category in cats and index != left_index), None)
-            if left_index is not None and right_index is not None:
-                return [left_index, right_index]
-        pairwise_indices = [
-            index
-            for index, cats in categories_by_index.items()
-            if {"access_retrieve", "space_clear", "final_place_return", "safety_avoid"} & cats
-        ]
-        deduped: list[int] = []
-        for index in pairwise_indices:
-            if index not in deduped:
-                deduped.append(index)
-            if len(deduped) >= 2:
-                break
-        return deduped
+        return list(range(len(choices)))
 
     def _action_intent_failed_tool_count(self, state: AgentState, tool_name: str) -> int:
         count = 0
@@ -4225,6 +4198,23 @@ class GraphAgentPlanner:
             if isinstance(raw_result, dict) and raw_result.get("tool_failed"):
                 count += 1
         return count
+
+    def _action_intent_failure_is_provider_level_visual_failure(self, raw_result: dict[str, Any] | None) -> bool:
+        if not isinstance(raw_result, dict) or not raw_result.get("tool_failed"):
+            return False
+        error_type = str(raw_result.get("error_type") or "").strip().lower()
+        error_message = str(raw_result.get("error_message") or "").strip().lower()
+        provider_markers = (
+            "model_not_found",
+            "no available channel",
+            "provider_rejected_image_input",
+            "vision_not_supported",
+            "image_generation_disabled",
+            "vision request failed after",
+        )
+        if "visionnotsupported" in error_type:
+            return True
+        return any(marker in error_message for marker in provider_markers)
 
     def _action_intent_raw_context_notes(self, state: AgentState, *, limit: int) -> list[str]:
         notes: list[str] = []
@@ -4317,7 +4307,13 @@ class GraphAgentPlanner:
     ) -> bool:
         if not self._is_action_intent_task(state):
             return False
-        if self._action_intent_pending_resolution_tool(state):
+        pending_tool = self._action_intent_pending_resolution_tool(state)
+        structured_specialized_tool = self._action_intent_structured_specialized_recovery_tool(state)
+        if pending_tool and not (
+            structured_specialized_tool
+            and self._should_continue_search_from_sufficiency(state)
+            and self._action_intent_followup_attempt_count(state) >= 1
+        ):
             return False
         if self._latest_tool_result(state, "query_spatial_context"):
             return False
@@ -4338,46 +4334,30 @@ class GraphAgentPlanner:
             return False
         if self._action_intent_needs_future_use_evidence(state=state, result=result):
             return False
+        if self._action_intent_pairwise_needs_more_post_action_coverage(state=state, hints=hints, result=result):
+            return False
+        if self._action_intent_future_use_needs_more_post_action_coverage(state=state, hints=hints, result=result):
+            return False
         if isinstance(result, dict) and (
             self._action_intent_result_is_weak_generic_claim(state=state, result=result)
             or self._action_intent_result_is_workspace_or_final_placement_close_call(state=state, result=result)
         ):
             return False
-        profile = action_intent_conflict_profile(
-            question=str(getattr(state, "question", "") or ""),
-            choices=[str(choice) for choice in getattr(state, "choices", [])],
-            indices=candidate_indices if len(candidate_indices) >= 2 else None,
+        primary_gap = self._action_intent_primary_gap(state)
+        gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
+        if gap_type in {"relation_confirmation", "target_discovery", "workspace_change_unconfirmed"}:
+            return True
+        support_text = self._action_intent_result_support_text(result)
+        spatial_relation_markers = (
+            "relation is not explicit",
+            "nearby fixture/object relation is not explicit",
+            "not explicit in the current frames",
+            "space/use is enabled",
+            "fixture/object relation",
+            "空间关系",
+            "关系不明确",
         )
-        active_categories = set(profile["active_categories"])
-        spatial_categories = {
-            "access_retrieve",
-            "space_clear",
-            "final_place_return",
-            "hand_free_enablement",
-            "open_close",
-            "measure_weigh",
-            "transfer_contents",
-            "safety_avoid",
-        }
-        question_text = str(getattr(state, "question", "") or "").lower()
-        spatial_question_terms = (
-            "behind",
-            "slot",
-            "space",
-            "room",
-            "sink",
-            "tap",
-            "faucet",
-            "drain",
-            "scale",
-            "free hand",
-            "left hand",
-            "right hand",
-            "put back",
-            "open",
-            "close",
-        )
-        return bool(active_categories & spatial_categories) or any(term in question_text for term in spatial_question_terms)
+        return any(marker in support_text for marker in spatial_relation_markers)
 
     def _build_action_intent_spatial_probe_decision(
         self,
@@ -4556,6 +4536,8 @@ class GraphAgentPlanner:
         hints: dict[str, Any],
         thought: str,
     ) -> PlannerDecision | None:
+        if self._action_intent_disable_legacy_specialized_recovery(state):
+            return None
         action_frames = self._select_action_intent_frames(
             state,
             hints,
@@ -4590,6 +4572,103 @@ class GraphAgentPlanner:
             },
         )
 
+    def _action_intent_has_current_scope_frames(self, state: AgentState) -> bool:
+        if not self._is_action_intent_task(state):
+            return False
+        frames = [item for item in getattr(state, "retrieved_frames", []) if isinstance(item, str) and item]
+        if not frames:
+            return False
+        prefixes = self._action_intent_current_scope_artifact_prefixes(state)
+        if prefixes and any(any(prefix in frame for prefix in prefixes) for frame in frames):
+            return True
+        return any(
+            "followup" in frame
+            or "segment" in frame
+            for frame in frames
+        )
+
+    def _build_action_intent_local_followup_recovery_decision(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        thought: str,
+    ) -> PlannerDecision | None:
+        followup = self._build_action_intent_followup_sampling_decision(state=state, hints=hints)
+        if followup is not None:
+            return followup
+        extra_followup = self._build_action_intent_extra_followup_sampling_decision(
+            state=state,
+            hints=hints,
+            focus="future_outcome_local_followup_recovery",
+            window_s=self._action_intent_close_call_followup_window(state, profile="future_use"),
+        )
+        if extra_followup is not None:
+            return extra_followup
+        return None
+
+    def _build_action_intent_gap_late_followup_decision(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        profile: str = "future_use",
+    ) -> PlannerDecision | None:
+        combined_times = sorted(
+            [float(value) for value in hints.get("times") or []]
+            + [float(value) for value in hints.get("input_times") or []]
+        )
+        if not combined_times:
+            return None
+        return PlannerDecision(
+            thought="why 题当前主缺口仍缺动作后的近后续原始证据；先补一次受控 late followup，再决定是否升级到更长时域追证。",
+            tool="sample_sparse_frames",
+            args={
+                "start_time": max(combined_times),
+                "end_time": max(combined_times) + self._action_intent_close_call_followup_window(
+                    state,
+                    profile=profile,
+                ),
+                "sample_count": 5,
+                "tag": f"{state.task_family}_gap_late_followup",
+            },
+        )
+
+    def _build_action_intent_resolution_not_ready_recovery(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        used_tools: list[str],
+        specialized_recovery_thought: str,
+        state_candidate_guard: str,
+        generic_resample_thought: str,
+    ) -> PlannerDecision:
+        candidate_plan = self._best_state_candidate_plan(state=state, hints=hints, used_tools=used_tools)
+        if candidate_plan is not None and candidate_plan.decision.tool not in {"finish", "rank_choices_from_state"}:
+            self._state_add_memory(
+                state,
+                f"planner_guard={state_candidate_guard}={candidate_plan.decision.tool}",
+            )
+            return candidate_plan.decision
+        recovered = self._build_action_intent_specialized_recovery_decision(
+            state=state,
+            hints=hints,
+            thought=specialized_recovery_thought,
+        )
+        if recovered is not None:
+            return recovered
+        return PlannerDecision(
+            thought=generic_resample_thought,
+            tool="sample_sparse_frames",
+            args={
+                "start_time": None,
+                "end_time": None,
+                "sample_count": 4,
+                "tag": f"{state.task_family}_segment",
+            },
+        )
+
     def _action_intent_specialized_tools_used(self, used_tools: list[str]) -> bool:
         return any(
             tool in {
@@ -4608,10 +4687,9 @@ class GraphAgentPlanner:
     ) -> PlannerDecision | None:
         if not self._is_action_intent_task(state):
             return None
-        strict_visual_disambiguation = action_intent_requires_strict_visual_disambiguation(
-            question=str(getattr(state, "question", "") or ""),
-            choices=[str(choice) for choice in getattr(state, "choices", [])],
-            indices=None,
+        strict_visual_disambiguation = self._action_intent_needs_observation_centric_transition_recovery(
+            state=state,
+            result=None,
         )
         initial_mixed_horizon = self._action_intent_initial_pair_spans_immediate_and_later_outcomes(state)
         if not strict_visual_disambiguation and not initial_mixed_horizon:
@@ -4621,9 +4699,9 @@ class GraphAgentPlanner:
             return None
         start_time, end_time, stride_s, max_frames = probe_window
         thought = (
-            "why 题一开始就属于严格视觉消歧场景；先围绕动作尾部和紧随其后的短窗口做更密的关键帧搜索，优先抓决定性结果帧，而不是只抽静态动作片段。"
-            if strict_visual_disambiguation
-            else "why 题一开始就同时包含立刻微结果和稍后用途/归位冲突；先用 mixed-horizon 的 transition probe 同时覆盖近窗与稍后结果，再进入专用动作目的判断。"
+            "why 题一开始就同时包含立刻微结果和稍后用途/归位冲突；先用 mixed-horizon 的 transition probe 同时覆盖近窗与稍后结果，再进入专用动作目的判断。"
+            if initial_mixed_horizon
+            else "why 题一开始就属于严格视觉消歧场景；先围绕动作尾部和紧随其后的短窗口做更密的关键帧搜索，优先抓决定性结果帧，而不是只抽静态动作片段。"
         )
         return PlannerDecision(
             thought=thought,
@@ -4694,6 +4772,50 @@ class GraphAgentPlanner:
             and self._action_intent_failed_tool_count(state, "infer_action_intent") >= 3
             and not self._latest_successful_action_intent_result(state)
         )
+
+    def _action_intent_should_try_evidence_first_recovery(self, state: AgentState) -> bool:
+        if not self._is_action_intent_task(state):
+            return False
+        if self._action_intent_text_fallback_ready(state):
+            return True
+        current_needs = self._current_evidence_needs(state)
+        if {"need_alternative_evidence_path", "need_disambiguating_evidence"} & current_needs:
+            return True
+        primary_gap = self._action_intent_primary_gap(state)
+        gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
+        return gap_type in {"precondition", "immediate_outcome", "future_outcome", "relation_confirmation", "target_discovery"}
+
+    def _action_intent_needs_observation_centric_transition_recovery(
+        self,
+        *,
+        state: AgentState,
+        result: dict[str, Any] | None,
+    ) -> bool:
+        if not self._is_action_intent_task(state):
+            return False
+        primary_gap = self._action_intent_primary_gap(state)
+        gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
+        blocker_hint = self._action_intent_verifier_blocker_hint(state)
+        bias_profile = self._action_intent_timeline_review_bias_profile(state)
+        if gap_type in {"immediate_outcome", "state_transition_unconfirmed", "workspace_change_unconfirmed"}:
+            return True
+        if blocker_hint == "post_action_evidence":
+            return True
+        if bias_profile["state_change_focus"] or bias_profile["immediate_transition_focus"]:
+            return True
+        if bias_profile["needs_more_evidence"] and (
+            bias_profile["hand_free_next_action"]
+            or bias_profile["final_location_unclear"]
+            or bias_profile["revealed_target_retrieval"]
+            or bias_profile["revealed_slot_placement"]
+            or bias_profile["revealed_fixture_enablement"]
+        ):
+            return True
+        if self._action_intent_result_has_indecisive_post_action_support(result):
+            return True
+        if isinstance(result, dict) and not self._action_intent_result_has_direct_post_action_evidence(result):
+            return True
+        return False
 
     def _build_action_intent_text_fallback_rank_decision(self, state: AgentState, *, thought: str) -> PlannerDecision:
         evidence = self._action_intent_scoped_textual_fallback_evidence(state, limit=16)
@@ -4784,6 +4906,13 @@ class GraphAgentPlanner:
             return None
         failed = failed_tools or set()
         ineffective = ineffective_tools or set()
+        latest_resolution = self._latest_action_intent_resolution_payload(state)
+        latest_action_intent_tool = latest_resolution[0] if latest_resolution is not None else ""
+        latest_action_intent_result = latest_resolution[1] if latest_resolution is not None else {}
+        structured_specialized_tool = self._action_intent_structured_specialized_recovery_tool(state)
+        primary_gap = self._action_intent_primary_gap(state)
+        primary_gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
+        explicit_downstream_object_target = self._action_intent_has_explicit_downstream_object_gap(state)
         combined_times = sorted(
             [float(value) for value in hints.get("times") or []]
             + [float(value) for value in hints.get("input_times") or []]
@@ -5057,18 +5186,10 @@ class GraphAgentPlanner:
                     except Exception:  # noqa: BLE001
                         continue
         if combined_times:
-            question_text = str(getattr(state, "question", "") or "").lower()
-            keep_precontext_without_followup = self._is_action_intent_task(state) and any(
-                token in question_text
-                for token in ("towel", "cloth", "paper towel", "tea towel", "dish cloth", "scale", "tap", "switch", "turn on")
-            )
             precondition_window_s = 2.0
             if include_followup and self._action_intent_needs_precondition_context(state=state, result=None):
                 precondition_window_s = 6.0
-            elif not include_followup and (
-                self._action_intent_needs_precondition_context(state=state, result=None)
-                or keep_precontext_without_followup
-            ):
+            elif not include_followup and self._action_intent_needs_precondition_context(state=state, result=None):
                 precondition_window_s = 4.0
             start_time = min(combined_times) - precondition_window_s
             followup_window_s = 8.0 if include_followup else 2.0
@@ -5110,7 +5231,9 @@ class GraphAgentPlanner:
             if current_task_frames:
                 frames = current_task_frames
         frames = self._sort_frames_by_artifact_time(frames)
-        needed_profile = self._action_intent_needed_observation_profile(state=state) if self._is_action_intent_task(state) else {}
+        bias_profile = self._action_intent_timeline_review_bias_profile(state) if self._is_action_intent_task(state) else {}
+        primary_gap = self._action_intent_primary_gap(state) if self._is_action_intent_task(state) else None
+        primary_gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
         if (
             self._is_action_intent_task(state)
             and combined_times
@@ -5119,7 +5242,9 @@ class GraphAgentPlanner:
                 or any("_precontext_" in Path(path).name.lower() for path in frames)
                 or self._action_intent_prefers_followup_state_change_only(state)
                 or self._action_intent_prefers_dense_near_followup(state)
-                or any(bool(needed_profile.get(key)) for key in ("prefer_mixed_horizon", "prefer_reveal_access", "prefer_future_use_outcome", "prefer_final_placement"))
+                or primary_gap_type in {"future_outcome", "relation_confirmation", "target_discovery"}
+                or bool(bias_profile.get("next_use_unclear"))
+                or bool(bias_profile.get("final_location_unclear"))
             )
         ):
             staged = self._stage_action_intent_frames(
@@ -5151,8 +5276,10 @@ class GraphAgentPlanner:
                     followup_frames.append(path)
             pre_keep_count = 2 if precontext_frames and self._action_intent_needs_precondition_context(state=state, result=None) else 0
             pre_keep = self._sample_evenly_ordered(precontext_frames, pre_keep_count)
-            current_keep = current_frames[-2:]
-            followup_keep = self._sample_evenly_ordered(followup_frames, max(0, limit - len(pre_keep) - len(current_keep)))
+            current_keep_count = 2 if pre_keep_count > 0 else min(2, max(0, limit - len(pre_keep)))
+            current_keep = current_frames[-current_keep_count:]
+            followup_budget = max(0, limit - len(pre_keep) - len(current_keep))
+            followup_keep = self._sample_evenly_ordered(followup_frames, followup_budget)
             merged = pre_keep + current_keep + followup_keep
             if merged:
                 return self._sort_frames_by_artifact_time(merged)
@@ -5207,7 +5334,7 @@ class GraphAgentPlanner:
             return False
         text = " ".join(
             str(result.get(key) or "")
-            for key in ("reason", "decisive_observation", "needed_observation", "answer")
+            for key in ("reason", "decisive_observation")
         ).lower()
         if any(
             token in text
@@ -5350,21 +5477,12 @@ class GraphAgentPlanner:
             )
         )
 
-    def _action_intent_recent_workspace_or_final_placement_withheld(self, state: AgentState) -> bool:
-        return any(
-            isinstance(item, str)
-            and item.startswith("action_intent_resolution_withheld_for_workspace_or_final_placement_claim=1")
-            for item in list(getattr(state, "working_memory", []))[-12:]
-        )
-
     def _action_intent_result_is_workspace_or_final_placement_close_call(
         self,
         *,
         state: AgentState,
         result: dict[str, Any] | None,
     ) -> bool:
-        if self._action_intent_recent_workspace_or_final_placement_withheld(state):
-            return True
         if not isinstance(result, dict):
             return False
         try:
@@ -5492,7 +5610,8 @@ class GraphAgentPlanner:
 
         stage_target_counts: list[tuple[str, list[str], int, float]]
         followup_only_state_change = False
-        needed_profile = self._action_intent_needed_observation_profile(state=state)
+        primary_gap = self._action_intent_primary_gap(state) if include_followup else None
+        primary_gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
         bias_profile = self._action_intent_timeline_review_bias_profile(state) if include_followup else {}
         if include_followup:
             needs_precontext = self._action_intent_needs_precondition_context(state=state, result=None)
@@ -5508,14 +5627,16 @@ class GraphAgentPlanner:
                 )
             )
             review_late_focus = bool(
-                bias_profile.get("next_use_unclear") or bias_profile.get("final_location_unclear")
+                bias_profile.get("next_use_unclear")
+                or bias_profile.get("final_location_unclear")
+                or primary_gap_type in {"future_outcome", "relation_confirmation", "target_discovery"}
             )
             pre_keep = 2 if needs_precontext else 1
-            segment_keep = 3
+            segment_keep = 2 if needs_precontext and limit <= 6 else 3
             transition_keep = 2 if followup_transition_frames and limit >= 6 else 0
             peak_keep = 1 if followup_peak_frames and limit >= 5 else 0
             ext_keep = 1 if followup_ext_frames and limit >= 6 else 0
-            followup_keep = 2
+            followup_keep = 2 if limit >= 6 else 1
             if dense_near_followup and limit >= 8:
                 pre_keep = 2 if needs_precontext else 1
                 segment_keep = 2
@@ -5523,6 +5644,11 @@ class GraphAgentPlanner:
                 peak_keep = min(2, len(followup_peak_frames)) if followup_peak_frames else 0
                 ext_keep = 1 if followup_ext_frames else 0
                 followup_keep = max(1, limit - pre_keep - segment_keep - transition_keep - peak_keep - ext_keep)
+            if needs_precontext and not review_transition_focus and not review_late_focus and not followup_only_state_change and limit >= 6:
+                pre_keep = min(2, len(precontext_frames)) if precontext_frames else 0
+                segment_keep = min(2, len(segment_frames)) if segment_frames else 0
+                reserved = pre_keep + segment_keep + transition_keep + peak_keep + ext_keep
+                followup_keep = max(1, limit - reserved)
             if followup_only_state_change and followup_frames:
                 pre_keep = 0
                 segment_keep = 0
@@ -5560,28 +5686,14 @@ class GraphAgentPlanner:
                     peak_keep = min(1, len(followup_peak_frames)) if followup_peak_frames else 0
                     ext_keep = 0
                     followup_keep = max(1, limit - pre_keep - segment_keep - transition_keep - peak_keep)
-            if needed_profile["prefer_reveal_access"]:
+            if review_transition_focus and not review_late_focus:
                 pre_keep = 1 if needs_precontext and limit >= 6 else 0
                 segment_keep = min(segment_keep, 2)
                 transition_keep = min(len(followup_transition_frames), max(transition_keep, 2 if limit >= 6 else 1))
                 peak_keep = min(len(followup_peak_frames), max(peak_keep, 2 if limit >= 7 else 1))
                 ext_keep = 0
                 followup_keep = max(1, limit - pre_keep - segment_keep - transition_keep - peak_keep - ext_keep)
-            elif needed_profile["prefer_receptacle_outcome"]:
-                pre_keep = 1 if needs_precontext and limit >= 6 else 0
-                segment_keep = min(segment_keep, 2)
-                transition_keep = min(len(followup_transition_frames), max(transition_keep, 2 if limit >= 6 else 1))
-                peak_keep = min(len(followup_peak_frames), max(peak_keep, 1 if limit >= 6 else 0))
-                ext_keep = 0
-                followup_keep = max(1, limit - pre_keep - segment_keep - transition_keep - peak_keep - ext_keep)
-            elif needed_profile["prefer_mixed_horizon"]:
-                pre_keep = 1 if needs_precontext and limit >= 7 else 0
-                segment_keep = min(segment_keep, 2)
-                transition_keep = min(len(followup_transition_frames), max(transition_keep, 2 if limit >= 6 else 1))
-                peak_keep = min(len(followup_peak_frames), max(peak_keep, 1))
-                ext_keep = min(len(followup_ext_frames), max(ext_keep, 1 if limit >= 6 else 0))
-                followup_keep = max(1, limit - pre_keep - segment_keep - transition_keep - peak_keep - ext_keep)
-            elif needed_profile["prefer_future_use_outcome"] or needed_profile["prefer_final_placement"]:
+            elif review_late_focus:
                 pre_keep = 1 if needs_precontext and limit >= 7 else 0
                 segment_keep = min(segment_keep, 2)
                 transition_keep = min(len(followup_transition_frames), max(transition_keep, 1 if followup_transition_frames and limit >= 7 else 0))
@@ -5608,18 +5720,14 @@ class GraphAgentPlanner:
                 followup_keep = max(2 if limit >= 6 else 1, limit - pre_keep - segment_keep - transition_keep - peak_keep - ext_keep)
             stage_target_counts = [
                 ("precontext", precontext_frames, pre_keep, action_start - 0.15),
-                ("segment", segment_frames, segment_keep, action_end if dense_near_followup or needed_profile["prefer_reveal_access"] else action_mid),
+                ("segment", segment_frames, segment_keep, action_end if dense_near_followup or review_transition_focus else action_mid),
                 ("transition", followup_transition_frames, transition_keep, action_end + 0.25),
                 ("peaks", followup_peak_frames, peak_keep, action_end + (0.6 if dense_near_followup else 0.9)),
-                ("ext", followup_ext_frames, ext_keep, action_end + (5.2 if (needed_profile["prefer_future_use_outcome"] or needed_profile["prefer_final_placement"] or needed_profile["prefer_mixed_horizon"]) else 3.0)),
-                ("followup", followup_frames, followup_keep, action_end + 3.4 if (needed_profile["prefer_future_use_outcome"] or needed_profile["prefer_final_placement"]) else action_mid),
+                ("ext", followup_ext_frames, ext_keep, action_end + (5.2 if review_late_focus else 3.0)),
+                ("followup", followup_frames, followup_keep, action_end + 3.4 if review_late_focus else action_mid),
             ]
         else:
-            question_text = str(getattr(state, "question", "") or "").lower()
-            should_keep_precontext = self._action_intent_needs_precondition_context(state=state, result=None) or any(
-                token in question_text
-                for token in ("towel", "cloth", "paper towel", "tea towel", "dish cloth", "scale", "tap", "switch", "turn on")
-            )
+            should_keep_precontext = self._action_intent_needs_precondition_context(state=state, result=None)
             pre_keep = 1 if should_keep_precontext and limit >= 4 else 0
             segment_keep = max(2, limit - pre_keep)
             stage_target_counts = [
@@ -5644,14 +5752,6 @@ class GraphAgentPlanner:
             elif bias_profile.get("final_location_unclear"):
                 priority = ["ext", "followup", "transition", "segment", "peaks", "precontext"]
             elif bias_profile.get("next_use_unclear"):
-                priority = ["ext", "followup", "transition", "peaks", "segment", "precontext"]
-            elif needed_profile["prefer_reveal_access"]:
-                priority = ["transition", "peaks", "segment", "followup", "precontext", "ext"]
-            elif needed_profile["prefer_receptacle_outcome"]:
-                priority = ["transition", "peaks", "followup", "segment", "precontext", "ext"]
-            elif needed_profile["prefer_mixed_horizon"]:
-                priority = ["transition", "ext", "followup", "peaks", "segment", "precontext"]
-            elif needed_profile["prefer_future_use_outcome"] or needed_profile["prefer_final_placement"]:
                 priority = ["ext", "followup", "transition", "peaks", "segment", "precontext"]
             else:
                 priority = ["precontext", "segment", "transition", "peaks", "ext", "followup"]
@@ -5698,11 +5798,7 @@ class GraphAgentPlanner:
                 ]
             remaining_keep = min(limit - len(selected), len(remaining))
             if include_followup and (
-                needed_profile["prefer_future_use_outcome"]
-                or needed_profile["prefer_final_placement"]
-                or needed_profile["prefer_mixed_horizon"]
-                or needed_profile["prefer_reveal_access"]
-                or needed_profile["prefer_safety_or_spill"]
+                primary_gap_type in {"future_outcome", "relation_confirmation", "target_discovery"}
                 or bool(bias_profile.get("next_use_unclear"))
                 or bool(bias_profile.get("final_location_unclear"))
                 or bool(bias_profile.get("revealed_target_retrieval"))
@@ -5710,21 +5806,17 @@ class GraphAgentPlanner:
                 or bool(bias_profile.get("revealed_fixture_enablement"))
             ):
                 remaining_anchor = action_end + 1.0
-                if bool(bias_profile.get("next_use_unclear")) or bool(bias_profile.get("final_location_unclear")):
+                if (
+                    primary_gap_type in {"future_outcome", "relation_confirmation", "target_discovery"}
+                    or bool(bias_profile.get("next_use_unclear"))
+                    or bool(bias_profile.get("final_location_unclear"))
+                ):
                     remaining_anchor = action_end + 4.0
                 elif (
                     bool(bias_profile.get("revealed_target_retrieval"))
                     or bool(bias_profile.get("revealed_slot_placement"))
                     or bool(bias_profile.get("revealed_fixture_enablement"))
                 ):
-                    remaining_anchor = action_end + 0.35
-                elif (
-                    needed_profile["prefer_future_use_outcome"]
-                    or needed_profile["prefer_final_placement"]
-                    or needed_profile["prefer_mixed_horizon"]
-                ):
-                    remaining_anchor = action_end + 4.0
-                elif needed_profile["prefer_reveal_access"] or needed_profile["prefer_receptacle_outcome"] or needed_profile["prefer_safety_or_spill"]:
                     remaining_anchor = action_end + 0.35
                 remaining_paths = self._sample_action_intent_stage_frames(
                     remaining,
@@ -6291,23 +6383,17 @@ class GraphAgentPlanner:
     ) -> bool:
         if not self._is_action_intent_task(state):
             return False
-        recent_finalize_marker = self._action_intent_recent_later_outcome_finalize_withheld_marker(state)
-        if recent_finalize_marker in {
-            "action_intent_resolution_withheld_for_nonexclusive_concrete_late_anchor=1",
-            "action_intent_resolution_withheld_for_timeline_review_bias_gap=1",
-            "action_intent_resolution_withheld_for_workspace_or_final_placement_claim=1",
-            "action_intent_resolution_withheld_for_generic_hand_free_enablement=1",
-            "action_intent_resolution_withheld_for_generic_access_or_space_enablement=1",
-            "action_intent_resolution_withheld_for_generic_relocation_or_storage_enablement=1",
-        }:
-            return True
         if self._action_intent_followup_attempt_count(state) < 1 and not self._latest_action_intent_timeline_review(state):
             return False
         bias_profile = self._action_intent_timeline_review_bias_profile(state)
-        needed_profile = self._action_intent_needed_observation_profile(state=state, result=result)
+        latest_timeline_review = self._latest_action_intent_timeline_review(state)
+        future_evidence_marker = any(
+            isinstance(item, str) and item.startswith("action_intent_need_future_evidence=1")
+            for item in list(getattr(state, "working_memory", [])) + list(getattr(state, "evidence_bundle", []))
+        )
         if bias_profile["next_use_unclear"] or bias_profile["final_location_unclear"]:
             return True
-        if needed_profile["prefer_future_use_outcome"] or needed_profile["prefer_final_placement"]:
+        if future_evidence_marker and latest_timeline_review:
             return True
         return self._action_intent_pair_spans_immediate_and_later_outcomes(state=state, result=result)
 
@@ -6356,6 +6442,29 @@ class GraphAgentPlanner:
                 return [node for node in nodes if isinstance(node, dict)]
         return []
 
+    def _latest_action_intent_long_horizon_spatial_context(
+        self,
+        state: AgentState,
+        *,
+        fixture_hint: Any = None,
+    ) -> dict[str, Any] | None:
+        if not self._is_action_intent_task(state):
+            return None
+        target_query = str(fixture_hint or "").strip().lower()
+        for entry in reversed(getattr(state, "tool_trace", [])):
+            if not isinstance(entry, dict) or entry.get("tool") != "query_spatial_context":
+                continue
+            args = entry.get("args") or {}
+            if not isinstance(args, dict):
+                continue
+            query = str(args.get("object_name") or "").strip().lower()
+            if target_query and query and target_query not in query and query not in target_query:
+                continue
+            payload = entry.get("raw_result")
+            if isinstance(payload, dict):
+                return payload
+        return None
+
     def _action_intent_long_horizon_target_tokens(self, state: AgentState, *, object_hint: Any = None) -> list[str]:
         query = self._action_intent_question_object_hint(state, object_hint)
         return [token for token in re.split(r"[\s_/:-]+", query.lower()) if token]
@@ -6366,18 +6475,7 @@ class GraphAgentPlanner:
         bias_profile = self._action_intent_timeline_review_bias_profile(state)
         if bias_profile["final_location_unclear"]:
             return True
-        recent_finalize_marker = self._action_intent_recent_later_outcome_finalize_withheld_marker(state)
-        if recent_finalize_marker in {
-            "action_intent_resolution_withheld_for_nonexclusive_concrete_late_anchor=1",
-            "action_intent_resolution_withheld_for_timeline_review_bias_gap=1",
-            "action_intent_resolution_withheld_for_workspace_or_final_placement_claim=1",
-            "action_intent_resolution_withheld_for_generic_hand_free_enablement=1",
-            "action_intent_resolution_withheld_for_generic_access_or_space_enablement=1",
-            "action_intent_resolution_withheld_for_generic_relocation_or_storage_enablement=1",
-        }:
-            return True
-        needed_profile = self._action_intent_needed_observation_profile(state=state)
-        return bool(needed_profile["prefer_final_placement"]) and not bool(needed_profile["prefer_future_use_outcome"])
+        return False
 
     def _action_intent_long_horizon_node_match_tier(
         self,
@@ -6491,6 +6589,45 @@ class GraphAgentPlanner:
             return (max(0.0, start_time - 0.4), end_time + 1.0)
         return (max(0.0, start_time - 0.4), min(end_time, start_time + 4.8))
 
+    def _action_intent_latest_long_horizon_anchor_time_from_nodes(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        object_hint: Any = None,
+    ) -> float | None:
+        nodes = self._latest_action_intent_long_horizon_nodes(state, object_hint=object_hint)
+        if not nodes:
+            return None
+        selected: tuple[dict[str, Any], float, float] | None = None
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            start_raw = node.get("start_time")
+            end_raw = node.get("end_time")
+            if start_raw is None:
+                continue
+            try:
+                start_time = float(start_raw)
+            except Exception:  # noqa: BLE001
+                continue
+            try:
+                end_time = float(end_raw) if end_raw is not None else start_time
+            except Exception:  # noqa: BLE001
+                end_time = start_time
+            if end_time < start_time:
+                end_time = start_time
+            match_tier = self._action_intent_long_horizon_node_match_tier(state=state, node=node, object_hint=object_hint)
+            if match_tier is None:
+                continue
+            candidate = (node, start_time, end_time)
+            if selected is None or start_time > selected[1]:
+                selected = candidate
+        if selected is None:
+            return None
+        _node, start_time, end_time = selected
+        return start_time if abs(end_time - start_time) < 0.25 else (start_time + min(end_time, start_time + 1.2)) / 2
+
     def _build_action_intent_long_horizon_spatial_probe_decision(
         self,
         *,
@@ -6548,6 +6685,9 @@ class GraphAgentPlanner:
         after_time: float | None = None,
     ) -> PlannerDecision | None:
         if not self._action_intent_prefers_long_horizon_object_retrieval(state=state):
+            return None
+        latest_result = self._latest_successful_action_intent_result(state)
+        if self._action_intent_result_looks_weak_late_anchor_support(state=state, result=latest_result):
             return None
         nodes = self._latest_action_intent_long_horizon_nodes(state)
         if not nodes:
@@ -6632,9 +6772,6 @@ class GraphAgentPlanner:
         if bias_profile["final_location_unclear"]:
             return fixture_bucket in {"unknown", "workspace", "other"} or not target_fixture
         if bias_profile["next_use_unclear"]:
-            return fixture_bucket in {"unknown", "workspace", "other"} or not target_fixture
-        needed_profile = self._action_intent_needed_observation_profile(state=state)
-        if needed_profile["prefer_final_placement"] or needed_profile["prefer_future_use_outcome"]:
             return fixture_bucket in {"unknown", "workspace", "other"} or not target_fixture
         return False
 
@@ -6773,12 +6910,7 @@ class GraphAgentPlanner:
         if self._action_intent_fixture_bucket(target_fixture) != "storage":
             return False
         bias_profile = self._action_intent_timeline_review_bias_profile(state)
-        needed_profile = self._action_intent_needed_observation_profile(state=state)
-        if not (
-            bias_profile["final_location_unclear"]
-            or needed_profile["prefer_final_placement"]
-            or needed_profile["prefer_future_use_outcome"]
-        ):
+        if not (bias_profile["final_location_unclear"] or bias_profile["next_use_unclear"]):
             return False
         anchor_node = self._action_intent_long_horizon_anchor_node_at_time(
             state=state,
@@ -7048,224 +7180,26 @@ class GraphAgentPlanner:
             after_time=after_time,
         )
 
-    def _build_action_intent_needed_observation_target_revisit_decision(
-        self,
-        *,
-        state: AgentState,
-        hints: dict[str, Any],
-        result: dict[str, Any] | None,
-        thought: str,
-    ) -> PlannerDecision | None:
-        hint = self._action_intent_needed_observation_target_hint(state=state, result=result)
-        if hint is None:
-            return None
-        downstream_target, target_kind = hint
-        nodes = self._latest_action_intent_long_horizon_nodes(state, object_hint=downstream_target)
-        if not nodes:
-            return PlannerDecision(
-                thought=f"{thought} 先定位 `needed_observation` 明确点名的判别目标 `{downstream_target}` 在更晚时刻的轨迹。",
-                tool="query_object",
-                args={"query": downstream_target, "limit": 24},
-            )
-        anchor_time = self._latest_action_intent_target_spatial_anchor_time(state)
-        latest_followup_end = self._latest_action_intent_followup_end_time(state)
-        after_time: float | None = None
-        if anchor_time is not None and latest_followup_end is not None:
-            after_time = max(anchor_time, latest_followup_end)
-        elif latest_followup_end is not None:
-            after_time = latest_followup_end
-        else:
-            after_time = anchor_time
-        min_start_time = None if after_time is None else float(after_time) + 0.15
-        selected = self._action_intent_select_long_horizon_node(
-            state=state,
-            hints=hints,
-            nodes=nodes,
-            min_start_time=min_start_time,
-            object_hint=downstream_target,
-        )
-        if selected is None:
-            return PlannerDecision(
-                thought=f"{thought} 继续重新检索 `needed_observation` 指向的判别目标 `{downstream_target}`。",
-                tool="query_object",
-                args={"query": downstream_target, "limit": 24},
-            )
-        _node, start_time, end_time = selected
-        query_time = start_time if abs(end_time - start_time) < 0.25 else (start_time + min(end_time, start_time + 1.2)) / 2
-        return PlannerDecision(
-            thought=thought,
-            tool="query_spatial_context",
-            args={
-                "time_s": query_time,
-                "object_name": downstream_target,
-                "limit": 16 if target_kind == "fixture" else 18,
-            },
-        )
-
-    def _build_action_intent_needed_observation_relation_revisit_decision(
-        self,
-        *,
-        state: AgentState,
-        hints: dict[str, Any],
-        result: dict[str, Any] | None,
-        thought: str,
-    ) -> PlannerDecision | None:
-        hint = self._action_intent_needed_observation_relation_hint(state=state, result=result)
-        if hint is None:
-            return None
-        target_name, _target_kind, relation_name = hint
-        action_object = self._action_intent_question_object_hint(state)
-        if not action_object:
-            return None
-        anchor_time = self._latest_action_intent_target_spatial_anchor_time(state)
-        latest_followup_end = self._latest_action_intent_followup_end_time(state)
-        after_time: float | None = None
-        if anchor_time is not None and latest_followup_end is not None:
-            after_time = max(anchor_time, latest_followup_end)
-        elif latest_followup_end is not None:
-            after_time = latest_followup_end
-        else:
-            after_time = anchor_time
-        min_start_time = None if after_time is None else float(after_time) + 0.15
-        nodes = self._latest_action_intent_long_horizon_nodes(state, object_hint=action_object)
-        selected = None
-        if nodes:
-            selected = self._action_intent_select_long_horizon_node(
-                state=state,
-                hints=hints,
-                nodes=nodes,
-                min_start_time=min_start_time,
-                object_hint=action_object,
-            )
-        if selected is None:
-            target_nodes = self._latest_action_intent_long_horizon_nodes(state, object_hint=target_name)
-            if target_nodes:
-                selected = self._action_intent_select_long_horizon_node(
-                    state=state,
-                    hints=hints,
-                    nodes=target_nodes,
-                    min_start_time=min_start_time,
-                    object_hint=target_name,
-                )
-        if selected is None:
-            query_name = target_name if target_name and target_name != action_object else action_object
-            return PlannerDecision(
-                thought=(
-                    f"{thought} 当前还没有足够晚的轨迹锚点，先重新定位 `{query_name}` 的更晚轨迹，"
-                    f"确认 `{action_object}` 与判别目标的关系是否真的变成了 `{relation_name}`。"
-                ),
-                tool="query_object",
-                args={"query": query_name, "limit": 24},
-            )
-        _node, start_time, end_time = selected
-        query_time = start_time if abs(end_time - start_time) < 0.25 else (start_time + min(end_time, start_time + 1.2)) / 2
-        return PlannerDecision(
-            thought=thought,
-            tool="query_spatial_context",
-            args={
-                "time_s": query_time,
-                "object_name": action_object,
-                "limit": 18,
-            },
-        )
-
-    def _action_intent_recent_later_outcome_finalize_withheld_marker(self, state: AgentState) -> str:
-        recent = list(getattr(state, "working_memory", []))[-16:]
-        marker_prefixes = (
-            "action_intent_resolution_withheld_for_nonexclusive_concrete_late_anchor=1",
-            "action_intent_resolution_withheld_for_timeline_review_bias_gap=1",
-            "action_intent_resolution_withheld_for_workspace_or_final_placement_claim=1",
-            "action_intent_resolution_withheld_for_generic_hand_free_enablement=1",
-            "action_intent_resolution_withheld_for_generic_access_or_space_enablement=1",
-            "action_intent_resolution_withheld_for_generic_relocation_or_storage_enablement=1",
-        )
-        for item in reversed(recent):
-            if not isinstance(item, str):
-                continue
-            for prefix in marker_prefixes:
-                if item.startswith(prefix):
-                    return prefix
-        return ""
-
-    def _action_intent_recent_generic_hand_free_finalize_withheld_hint(self, state: AgentState) -> tuple[str, str] | None:
-        recent = list(getattr(state, "working_memory", []))[-16:]
-        prefix = "action_intent_resolution_withheld_for_generic_hand_free_enablement=1"
-        for item in reversed(recent):
-            if not isinstance(item, str) or not item.startswith(prefix):
-                continue
-            marker_match = re.search(r"\btarget=(.+?)\s+kind=(object|fixture)\b", item)
-            target = str(marker_match.group(1) or "").strip() if marker_match else ""
-            kind = str(marker_match.group(2) or "").strip() if marker_match else ""
-            if target and kind:
-                return target, kind
-        return None
-
     def _action_intent_recent_generic_access_or_space_finalize_withheld_hint(self, state: AgentState) -> tuple[str, str] | None:
-        recent = list(getattr(state, "working_memory", []))[-16:]
-        prefix = "action_intent_resolution_withheld_for_generic_access_or_space_enablement=1"
-        for item in reversed(recent):
-            if not isinstance(item, str) or not item.startswith(prefix):
-                continue
-            marker_match = re.search(r"\btarget=(.+?)\s+kind=(object|fixture)\b", item)
-            target = str(marker_match.group(1) or "").strip() if marker_match else ""
-            kind = str(marker_match.group(2) or "").strip() if marker_match else ""
-            if target and kind:
-                return target, kind
         return None
 
     def _action_intent_recent_generic_relocation_or_storage_finalize_withheld_hint(
         self,
         state: AgentState,
     ) -> tuple[str, str] | None:
-        recent = list(getattr(state, "working_memory", []))[-16:]
-        prefix = "action_intent_resolution_withheld_for_generic_relocation_or_storage_enablement=1"
-        for item in reversed(recent):
-            if not isinstance(item, str) or not item.startswith(prefix):
-                continue
-            marker_match = re.search(r"\btarget=(.+?)\s+kind=(object|fixture)\b", item)
-            target = str(marker_match.group(1) or "").strip() if marker_match else ""
-            kind = str(marker_match.group(2) or "").strip() if marker_match else ""
-            if target and kind:
-                return target, kind
         return None
 
     def _action_intent_recent_mixed_horizon_later_target_withheld_hint(
         self,
         state: AgentState,
     ) -> tuple[str, str] | None:
-        recent = list(getattr(state, "working_memory", []))[-16:]
-        prefix = "action_intent_resolution_withheld_for_mixed_horizon_later_target=1"
-        for item in reversed(recent):
-            if not isinstance(item, str) or not item.startswith(prefix):
-                continue
-            marker_match = re.search(r"\btarget=(.+?)\s+kind=(object|fixture)\b", item)
-            target = str(marker_match.group(1) or "").strip() if marker_match else ""
-            kind = str(marker_match.group(2) or "").strip() if marker_match else ""
-            if target and kind:
-                return target, kind
         return None
 
     def _action_intent_recent_unresolved_rerank_withheld_reason(self, state: AgentState) -> str:
-        recent = list(getattr(state, "working_memory", []))[-16:]
-        for item in reversed(recent):
-            if not isinstance(item, str) or not item.startswith("action_intent_unresolved_rerank_withheld"):
-                continue
-            match = re.search(r"reason=([a-z0-9_,.-]+)", item)
-            if match:
-                return str(match.group(1) or "").strip().lower()
         return ""
 
     def _action_intent_unresolved_rerank_reason_prefers_later_outcome_revisit(self, state: AgentState) -> bool:
-        reason = self._action_intent_recent_unresolved_rerank_withheld_reason(state)
-        if not reason:
-            return False
-        later_outcome_gaps = (
-            "timeline_review_final_location_gap",
-            "timeline_review_next_use_gap",
-            "timeline_review_revealed_slot_gap",
-            "missing_later_outcome_evidence",
-        )
-        return any(gap in reason for gap in later_outcome_gaps)
+        return False
 
     def _action_intent_choice_target_object_candidates(self, *, choice: str, action_object: str) -> list[str]:
         choice_lc = str(choice or "").lower()
@@ -7316,6 +7250,12 @@ class GraphAgentPlanner:
             if not re.search(rf"(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])", choice_lc):
                 continue
             target_tokens.append(token)
+        target_tokens.extend(
+            self._action_intent_extract_target_phrases_from_text(
+                text=choice_lc,
+                action_object=action_object,
+            )
+        )
         seen: set[str] = set()
         ordered: list[str] = []
         for token in target_tokens:
@@ -7324,6 +7264,40 @@ class GraphAgentPlanner:
             seen.add(token)
             ordered.append(token)
         return ordered
+
+    def _action_intent_extract_target_phrases_from_text(self, *, text: str, action_object: str) -> list[str]:
+        text_lc = str(text or "").lower()
+        if not text_lc:
+            return []
+        action_object_lc = str(action_object or "").strip().lower()
+        stop_tokens = {"the", "a", "an", "this", "that", "it", "them", "later", "use", "back", "away"}
+        patterns = (
+            r"\b(?:retrieve|get|take|reach|pick up|grab|use|wash|rinse|measure|weigh|open)\s+(?:the|a|an|this|that)?\s*([a-z][a-z0-9]*(?:\s+[a-z][a-z0-9]*){0,3})",
+            r"\b(?:put|place|drop|return|move|slide)\s+(?:the|a|an|this|that)?\s*([a-z][a-z0-9]*(?:\s+[a-z][a-z0-9]*){0,3})\s+(?:into|onto|on|in|back|away)\b",
+            r"\b(?:reveal|reveals|revealed|revealing)\s+(?:the|a|an|this|that)?\s*([a-z][a-z0-9]*(?:\s+[a-z][a-z0-9]*){0,3})",
+        )
+        extracted: list[str] = []
+        for pattern in patterns:
+            for match in re.finditer(pattern, text_lc):
+                candidate = str(match.group(1) or "").strip()
+                candidate = re.sub(r"\b(?:for|to|with|from|near|behind|under|onto|into|inside)\b.*$", "", candidate).strip()
+                candidate_tokens = [token for token in candidate.split() if token and token not in stop_tokens]
+                if not candidate_tokens:
+                    continue
+                normalized = " ".join(candidate_tokens).strip()
+                if not normalized or normalized == action_object_lc:
+                    continue
+                if len(normalized) <= 2:
+                    continue
+                extracted.append(normalized)
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for item in extracted:
+            if item in seen:
+                continue
+            seen.add(item)
+            deduped.append(item)
+        return deduped
 
     def _action_intent_choice_fixture_target_candidates(self, *, choice: str, action_object: str) -> list[str]:
         fixture_targets = {
@@ -7356,25 +7330,23 @@ class GraphAgentPlanner:
         categories: set[str],
         evidence_text: str,
     ) -> tuple[str, str] | None:
-        fixture_targets = self._action_intent_choice_fixture_target_candidates(choice=choice, action_object=action_object)
-        if fixture_targets:
-            return fixture_targets[0], "fixture"
-        object_targets = [
-            token
-            for token in self._action_intent_choice_target_object_candidates(choice=choice, action_object=action_object)
-            if token not in set(fixture_targets)
-        ]
-        if object_targets:
-            return object_targets[0], "object"
-        if "measure_weigh" in categories:
-            return "scale", "fixture"
         evidence_lc = str(evidence_text or "").strip().lower()
+        if not evidence_lc:
+            return None
         if "final_place_return" in categories:
             for token in ("fridge", "drawer", "cupboard", "rack", "dishwasher", "shelf"):
                 if token in evidence_lc:
                     return token, ("object" if token == "shelf" else "fixture")
-        if categories & {"transfer_contents", "serve_consume", "discard", "food_prep", "clean_dry"}:
+        if categories & {
+            "measure_weigh",
+            "transfer_contents",
+            "serve_consume",
+            "discard",
+            "food_prep",
+            "clean_dry",
+        }:
             for token, kind in (
+                ("scale", "fixture"),
                 ("sink", "fixture"),
                 ("bin", "fixture"),
                 ("bowl", "object"),
@@ -7455,125 +7427,18 @@ class GraphAgentPlanner:
         )
 
     def _action_intent_unresolved_rerank_downstream_object_hint(self, state: AgentState) -> str:
-        reason = self._action_intent_recent_unresolved_rerank_withheld_reason(state)
-        if not reason or not any(
-            gap in reason for gap in ("timeline_review_revealed_slot_gap", "timeline_review_revealed_target_gap")
-        ):
-            return ""
-        latest = self._latest_action_intent_resolution_payload(state)
-        if latest is None:
-            return ""
-        _tool_name, payload = latest
-        choices = [str(choice) for choice in getattr(state, "choices", [])]
-        best_index = self._coerce_choice_index(payload.get("best_index"), choices)
-        if best_index is None:
-            return ""
-        action_object = self._action_intent_question_object_hint(state)
-        fixture_only = {"slot", "rack", "sink", "tap", "faucet", "fridge", "door", "drawer", "cupboard", "dishwasher"}
-        candidate_indices: list[int] = [best_index]
-        competitor_index = self._action_intent_competing_candidate_index(payload, state)
-        if competitor_index is not None and competitor_index != best_index:
-            candidate_indices.append(competitor_index)
-        seen: set[str] = set()
-        for index in candidate_indices:
-            if index < 0 or index >= len(choices):
-                continue
-            choice = choices[index]
-            for token in self._action_intent_choice_target_object_candidates(choice=choice, action_object=action_object):
-                if token in fixture_only or token in seen:
-                    continue
-                seen.add(token)
-                return token
         return ""
 
     def _action_intent_unresolved_rerank_downstream_fixture_hint(self, state: AgentState) -> str:
-        reason = self._action_intent_recent_unresolved_rerank_withheld_reason(state)
-        if not reason or "timeline_review_hand_free_or_fixture_gap" not in reason:
-            return ""
-        latest = self._latest_action_intent_resolution_payload(state)
-        if latest is None:
-            return ""
-        _tool_name, payload = latest
-        best_index = self._coerce_choice_index(payload.get("best_index"), getattr(state, "choices", []))
-        if best_index is None:
-            return ""
-        choice = str(getattr(state, "choices", [])[best_index])
-        action_object = self._action_intent_question_object_hint(state)
-        for token in self._action_intent_choice_fixture_target_candidates(choice=choice, action_object=action_object):
-            return token
         return ""
 
     def _action_intent_unresolved_rerank_mixed_horizon_later_target_hint(
         self,
         state: AgentState,
     ) -> tuple[str, str] | None:
-        reason = self._action_intent_recent_unresolved_rerank_withheld_reason(state)
-        if not reason or not any(
-            gap in reason
-            for gap in (
-                "missing_later_outcome_evidence",
-                "timeline_review_next_use_gap",
-                "timeline_review_final_location_gap",
-            )
-        ):
+        if not self._is_action_intent_task(state):
             return None
-        latest = self._latest_action_intent_resolution_payload(state)
-        if latest is None:
-            return None
-        _tool_name, payload = latest
-        choices = [str(choice) for choice in getattr(state, "choices", [])]
-        best_index = self._coerce_choice_index(payload.get("best_index"), choices)
-        competitor_index = self._action_intent_competing_candidate_index(payload, state)
-        if best_index is None or competitor_index is None or best_index == competitor_index:
-            return None
-        categories_by_index = selected_choice_categories(choices, [best_index, competitor_index])
-        best_categories = set(categories_by_index.get(best_index) or set())
-        competitor_categories = set(categories_by_index.get(competitor_index) or set())
-        later_outcome_categories = {
-            "final_place_return",
-            "measure_weigh",
-            "transfer_contents",
-            "serve_consume",
-            "clean_dry",
-            "food_prep",
-            "discard",
-        }
-        best_choice = choices[best_index]
-        competitor_choice = choices[competitor_index]
-        best_is_immediate = self._action_intent_choice_is_immediate_micro_outcome_candidate(best_choice, best_categories)
-        competitor_is_immediate = self._action_intent_choice_is_immediate_micro_outcome_candidate(
-            competitor_choice,
-            competitor_categories,
-        )
-        later_index: int | None = None
-        later_categories: set[str] = set()
-        later_choice = ""
-        if best_is_immediate and competitor_categories & later_outcome_categories:
-            later_index = competitor_index
-            later_categories = competitor_categories
-            later_choice = competitor_choice
-        elif competitor_is_immediate and best_categories & later_outcome_categories:
-            later_index = best_index
-            later_categories = best_categories
-            later_choice = best_choice
-        if later_index is None:
-            return None
-        action_object = self._action_intent_question_object_hint(state)
-        combined_text = later_choice.lower()
-        for item in payload.get("candidate_evidence") or []:
-            if not isinstance(item, dict):
-                continue
-            index = self._coerce_choice_index(item.get("index"), choices)
-            if index != later_index:
-                continue
-            combined_text = f"{combined_text} {str(item.get('support') or '').lower()} {str(item.get('contradiction') or '').lower()}"
-            break
-        return self._action_intent_later_outcome_target_hint(
-            choice=later_choice,
-            action_object=action_object,
-            categories=later_categories,
-            evidence_text=combined_text,
-        )
+        return None
 
     def _action_intent_verifier_blocked_mixed_horizon_later_target_hint(
         self,
@@ -7584,101 +7449,7 @@ class GraphAgentPlanner:
     ) -> tuple[str, str] | None:
         if not self._is_action_intent_task(state) or not isinstance(result, dict):
             return None
-        if blocker_hint not in {"post_action_evidence", "future_use_close_call", "pairwise_close_call"}:
-            return None
-        choices = [str(choice) for choice in getattr(state, "choices", [])]
-        best_index = self._coerce_choice_index(result.get("best_index"), choices)
-        competitor_index = self._action_intent_competing_candidate_index(result, state)
-        if best_index is None or competitor_index is None or best_index == competitor_index:
-            return None
-        categories_by_index = selected_choice_categories(choices, [best_index, competitor_index])
-        best_categories = set(categories_by_index.get(best_index) or set())
-        competitor_categories = set(categories_by_index.get(competitor_index) or set())
-        later_outcome_categories = {
-            "final_place_return",
-            "measure_weigh",
-            "transfer_contents",
-            "serve_consume",
-            "clean_dry",
-            "food_prep",
-            "discard",
-        }
-        best_choice = choices[best_index]
-        competitor_choice = choices[competitor_index]
-        best_is_immediate = self._action_intent_choice_is_immediate_micro_outcome_candidate(best_choice, best_categories)
-        competitor_is_immediate = self._action_intent_choice_is_immediate_micro_outcome_candidate(
-            competitor_choice,
-            competitor_categories,
-        )
-        later_index: int | None = None
-        later_categories: set[str] = set()
-        later_choice = ""
-        if best_is_immediate and competitor_categories & later_outcome_categories:
-            later_index = competitor_index
-            later_categories = competitor_categories
-            later_choice = competitor_choice
-        elif competitor_is_immediate and best_categories & later_outcome_categories:
-            later_index = best_index
-            later_categories = best_categories
-            later_choice = best_choice
-        if later_index is None:
-            return None
-        action_object = self._action_intent_question_object_hint(state)
-        reason_text = str(result.get("reason") or "").lower()
-        needed_observation_text = str(result.get("needed_observation") or "").lower()
-        combined_text = f"{later_choice.lower()} {reason_text} {needed_observation_text}".strip()
-        for item in result.get("candidate_evidence") or []:
-            if not isinstance(item, dict):
-                continue
-            index = self._coerce_choice_index(item.get("index"), choices)
-            if index != later_index:
-                continue
-            combined_text = (
-                f"{combined_text} {str(item.get('support') or '').lower()} {str(item.get('contradiction') or '').lower()}"
-            ).strip()
-            break
-        ambiguity_markers = (
-            "whether",
-            "unclear",
-            "not yet visible",
-            "not visible",
-            "remains unresolved",
-            "still unresolved",
-            "still unclear",
-            "could still",
-            "may be",
-            "might be",
-            "未明确",
-            "仍不清楚",
-            "还看不出",
-            "证据不足",
-        )
-        if not any(marker in combined_text for marker in ambiguity_markers):
-            return None
-        # Only override same-object revisit when the current top answer is the
-        # immediate micro-outcome and the later-use competitor still needs proof.
-        if later_index == best_index:
-            same_object_block_markers = (
-                "same-object",
-                "same object",
-                "cap action",
-                "lid action",
-                "cover fit",
-                "cover fits",
-            )
-            if "final_place_return" not in later_categories and any(
-                marker in f"{reason_text} {needed_observation_text}" for marker in same_object_block_markers
-            ):
-                return None
-        later_target = self._action_intent_later_outcome_target_hint(
-            choice=later_choice,
-            action_object=action_object,
-            categories=later_categories,
-            evidence_text=combined_text,
-        )
-        if later_target is None:
-            return None
-        return later_target
+        return None
 
     def _action_intent_choice_has_hand_free_language(self, choice: str) -> bool:
         text = str(choice or "").strip().lower()
@@ -7841,80 +7612,6 @@ class GraphAgentPlanner:
             )
         )
 
-    def _action_intent_verifier_blocked_hand_free_target_hint(
-        self,
-        *,
-        state: AgentState,
-        result: dict[str, Any] | None,
-        blocker_hint: str,
-    ) -> tuple[str, str] | None:
-        if not self._is_action_intent_task(state) or not isinstance(result, dict):
-            return None
-        if blocker_hint not in {"post_action_evidence", "future_use_close_call", "pairwise_close_call"}:
-            return None
-        choices = [str(choice) for choice in getattr(state, "choices", [])]
-        best_index = self._coerce_choice_index(result.get("best_index"), choices)
-        competitor_index = self._action_intent_competing_candidate_index(result, state)
-        if best_index is None or competitor_index is None or best_index == competitor_index:
-            return None
-        best_choice = choices[best_index]
-        competitor_choice = choices[competitor_index]
-        best_has_hand_free = self._action_intent_choice_has_hand_free_language(best_choice)
-        competitor_has_hand_free = self._action_intent_choice_has_hand_free_language(competitor_choice)
-        if not best_has_hand_free and not competitor_has_hand_free:
-            return None
-        action_object = self._action_intent_question_object_hint(state)
-        reason_text = str(result.get("reason") or "").lower()
-        needed_observation_text = str(result.get("needed_observation") or "").lower()
-        combined_text = f"{reason_text} {needed_observation_text}".strip()
-        for item in result.get("candidate_evidence") or []:
-            if not isinstance(item, dict):
-                continue
-            index = self._coerce_choice_index(item.get("index"), choices)
-            if index not in {best_index, competitor_index}:
-                continue
-            combined_text = (
-                f"{combined_text} {str(item.get('support') or '').lower()} {str(item.get('contradiction') or '').lower()}"
-            ).strip()
-        uncertainty_markers = (
-            "unclear",
-            "not yet visible",
-            "not visible",
-            "remains ambiguous",
-            "still ambiguous",
-            "still unresolved",
-            "may next",
-            "could next",
-            "not yet seen",
-            "仍不清楚",
-            "还看不出",
-            "证据不足",
-        )
-        hand_free_markers = (
-            "free hand",
-            "other hand",
-            "left hand",
-            "right hand",
-            "腾出",
-            "另一只手",
-            "左手",
-            "右手",
-        )
-        if not any(marker in combined_text for marker in hand_free_markers):
-            return None
-        if not any(marker in combined_text for marker in uncertainty_markers):
-            return None
-        target_hint = None
-        if best_has_hand_free:
-            target_hint = self._action_intent_choice_target_or_same_object_hint(choice=competitor_choice, action_object=action_object)
-            if target_hint is None:
-                target_hint = self._action_intent_choice_target_or_same_object_hint(choice=best_choice, action_object=action_object)
-        else:
-            target_hint = self._action_intent_choice_target_or_same_object_hint(choice=best_choice, action_object=action_object)
-            if target_hint is None:
-                target_hint = self._action_intent_choice_target_or_same_object_hint(choice=competitor_choice, action_object=action_object)
-        return target_hint
-
     def _action_intent_verifier_blocked_measurement_target_hint(
         self,
         *,
@@ -7924,55 +7621,7 @@ class GraphAgentPlanner:
     ) -> tuple[str, str] | None:
         if not self._is_action_intent_task(state) or not isinstance(result, dict):
             return None
-        if blocker_hint != "future_use_close_call":
-            return None
-        choices = [str(choice) for choice in getattr(state, "choices", [])]
-        best_index = self._coerce_choice_index(result.get("best_index"), choices)
-        competitor_index = self._action_intent_competing_candidate_index(result, state)
-        if best_index is None or competitor_index is None or best_index == competitor_index:
-            return None
-        best_choice = choices[best_index]
-        competitor_choice = choices[competitor_index]
-        best_is_generic_meta = self._action_intent_choice_is_generic_measurement_meta_purpose(best_choice)
-        competitor_is_generic_meta = self._action_intent_choice_is_generic_measurement_meta_purpose(competitor_choice)
-        best_is_exact_role = self._action_intent_choice_is_exact_measurement_role_purpose(best_choice)
-        competitor_is_exact_role = self._action_intent_choice_is_exact_measurement_role_purpose(competitor_choice)
-        if not ((best_is_generic_meta and competitor_is_exact_role) or (competitor_is_generic_meta and best_is_exact_role)):
-            return None
-        combined_text = (
-            f"{str(result.get('reason') or '').lower()} "
-            f"{str(result.get('needed_observation') or '').lower()}"
-        ).strip()
-        for item in result.get("candidate_evidence") or []:
-            if not isinstance(item, dict):
-                continue
-            index = self._coerce_choice_index(item.get("index"), choices)
-            if index not in {best_index, competitor_index}:
-                continue
-            combined_text = (
-                f"{combined_text} {str(item.get('support') or '').lower()} {str(item.get('contradiction') or '').lower()}"
-            ).strip()
-        uncertainty_markers = (
-            "unclear",
-            "not yet visible",
-            "not visible",
-            "not yet seen",
-            "still unclear",
-            "still unresolved",
-            "plausible",
-            "missing",
-            "no reading",
-            "no tare",
-            "no update",
-            "仍不清楚",
-            "还看不出",
-            "证据不足",
-            "没有读数",
-            "没有归零",
-        )
-        if not any(marker in combined_text for marker in uncertainty_markers):
-            return None
-        return "scale", "fixture"
+        return None
 
     def _action_intent_verifier_blocked_phone_record_target_hint(
         self,
@@ -7983,164 +7632,7 @@ class GraphAgentPlanner:
     ) -> tuple[str, str] | None:
         if not self._is_action_intent_task(state) or not isinstance(result, dict):
             return None
-        if blocker_hint != "future_use_close_call":
-            return None
-        choices = [str(choice) for choice in getattr(state, "choices", [])]
-        best_index = self._coerce_choice_index(result.get("best_index"), choices)
-        competitor_index = self._action_intent_competing_candidate_index(result, state)
-        if best_index is None or competitor_index is None or best_index == competitor_index:
-            return None
-        action_object = self._action_intent_question_object_hint(state)
-        best_choice = choices[best_index]
-        competitor_choice = choices[competitor_index]
-        best_is_generic_measure = self._action_intent_choice_is_generic_measure_phone_goal(
-            choice=best_choice,
-            action_object=action_object,
-        )
-        competitor_is_generic_measure = self._action_intent_choice_is_generic_measure_phone_goal(
-            choice=competitor_choice,
-            action_object=action_object,
-        )
-        best_is_exact_record = self._action_intent_choice_is_phone_record_target_purpose(best_choice)
-        competitor_is_exact_record = self._action_intent_choice_is_phone_record_target_purpose(competitor_choice)
-        if not ((best_is_generic_measure and competitor_is_exact_record) or (competitor_is_generic_measure and best_is_exact_record)):
-            return None
-        combined_text = (
-            f"{str(result.get('reason') or '').lower()} "
-            f"{str(result.get('needed_observation') or '').lower()}"
-        ).strip()
-        candidate_rows: list[tuple[int, float, str, str, str]] = []
-        for item in result.get("candidate_evidence") or []:
-            if not isinstance(item, dict):
-                continue
-            index = self._coerce_choice_index(item.get("index"), choices)
-            if index is None:
-                continue
-            choice = choices[index]
-            support = str(item.get("support") or "").lower()
-            contradiction = str(item.get("contradiction") or "").lower()
-            try:
-                score = float(item.get("score") or 0.0)
-            except Exception:  # noqa: BLE001
-                score = 0.0
-            combined_text = (
-                f"{combined_text} {support} {contradiction}"
-            ).strip()
-            candidate_rows.append((index, score, choice, support, contradiction))
-        uncertainty_markers = (
-            "unclear",
-            "not yet visible",
-            "not visible",
-            "not yet seen",
-            "still unclear",
-            "still unresolved",
-            "no actual recording target",
-            "no direct recording target",
-            "recording target is not shown",
-            "no specific target",
-            "no broccoli target",
-            "no coriander target",
-            "screen is not readable",
-            "screen not readable",
-            "entry is not readable",
-            "仍不清楚",
-            "还看不出",
-            "证据不足",
-            "没有直接记录目标",
-            "没有具体目标",
-        )
-        if not any(marker in combined_text for marker in uncertainty_markers):
-            return None
-        exact_target_candidates: list[tuple[float, str]] = []
-        for index, score, choice, support, contradiction in candidate_rows:
-            if not self._action_intent_choice_is_phone_record_target_purpose(choice):
-                continue
-            target_hint = self._action_intent_choice_record_target_hint(choice)
-            if not target_hint:
-                continue
-            candidate_uncertainty = f"{support} {contradiction}"
-            uncertainty_bonus = 0.0
-            if any(
-                marker in candidate_uncertainty
-                for marker in (
-                    "not readable",
-                    "screen not readable",
-                    "entry is not readable",
-                    "recording target is not shown",
-                    "no direct recording target",
-                    "no broccoli target",
-                    "no coriander target",
-                    "no carrot target",
-                    "still unclear",
-                    "still unresolved",
-                    "not yet visible",
-                    "没有直接记录目标",
-                    "还看不出",
-                    "证据不足",
-                )
-            ):
-                uncertainty_bonus += 0.22
-            if index == best_index:
-                uncertainty_bonus += 0.06
-            if index == competitor_index:
-                uncertainty_bonus += 0.04
-            exact_target_candidates.append((score + uncertainty_bonus, target_hint))
-        if not exact_target_candidates:
-            exact_choice = best_choice if best_is_exact_record else competitor_choice
-            target_hint = self._action_intent_choice_record_target_hint(exact_choice)
-            if not target_hint:
-                return None
-            return target_hint, "object"
-        exact_target_candidates.sort(key=lambda item: (-item[0], item[1]))
-        return exact_target_candidates[0][1], "object"
-
-    def _action_intent_unresolved_rerank_hand_free_object_hint(self, state: AgentState) -> str:
-        reason = self._action_intent_recent_unresolved_rerank_withheld_reason(state)
-        if not reason or "timeline_review_hand_free_or_fixture_gap" not in reason:
-            return ""
-        latest = self._latest_action_intent_resolution_payload(state)
-        if latest is None:
-            return ""
-        _tool_name, payload = latest
-        choices = [str(choice) for choice in getattr(state, "choices", [])]
-        best_index = self._coerce_choice_index(payload.get("best_index"), choices)
-        if best_index is None:
-            return ""
-        action_object = self._action_intent_question_object_hint(state)
-        best_choice = choices[best_index]
-        best_object_targets = [
-            token
-            for token in self._action_intent_choice_target_object_candidates(choice=best_choice, action_object=action_object)
-            if token not in set(self._action_intent_choice_fixture_target_candidates(choice=best_choice, action_object=action_object))
-        ]
-        if best_object_targets:
-            return best_object_targets[0]
-        if self._action_intent_choice_is_same_object_active_use(choice=best_choice, action_object=action_object):
-            return action_object
-        candidate_rows: list[tuple[float, int]] = []
-        for item in payload.get("candidate_evidence") or []:
-            if not isinstance(item, dict):
-                continue
-            index = self._coerce_choice_index(item.get("index"), choices)
-            if index is None or index == best_index:
-                continue
-            try:
-                score = float(item.get("score") or 0.0)
-            except Exception:  # noqa: BLE001
-                score = 0.0
-            candidate_rows.append((score, index))
-        for _score, index in sorted(candidate_rows, key=lambda pair: (-pair[0], pair[1])):
-            choice = choices[index]
-            if self._action_intent_choice_is_same_object_active_use(choice=choice, action_object=action_object):
-                return action_object
-            object_targets = [
-                token
-                for token in self._action_intent_choice_target_object_candidates(choice=choice, action_object=action_object)
-                if token not in set(self._action_intent_choice_fixture_target_candidates(choice=choice, action_object=action_object))
-            ]
-            if object_targets:
-                return object_targets[0]
-        return ""
+        return None
 
     def _build_action_intent_finalize_withheld_long_horizon_revisit_decision(
         self,
@@ -8149,8 +7641,9 @@ class GraphAgentPlanner:
         hints: dict[str, Any],
         thought: str,
     ) -> PlannerDecision | None:
-        marker = self._action_intent_recent_later_outcome_finalize_withheld_marker(state)
-        if not marker:
+        if self._action_intent_disable_legacy_specialized_recovery(state):
+            return None
+        if not self._action_intent_prefers_long_horizon_object_retrieval(state=state):
             return None
         anchor_time = self._latest_action_intent_target_spatial_anchor_time(state)
         latest_followup_end = self._latest_action_intent_followup_end_time(state)
@@ -8185,165 +7678,6 @@ class GraphAgentPlanner:
             },
         )
 
-    def _build_action_intent_finalize_withheld_generic_hand_free_revisit_decision(
-        self,
-        *,
-        state: AgentState,
-        hints: dict[str, Any],
-        thought: str,
-    ) -> PlannerDecision | None:
-        hint = self._action_intent_recent_generic_hand_free_finalize_withheld_hint(state)
-        if hint is None:
-            return None
-        downstream_target, target_kind = hint
-        nodes = self._latest_action_intent_long_horizon_nodes(state, object_hint=downstream_target)
-        if not nodes:
-            return PlannerDecision(
-                thought=f"{thought} 先定位 finalizer 指出的真实下游目标 `{downstream_target}` 在更晚时刻的轨迹。",
-                tool="query_object",
-                args={"query": downstream_target, "limit": 24},
-            )
-        anchor_time = self._latest_action_intent_target_spatial_anchor_time(state)
-        latest_followup_end = self._latest_action_intent_followup_end_time(state)
-        after_time: float | None = None
-        if anchor_time is not None and latest_followup_end is not None:
-            after_time = max(anchor_time, latest_followup_end)
-        elif latest_followup_end is not None:
-            after_time = latest_followup_end
-        else:
-            after_time = anchor_time
-        min_start_time = None if after_time is None else float(after_time) + 0.15
-        selected = self._action_intent_select_long_horizon_node(
-            state=state,
-            hints=hints,
-            nodes=nodes,
-            min_start_time=min_start_time,
-            object_hint=downstream_target,
-        )
-        if selected is None:
-            return PlannerDecision(
-                thought=f"{thought} 继续重新检索 finalizer 指出的真实下游目标 `{downstream_target}` 的更晚轨迹。",
-                tool="query_object",
-                args={"query": downstream_target, "limit": 24},
-            )
-        _node, start_time, end_time = selected
-        query_time = start_time if abs(end_time - start_time) < 0.25 else (start_time + min(end_time, start_time + 1.2)) / 2
-        return PlannerDecision(
-            thought=thought,
-            tool="query_spatial_context",
-            args={
-                "time_s": query_time,
-                "object_name": downstream_target,
-                "limit": 16 if target_kind == "fixture" else 18,
-            },
-        )
-
-    def _build_action_intent_finalize_withheld_generic_access_or_space_revisit_decision(
-        self,
-        *,
-        state: AgentState,
-        hints: dict[str, Any],
-        thought: str,
-    ) -> PlannerDecision | None:
-        hint = self._action_intent_recent_generic_access_or_space_finalize_withheld_hint(state)
-        if hint is None:
-            return None
-        downstream_target, target_kind = hint
-        nodes = self._latest_action_intent_long_horizon_nodes(state, object_hint=downstream_target)
-        if not nodes:
-            return PlannerDecision(
-                thought=f"{thought} 先定位 finalizer 指出的 reveal/access 下游目标 `{downstream_target}` 在更晚时刻的轨迹。",
-                tool="query_object",
-                args={"query": downstream_target, "limit": 24},
-            )
-        anchor_time = self._latest_action_intent_target_spatial_anchor_time(state)
-        latest_followup_end = self._latest_action_intent_followup_end_time(state)
-        after_time: float | None = None
-        if anchor_time is not None and latest_followup_end is not None:
-            after_time = max(anchor_time, latest_followup_end)
-        elif latest_followup_end is not None:
-            after_time = latest_followup_end
-        else:
-            after_time = anchor_time
-        min_start_time = None if after_time is None else float(after_time) + 0.15
-        selected = self._action_intent_select_long_horizon_node(
-            state=state,
-            hints=hints,
-            nodes=nodes,
-            min_start_time=min_start_time,
-            object_hint=downstream_target,
-        )
-        if selected is None:
-            return PlannerDecision(
-                thought=f"{thought} 继续重新检索 finalizer 指出的 reveal/access 下游目标 `{downstream_target}` 的更晚轨迹。",
-                tool="query_object",
-                args={"query": downstream_target, "limit": 24},
-            )
-        _node, start_time, end_time = selected
-        query_time = start_time if abs(end_time - start_time) < 0.25 else (start_time + min(end_time, start_time + 1.2)) / 2
-        return PlannerDecision(
-            thought=thought,
-            tool="query_spatial_context",
-            args={
-                "time_s": query_time,
-                "object_name": downstream_target,
-                "limit": 16 if target_kind == "fixture" else 18,
-            },
-        )
-
-    def _build_action_intent_finalize_withheld_generic_relocation_or_storage_revisit_decision(
-        self,
-        *,
-        state: AgentState,
-        hints: dict[str, Any],
-        thought: str,
-    ) -> PlannerDecision | None:
-        hint = self._action_intent_recent_generic_relocation_or_storage_finalize_withheld_hint(state)
-        if hint is None:
-            return None
-        downstream_target, target_kind = hint
-        nodes = self._latest_action_intent_long_horizon_nodes(state, object_hint=downstream_target)
-        if not nodes:
-            return PlannerDecision(
-                thought=f"{thought} 先定位 finalizer 指出的真实后续目标 `{downstream_target}` 在更晚时刻的轨迹。",
-                tool="query_object",
-                args={"query": downstream_target, "limit": 24},
-            )
-        anchor_time = self._latest_action_intent_target_spatial_anchor_time(state)
-        latest_followup_end = self._latest_action_intent_followup_end_time(state)
-        after_time: float | None = None
-        if anchor_time is not None and latest_followup_end is not None:
-            after_time = max(anchor_time, latest_followup_end)
-        elif latest_followup_end is not None:
-            after_time = latest_followup_end
-        else:
-            after_time = anchor_time
-        min_start_time = None if after_time is None else float(after_time) + 0.15
-        selected = self._action_intent_select_long_horizon_node(
-            state=state,
-            hints=hints,
-            nodes=nodes,
-            min_start_time=min_start_time,
-            object_hint=downstream_target,
-        )
-        if selected is None:
-            return PlannerDecision(
-                thought=f"{thought} 继续重新检索 finalizer 指出的真实后续目标 `{downstream_target}` 的更晚轨迹。",
-                tool="query_object",
-                args={"query": downstream_target, "limit": 24},
-            )
-        _node, start_time, end_time = selected
-        query_time = start_time if abs(end_time - start_time) < 0.25 else (start_time + min(end_time, start_time + 1.2)) / 2
-        return PlannerDecision(
-            thought=thought,
-            tool="query_spatial_context",
-            args={
-                "time_s": query_time,
-                "object_name": downstream_target,
-                "limit": 16 if target_kind == "fixture" else 18,
-            },
-        )
-
     def _build_action_intent_finalize_withheld_mixed_horizon_later_target_revisit_decision(
         self,
         *,
@@ -8351,70 +7685,9 @@ class GraphAgentPlanner:
         hints: dict[str, Any],
         thought: str,
     ) -> PlannerDecision | None:
-        hint = self._action_intent_recent_mixed_horizon_later_target_withheld_hint(state)
-        if hint is None:
+        if not self._is_action_intent_task(state):
             return None
-        downstream_target, target_kind = hint
-        nodes = self._latest_action_intent_long_horizon_nodes(state, object_hint=downstream_target)
-        if not nodes:
-            return PlannerDecision(
-                thought=f"{thought} 先定位 mixed-horizon 竞争里更晚结果对应的真实目标 `{downstream_target}` 轨迹。",
-                tool="query_object",
-                args={"query": downstream_target, "limit": 24},
-            )
-        anchor_time = self._latest_action_intent_target_spatial_anchor_time(state)
-        latest_followup_end = self._latest_action_intent_followup_end_time(state)
-        after_time: float | None = None
-        if anchor_time is not None and latest_followup_end is not None:
-            after_time = max(anchor_time, latest_followup_end)
-        elif latest_followup_end is not None:
-            after_time = latest_followup_end
-        else:
-            after_time = anchor_time
-        min_start_time = None if after_time is None else float(after_time) + 0.15
-        selected = self._action_intent_select_long_horizon_node(
-            state=state,
-            hints=hints,
-            nodes=nodes,
-            min_start_time=min_start_time,
-            object_hint=downstream_target,
-        )
-        if selected is None:
-            return PlannerDecision(
-                thought=f"{thought} 继续重新检索 mixed-horizon 竞争里更晚结果对应的真实目标 `{downstream_target}`。",
-                tool="query_object",
-                args={"query": downstream_target, "limit": 24},
-            )
-        if target_kind == "fixture":
-            later_selected = None
-            for node in nodes:
-                if not isinstance(node, dict):
-                    continue
-                start_raw = node.get("start_time")
-                end_raw = node.get("end_time")
-                if start_raw is None:
-                    continue
-                try:
-                    start_time = float(start_raw)
-                    end_time = float(end_raw) if end_raw is not None else start_time
-                except Exception:  # noqa: BLE001
-                    continue
-                if min_start_time is not None and start_time < min_start_time:
-                    continue
-                later_selected = (node, start_time, end_time)
-            if later_selected is not None:
-                selected = later_selected
-        _node, start_time, end_time = selected
-        query_time = start_time if abs(end_time - start_time) < 0.25 else (start_time + min(end_time, start_time + 1.2)) / 2
-        return PlannerDecision(
-            thought=thought,
-            tool="query_spatial_context",
-            args={
-                "time_s": query_time,
-                "object_name": downstream_target,
-                "limit": 16 if target_kind == "fixture" else 18,
-            },
-        )
+        return None
 
     def _build_action_intent_verifier_blocked_mixed_horizon_later_target_revisit_decision(
         self,
@@ -8424,156 +7697,9 @@ class GraphAgentPlanner:
         result: dict[str, Any] | None,
         blocker_hint: str,
     ) -> PlannerDecision | None:
-        hint = self._action_intent_verifier_blocked_mixed_horizon_later_target_hint(
-            state=state,
-            result=result,
-            blocker_hint=blocker_hint,
-        )
-        if hint is None:
+        if not self._is_action_intent_task(state):
             return None
-        downstream_target, target_kind = hint
-        nodes = self._latest_action_intent_long_horizon_nodes(state, object_hint=downstream_target)
-        if not nodes:
-            return PlannerDecision(
-                thought=f"why 题被 verifier 拦下后，当前 `infer` 已经暴露出 mixed-horizon close call；先定位更晚结果对应的真实目标 `{downstream_target}` 轨迹，而不是继续围着当前物体或近窗状态泛化补帧。",
-                tool="query_object",
-                args={"query": downstream_target, "limit": 24},
-            )
-        anchor_time = self._latest_action_intent_target_spatial_anchor_time(state)
-        latest_followup_end = self._latest_action_intent_followup_end_time(state)
-        after_time: float | None = None
-        if anchor_time is not None and latest_followup_end is not None:
-            after_time = max(anchor_time, latest_followup_end)
-        elif latest_followup_end is not None:
-            after_time = latest_followup_end
-        else:
-            after_time = anchor_time
-        min_start_time = None if after_time is None else float(after_time) + 0.15
-        selected = self._action_intent_select_long_horizon_node(
-            state=state,
-            hints=hints,
-            nodes=nodes,
-            min_start_time=min_start_time,
-            object_hint=downstream_target,
-        )
-        if selected is None:
-            return PlannerDecision(
-                thought=f"why 题被 verifier 拦下后，当前 `infer` 已经暴露出 mixed-horizon close call；继续重新检索更晚结果对应的真实目标 `{downstream_target}`。",
-                tool="query_object",
-                args={"query": downstream_target, "limit": 24},
-            )
-        if target_kind == "fixture":
-            later_selected = None
-            for node in nodes:
-                if not isinstance(node, dict):
-                    continue
-                start_raw = node.get("start_time")
-                end_raw = node.get("end_time")
-                if start_raw is None:
-                    continue
-                try:
-                    start_time = float(start_raw)
-                    end_time = float(end_raw) if end_raw is not None else start_time
-                except Exception:  # noqa: BLE001
-                    continue
-                if min_start_time is not None and start_time < min_start_time:
-                    continue
-                later_selected = (node, start_time, end_time)
-            if later_selected is not None:
-                selected = later_selected
-        _node, start_time, end_time = selected
-        query_time = start_time if abs(end_time - start_time) < 0.25 else (start_time + min(end_time, start_time + 1.2)) / 2
-        return PlannerDecision(
-            thought="why 题被 verifier 拦下后，当前 `infer` 已经暴露出 `open/check` 对 `weigh/serve/...` 的 mixed-horizon close call；优先直接追更晚结果对应的真实目标，而不是继续围着当前物体或局部状态泛化补帧。",
-            tool="query_spatial_context",
-            args={
-                "time_s": query_time,
-                "object_name": downstream_target,
-                "limit": 16 if target_kind == "fixture" else 18,
-            },
-        )
-
-    def _build_action_intent_verifier_blocked_hand_free_target_revisit_decision(
-        self,
-        *,
-        state: AgentState,
-        hints: dict[str, Any],
-        result: dict[str, Any] | None,
-        blocker_hint: str,
-    ) -> PlannerDecision | None:
-        hint = self._action_intent_verifier_blocked_hand_free_target_hint(
-            state=state,
-            result=result,
-            blocker_hint=blocker_hint,
-        )
-        if hint is None:
-            return None
-        downstream_target, target_kind = hint
-        nodes = self._latest_action_intent_long_horizon_nodes(state, object_hint=downstream_target)
-        if not nodes:
-            return PlannerDecision(
-                thought=f"why 题被 verifier 拦下后，当前 `infer` 已暴露出 generic hand-free 仍只是中间态；先定位真正下游目标 `{downstream_target}` 的更晚轨迹，而不是继续把“手空出来了”当结论。",
-                tool="query_object",
-                args={"query": downstream_target, "limit": 24},
-            )
-        anchor_time = self._latest_action_intent_target_spatial_anchor_time(state)
-        latest_followup_end = self._latest_action_intent_followup_end_time(state)
-        after_time: float | None = None
-        if anchor_time is not None and latest_followup_end is not None:
-            after_time = max(anchor_time, latest_followup_end)
-        elif latest_followup_end is not None:
-            after_time = latest_followup_end
-        else:
-            after_time = anchor_time
-        min_start_time = None if after_time is None else float(after_time) + 0.15
-        selected = self._action_intent_select_long_horizon_node(
-            state=state,
-            hints=hints,
-            nodes=nodes,
-            min_start_time=min_start_time,
-            object_hint=downstream_target,
-        )
-        if selected is None:
-            return PlannerDecision(
-                thought=f"why 题被 verifier 拦下后，当前 `infer` 已暴露出 generic hand-free 仍只是中间态；继续重新检索真正下游目标 `{downstream_target}`。",
-                tool="query_object",
-                args={"query": downstream_target, "limit": 24},
-            )
-        if target_kind == "fixture":
-            later_selected = None
-            for node in nodes:
-                if not isinstance(node, dict):
-                    continue
-                start_raw = node.get("start_time")
-                end_raw = node.get("end_time")
-                if start_raw is None:
-                    continue
-                try:
-                    start_time = float(start_raw)
-                except Exception:  # noqa: BLE001
-                    continue
-                try:
-                    end_time = float(end_raw) if end_raw is not None else start_time
-                except Exception:  # noqa: BLE001
-                    end_time = start_time
-                if end_time < start_time:
-                    end_time = start_time
-                if min_start_time is not None and start_time < min_start_time:
-                    continue
-                later_selected = (node, start_time, end_time)
-            if later_selected is not None:
-                selected = later_selected
-        _node, start_time, end_time = selected
-        query_time = start_time if abs(end_time - start_time) < 0.25 else (start_time + min(end_time, start_time + 1.2)) / 2
-        return PlannerDecision(
-            thought="why 题被 verifier 拦下后，当前 `infer` 已暴露出 generic hand-free 只是 enablement 中间态；优先直接追 hand-free 背后真正要拿起、要继续操作，或同一物体后续要处理的目标。",
-            tool="query_spatial_context",
-            args={
-                "time_s": query_time,
-                "object_name": downstream_target,
-                "limit": 16 if target_kind == "fixture" else 18,
-            },
-        )
+        return None
 
     def _build_action_intent_verifier_blocked_measurement_target_revisit_decision(
         self,
@@ -8583,55 +7709,9 @@ class GraphAgentPlanner:
         result: dict[str, Any] | None,
         blocker_hint: str,
     ) -> PlannerDecision | None:
-        hint = self._action_intent_verifier_blocked_measurement_target_hint(
-            state=state,
-            result=result,
-            blocker_hint=blocker_hint,
-        )
-        if hint is None:
+        if not self._is_action_intent_task(state):
             return None
-        downstream_target, target_kind = hint
-        nodes = self._latest_action_intent_long_horizon_nodes(state, object_hint=downstream_target)
-        if not nodes:
-            return PlannerDecision(
-                thought=f"why 题被 verifier 拦下后，当前 `infer` 已暴露出 generic measurement-meta 仍只是宽泛量测语境；先定位真正量测目标 `{downstream_target}` 的更晚轨迹，而不是继续停留在调读数/量测语境层。",
-                tool="query_object",
-                args={"query": downstream_target, "limit": 24},
-            )
-        anchor_time = self._latest_action_intent_target_spatial_anchor_time(state)
-        latest_followup_end = self._latest_action_intent_followup_end_time(state)
-        after_time: float | None = None
-        if anchor_time is not None and latest_followup_end is not None:
-            after_time = max(anchor_time, latest_followup_end)
-        elif latest_followup_end is not None:
-            after_time = latest_followup_end
-        else:
-            after_time = anchor_time
-        min_start_time = None if after_time is None else float(after_time) + 0.15
-        selected = self._action_intent_select_long_horizon_node(
-            state=state,
-            hints=hints,
-            nodes=nodes,
-            min_start_time=min_start_time,
-            object_hint=downstream_target,
-        )
-        if selected is None:
-            return PlannerDecision(
-                thought=f"why 题被 verifier 拦下后，当前 `infer` 已暴露出 generic measurement-meta 仍只是宽泛量测语境；继续重新检索真正量测目标 `{downstream_target}`。",
-                tool="query_object",
-                args={"query": downstream_target, "limit": 24},
-            )
-        _node, start_time, end_time = selected
-        query_time = start_time if abs(end_time - start_time) < 0.25 else (start_time + min(end_time, start_time + 1.2)) / 2
-        return PlannerDecision(
-            thought="why 题被 verifier 拦下后，当前 `infer` 已暴露出 generic measurement-meta 只是宽泛量测语境；优先直接追更有判别力的量测目标，而不是继续停留在调读数/量测语境层。",
-            tool="query_spatial_context",
-            args={
-                "time_s": query_time,
-                "object_name": downstream_target,
-                "limit": 16 if target_kind == "fixture" else 18,
-            },
-        )
+        return None
 
     def _build_action_intent_verifier_blocked_phone_record_target_revisit_decision(
         self,
@@ -8641,76 +7721,9 @@ class GraphAgentPlanner:
         result: dict[str, Any] | None,
         blocker_hint: str,
     ) -> PlannerDecision | None:
-        hint = self._action_intent_verifier_blocked_phone_record_target_hint(
-            state=state,
-            result=result,
-            blocker_hint=blocker_hint,
-        )
-        if hint is None:
+        if not self._is_action_intent_task(state):
             return None
-        downstream_target, target_kind = hint
-        nodes = self._latest_action_intent_long_horizon_nodes(state, object_hint=downstream_target)
-        if not nodes:
-            return PlannerDecision(
-                thought=f"why 题被 verifier 拦下后，当前 `infer` 已暴露出 phone generic-measure 仍只是宽泛量测语境；先定位真正记录目标 `{downstream_target}` 的更晚轨迹，而不是继续停留在 generic measure 层。",
-                tool="query_object",
-                args={"query": downstream_target, "limit": 24},
-            )
-        anchor_time = self._latest_action_intent_target_spatial_anchor_time(state)
-        latest_followup_end = self._latest_action_intent_followup_end_time(state)
-        after_time: float | None = None
-        if anchor_time is not None and latest_followup_end is not None:
-            after_time = max(anchor_time, latest_followup_end)
-        elif latest_followup_end is not None:
-            after_time = latest_followup_end
-        else:
-            after_time = anchor_time
-        min_start_time = None if after_time is None else float(after_time) + 0.5
-        selected = None
-        candidate_nodes = list(nodes)
-        if min_start_time is None and len(candidate_nodes) >= 2:
-            candidate_nodes = list(reversed(candidate_nodes))
-        for node in candidate_nodes:
-            if not isinstance(node, dict):
-                continue
-            start_raw = node.get("start_time")
-            end_raw = node.get("end_time")
-            if start_raw is None:
-                continue
-            try:
-                start_time = float(start_raw)
-                end_time = float(end_raw) if end_raw is not None else start_time
-            except Exception:  # noqa: BLE001
-                continue
-            if min_start_time is not None and start_time < min_start_time:
-                continue
-            selected = (node, start_time, end_time)
-            break
-        if selected is None:
-            selected = self._action_intent_select_long_horizon_node(
-                state=state,
-                hints=hints,
-                nodes=nodes,
-                min_start_time=min_start_time,
-                object_hint=downstream_target,
-            )
-        if selected is None:
-            return PlannerDecision(
-                thought=f"why 题被 verifier 拦下后，当前 `infer` 已暴露出 phone generic-measure 仍只是宽泛量测语境；继续重新检索真正记录目标 `{downstream_target}`。",
-                tool="query_object",
-                args={"query": downstream_target, "limit": 24},
-            )
-        _node, start_time, end_time = selected
-        query_time = start_time if abs(end_time - start_time) < 0.25 else (start_time + min(end_time, start_time + 1.2)) / 2
-        return PlannerDecision(
-            thought="why 题被 verifier 拦下后，当前 `infer` 已暴露出 phone generic-measure 只是宽泛量测语境；优先直接追真正被记录/录入的食材目标，而不是继续停留在 generic measure 层。",
-            tool="query_spatial_context",
-            args={
-                "time_s": query_time,
-                "object_name": downstream_target,
-                "limit": 16 if target_kind == "fixture" else 18,
-            },
-        )
+        return None
 
     def _build_action_intent_unresolved_rerank_long_horizon_revisit_decision(
         self,
@@ -8719,63 +7732,7 @@ class GraphAgentPlanner:
         hints: dict[str, Any],
         thought: str,
     ) -> PlannerDecision | None:
-        if not self._action_intent_unresolved_rerank_reason_prefers_later_outcome_revisit(state):
-            return None
-        nodes = self._latest_action_intent_long_horizon_nodes(state)
-        if not nodes:
-            return None
-        anchor_time = self._latest_action_intent_target_spatial_anchor_time(state)
-        latest_followup_end = self._latest_action_intent_followup_end_time(state)
-        after_time: float | None = None
-        if anchor_time is not None and latest_followup_end is not None:
-            after_time = max(anchor_time, latest_followup_end)
-        elif latest_followup_end is not None:
-            after_time = latest_followup_end
-        else:
-            after_time = anchor_time
-        min_start_time = None if after_time is None else float(after_time) + 0.15
-        selected = self._action_intent_select_long_horizon_node(
-            state=state,
-            hints=hints,
-            nodes=nodes,
-            min_start_time=min_start_time,
-        )
-        if selected is None:
-            return None
-        later_selected = None
-        for node in nodes:
-            if not isinstance(node, dict):
-                continue
-            start_raw = node.get("start_time")
-            end_raw = node.get("end_time")
-            if start_raw is None:
-                continue
-            try:
-                start_time = float(start_raw)
-            except Exception:  # noqa: BLE001
-                continue
-            try:
-                end_time = float(end_raw) if end_raw is not None else start_time
-            except Exception:  # noqa: BLE001
-                end_time = start_time
-            if end_time < start_time:
-                end_time = start_time
-            if min_start_time is not None and start_time < min_start_time:
-                continue
-            later_selected = (node, start_time, end_time)
-        if later_selected is not None:
-            selected = later_selected
-        _node, start_time, end_time = selected
-        query_time = start_time if abs(end_time - start_time) < 0.25 else (start_time + min(end_time, start_time + 1.2)) / 2
-        return PlannerDecision(
-            thought=thought,
-            tool="query_spatial_context",
-            args={
-                "time_s": query_time,
-                "object_name": self._action_intent_question_object_hint(state),
-                "limit": 16,
-            },
-        )
+        return None
 
     def _build_action_intent_unresolved_rerank_mixed_horizon_later_target_revisit_decision(
         self,
@@ -8784,70 +7741,9 @@ class GraphAgentPlanner:
         hints: dict[str, Any],
         thought: str,
     ) -> PlannerDecision | None:
-        hint = self._action_intent_unresolved_rerank_mixed_horizon_later_target_hint(state)
-        if hint is None:
+        if not self._is_action_intent_task(state):
             return None
-        downstream_target, target_kind = hint
-        nodes = self._latest_action_intent_long_horizon_nodes(state, object_hint=downstream_target)
-        if not nodes:
-            return PlannerDecision(
-                thought=f"{thought} 先定位 mixed-horizon 竞争里更晚结果对应的真实目标 `{downstream_target}` 轨迹。",
-                tool="query_object",
-                args={"query": downstream_target, "limit": 24},
-            )
-        anchor_time = self._latest_action_intent_target_spatial_anchor_time(state)
-        latest_followup_end = self._latest_action_intent_followup_end_time(state)
-        after_time: float | None = None
-        if anchor_time is not None and latest_followup_end is not None:
-            after_time = max(anchor_time, latest_followup_end)
-        elif latest_followup_end is not None:
-            after_time = latest_followup_end
-        else:
-            after_time = anchor_time
-        min_start_time = None if after_time is None else float(after_time) + 0.15
-        selected = self._action_intent_select_long_horizon_node(
-            state=state,
-            hints=hints,
-            nodes=nodes,
-            min_start_time=min_start_time,
-            object_hint=downstream_target,
-        )
-        if selected is None:
-            return PlannerDecision(
-                thought=f"{thought} 继续重新检索 mixed-horizon 竞争里更晚结果对应的真实目标 `{downstream_target}`。",
-                tool="query_object",
-                args={"query": downstream_target, "limit": 24},
-            )
-        if target_kind == "fixture":
-            later_selected = None
-            for node in nodes:
-                if not isinstance(node, dict):
-                    continue
-                start_raw = node.get("start_time")
-                end_raw = node.get("end_time")
-                if start_raw is None:
-                    continue
-                try:
-                    start_time = float(start_raw)
-                    end_time = float(end_raw) if end_raw is not None else start_time
-                except Exception:  # noqa: BLE001
-                    continue
-                if min_start_time is not None and start_time < min_start_time:
-                    continue
-                later_selected = (node, start_time, end_time)
-            if later_selected is not None:
-                selected = later_selected
-        _node, start_time, end_time = selected
-        query_time = start_time if abs(end_time - start_time) < 0.25 else (start_time + min(end_time, start_time + 1.2)) / 2
-        return PlannerDecision(
-            thought=thought,
-            tool="query_spatial_context",
-            args={
-                "time_s": query_time,
-                "object_name": downstream_target,
-                "limit": 16 if target_kind == "fixture" else 18,
-            },
-        )
+        return None
 
     def _build_action_intent_unresolved_rerank_downstream_target_revisit_decision(
         self,
@@ -8856,73 +7752,7 @@ class GraphAgentPlanner:
         hints: dict[str, Any],
         thought: str,
     ) -> PlannerDecision | None:
-        downstream_target = self._action_intent_unresolved_rerank_downstream_object_hint(state)
-        if not downstream_target:
-            return None
-        nodes = self._latest_action_intent_long_horizon_nodes(state, object_hint=downstream_target)
-        if not nodes:
-            return PlannerDecision(
-                thought=f"{thought} 先定位下游目标对象 `{downstream_target}` 在更晚时刻的轨迹。",
-                tool="query_object",
-                args={"query": downstream_target, "limit": 24},
-            )
-        anchor_time = self._latest_action_intent_target_spatial_anchor_time(state)
-        latest_followup_end = self._latest_action_intent_followup_end_time(state)
-        after_time: float | None = None
-        if anchor_time is not None and latest_followup_end is not None:
-            after_time = max(anchor_time, latest_followup_end)
-        elif latest_followup_end is not None:
-            after_time = latest_followup_end
-        else:
-            after_time = anchor_time
-        min_start_time = None if after_time is None else float(after_time) + 0.15
-        selected = self._action_intent_select_long_horizon_node(
-            state=state,
-            hints=hints,
-            nodes=nodes,
-            min_start_time=min_start_time,
-            object_hint=downstream_target,
-        )
-        if selected is None:
-            return PlannerDecision(
-                thought=f"{thought} 继续重新检索下游目标对象 `{downstream_target}` 的更晚轨迹。",
-                tool="query_object",
-                args={"query": downstream_target, "limit": 24},
-            )
-        later_selected = None
-        for node in nodes:
-            if not isinstance(node, dict):
-                continue
-            start_raw = node.get("start_time")
-            end_raw = node.get("end_time")
-            if start_raw is None:
-                continue
-            try:
-                start_time = float(start_raw)
-            except Exception:  # noqa: BLE001
-                continue
-            try:
-                end_time = float(end_raw) if end_raw is not None else start_time
-            except Exception:  # noqa: BLE001
-                end_time = start_time
-            if end_time < start_time:
-                end_time = start_time
-            if min_start_time is not None and start_time < min_start_time:
-                continue
-            later_selected = (node, start_time, end_time)
-        if later_selected is not None:
-            selected = later_selected
-        _node, start_time, end_time = selected
-        query_time = start_time if abs(end_time - start_time) < 0.25 else (start_time + min(end_time, start_time + 1.2)) / 2
-        return PlannerDecision(
-            thought=thought,
-            tool="query_spatial_context",
-            args={
-                "time_s": query_time,
-                "object_name": downstream_target,
-                "limit": 16,
-            },
-        )
+        return None
 
     def _build_action_intent_unresolved_rerank_downstream_fixture_revisit_decision(
         self,
@@ -8931,102 +7761,7 @@ class GraphAgentPlanner:
         hints: dict[str, Any],
         thought: str,
     ) -> PlannerDecision | None:
-        downstream_target = self._action_intent_unresolved_rerank_downstream_fixture_hint(state)
-        if not downstream_target:
-            return None
-        nodes = self._latest_action_intent_long_horizon_nodes(state, object_hint=downstream_target)
-        if not nodes:
-            return PlannerDecision(
-                thought=f"{thought} 先定位下游装置/fixture `{downstream_target}` 在更晚时刻的轨迹。",
-                tool="query_object",
-                args={"query": downstream_target, "limit": 24},
-            )
-        anchor_time = self._latest_action_intent_target_spatial_anchor_time(state)
-        latest_followup_end = self._latest_action_intent_followup_end_time(state)
-        after_time: float | None = None
-        if anchor_time is not None and latest_followup_end is not None:
-            after_time = max(anchor_time, latest_followup_end)
-        elif latest_followup_end is not None:
-            after_time = latest_followup_end
-        else:
-            after_time = anchor_time
-        min_start_time = None if after_time is None else float(after_time) + 0.15
-        selected = self._action_intent_select_long_horizon_node(
-            state=state,
-            hints=hints,
-            nodes=nodes,
-            min_start_time=min_start_time,
-            object_hint=downstream_target,
-        )
-        if selected is None:
-            return PlannerDecision(
-                thought=f"{thought} 继续重新检索下游装置/fixture `{downstream_target}` 的更晚轨迹。",
-                tool="query_object",
-                args={"query": downstream_target, "limit": 24},
-            )
-        _node, start_time, end_time = selected
-        query_time = start_time if abs(end_time - start_time) < 0.25 else (start_time + min(end_time, start_time + 1.2)) / 2
-        return PlannerDecision(
-            thought=thought,
-            tool="query_spatial_context",
-            args={
-                "time_s": query_time,
-                "object_name": downstream_target,
-                "limit": 16,
-            },
-        )
-
-    def _build_action_intent_unresolved_rerank_hand_free_object_revisit_decision(
-        self,
-        *,
-        state: AgentState,
-        hints: dict[str, Any],
-        thought: str,
-    ) -> PlannerDecision | None:
-        downstream_target = self._action_intent_unresolved_rerank_hand_free_object_hint(state)
-        if not downstream_target:
-            return None
-        nodes = self._latest_action_intent_long_horizon_nodes(state, object_hint=downstream_target)
-        if not nodes:
-            return PlannerDecision(
-                thought=f"{thought} 先定位 hand-free 背后的真实下游对象 `{downstream_target}` 在更晚时刻的轨迹。",
-                tool="query_object",
-                args={"query": downstream_target, "limit": 24},
-            )
-        anchor_time = self._latest_action_intent_target_spatial_anchor_time(state)
-        latest_followup_end = self._latest_action_intent_followup_end_time(state)
-        after_time: float | None = None
-        if anchor_time is not None and latest_followup_end is not None:
-            after_time = max(anchor_time, latest_followup_end)
-        elif latest_followup_end is not None:
-            after_time = latest_followup_end
-        else:
-            after_time = anchor_time
-        min_start_time = None if after_time is None else float(after_time) + 0.15
-        selected = self._action_intent_select_long_horizon_node(
-            state=state,
-            hints=hints,
-            nodes=nodes,
-            min_start_time=min_start_time,
-            object_hint=downstream_target,
-        )
-        if selected is None:
-            return PlannerDecision(
-                thought=f"{thought} 继续重新检索 hand-free 背后的真实下游对象 `{downstream_target}` 的更晚轨迹。",
-                tool="query_object",
-                args={"query": downstream_target, "limit": 24},
-            )
-        _node, start_time, end_time = selected
-        query_time = start_time if abs(end_time - start_time) < 0.25 else (start_time + min(end_time, start_time + 1.2)) / 2
-        return PlannerDecision(
-            thought=thought,
-            tool="query_spatial_context",
-            args={
-                "time_s": query_time,
-                "object_name": downstream_target,
-                "limit": 16,
-            },
-        )
+        return None
 
     def _recipe_following_activity_step_decision(
         self,
@@ -9671,11 +8406,65 @@ class GraphAgentPlanner:
 
     def _safe_fallback_decision(self, *, state: AgentState, hints: dict[str, Any]) -> PlannerDecision:
         used_tools = self._used_tools(state)
+        combined_times = sorted([float(value) for value in hints.get("times") or []] + [float(value) for value in hints.get("input_times") or []])
+        if self._is_action_intent_task(state) and self._should_continue_search_from_sufficiency(state):
+            recovered = self._recover_from_open_questions(state=state, hints=hints, used_tools=used_tools)
+            if isinstance(recovered, PlannerDecision) and recovered.tool and recovered.tool not in {"finish", "rank_choices_from_state"}:
+                preferred_candidate = self._prefer_action_intent_state_candidate_over_generic_recovery(
+                    state=state,
+                    hints=hints,
+                    used_tools=used_tools,
+                    recovered=recovered,
+                    memory_prefix="planner_guard=safe_fallback_prefers_state_candidate_over_generic_recovery",
+                )
+                if preferred_candidate is not None:
+                    return preferred_candidate
+                self._state_add_memory(state, "planner_guard=safe_fallback_respects_sufficiency")
+                return recovered
+            candidate_plan = self._best_state_candidate_plan(state=state, hints=hints, used_tools=used_tools)
+            if candidate_plan is not None and candidate_plan.decision.tool == "finish":
+                candidate_plan = None
+            if candidate_plan is not None and candidate_plan.decision.tool not in {"finish", "rank_choices_from_state"}:
+                self._state_add_memory(
+                    state,
+                    f"planner_guard=safe_fallback_prefers_state_candidate={candidate_plan.decision.tool}",
+                )
+                return candidate_plan.decision
+            fallback_recovery = self._build_action_intent_specialized_recovery_decision(
+                state=state,
+                hints=hints,
+                thought="why 题当前仍被 structured sufficiency 判为缺证；safe fallback 在没有更优 targeted action 时，也应先回到当前题时间窗补关键帧，而不是直接退回通用时间检索。",
+            )
+            if fallback_recovery is not None and fallback_recovery.tool not in {"finish", "rank_choices_from_state"}:
+                self._state_add_memory(
+                    state,
+                    f"planner_override safe_fallback_current_scope={fallback_recovery.tool}",
+                )
+                return fallback_recovery
+            if combined_times:
+                return PlannerDecision(
+                    thought="why 题当前仍被 sufficiency 判为缺证，安全兜底时先回到时间检索，而不是直接做文本评分收口。",
+                    tool="query_time",
+                    args={
+                        "start_time": min(combined_times),
+                        "end_time": max(combined_times),
+                        "limit": 12,
+                    },
+                )
+            return PlannerDecision(
+                thought="why 题当前仍被 sufficiency 判为缺证，且没有时间锚点；安全兜底时先重建当前动作片段，而不是直接做文本评分收口。",
+                tool="sample_sparse_frames",
+                args={
+                    "start_time": None,
+                    "end_time": None,
+                    "sample_count": 4,
+                    "tag": f"{state.task_family}_segment",
+                },
+            )
         recovered = self._recover_from_open_questions(state=state, hints=hints, used_tools=used_tools)
         if isinstance(recovered, PlannerDecision):
             self._state_add_memory(state, "planner_guard=none_decision_recovered")
             return recovered
-        combined_times = sorted([float(value) for value in hints.get("times") or []] + [float(value) for value in hints.get("input_times") or []])
         if combined_times:
             return PlannerDecision(
                 thought="规划器未产出有效决策，退回到安全时间检索路径。",
@@ -9716,13 +8505,144 @@ class GraphAgentPlanner:
         if (
             self._is_action_intent_task(state)
             and latest_verification
-            and not bool(latest_verification.get("sufficient"))
-            and ("need_disambiguating_evidence" in open_questions or "need_disambiguating_evidence" in verifier_missing)
+            and (
+                not bool(latest_verification.get("sufficient"))
+                or self._should_continue_search_from_sufficiency(state)
+            )
+            and (
+                self._should_continue_search_from_sufficiency(state)
+                or "need_disambiguating_evidence" in open_questions
+                or "need_disambiguating_evidence" in verifier_missing
+                or self._has_unresolved_evidence_gap(
+                    state,
+                    open_questions=open_questions,
+                    task_family=state.task_family,
+                )
+            )
         ):
+            last_tool_name = str(last_tool.get("tool") or "") if isinstance(last_tool, dict) else ""
+            allow_early_observation_recovery = last_tool_name in {
+                "query_object",
+                "query_spatial_context",
+                "sample_sparse_frames",
+                "extract_frames_for_range",
+                "retrieve_cached_artifacts",
+            }
+            primary_gap = self._action_intent_primary_gap(state)
+            primary_gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
+            primary_gap_target_object = (
+                str(primary_gap.get("target_object") or "").strip().lower() if isinstance(primary_gap, dict) else ""
+            )
+            primary_gap_target_fixture = (
+                str(primary_gap.get("target_fixture") or "").strip().lower() if isinstance(primary_gap, dict) else ""
+            )
+            primary_gap_source = str(primary_gap.get("source") or "").strip() if isinstance(primary_gap, dict) else ""
+            question_object_hint = str(self._action_intent_question_object_hint(state) or "").strip().lower()
+            infer_retry_exhausted = (
+                str(last_tool.get("tool") or "") == "infer_action_intent"
+                and isinstance(last_result, dict)
+                and bool(last_result.get("tool_failed"))
+                and self._action_intent_failed_tool_count(state, "infer_action_intent") >= 3
+            )
+            if infer_retry_exhausted and self._action_intent_disable_legacy_specialized_recovery(state):
+                return self._build_action_intent_text_fallback_rank_decision(
+                    state,
+                    thought="why 题专用视觉判断已连续失败，且 legacy specialized recovery 已关闭；当前在 sufficiency 分支直接退回结构化文本裁决，不再进入 generic open-question recovery。",
+                )
+            if isinstance(primary_gap, dict):
+                blocker_hint = self._action_intent_verifier_blocker_hint(state)
+                explicit_gap_hint, explicit_gap_hint_kind = self._action_intent_observation_hint_from_explicit_gap(state=state)
+                if (
+                    explicit_gap_hint_kind == "object"
+                    and explicit_gap_hint
+                    and self._search_window_level(state) > 0
+                ):
+                    self._state_add_memory(
+                        state,
+                        "planner_guard=heuristic_fallback_prefers_primary_gap_before_open_question=query_object",
+                    )
+                    self._state_add_memory(
+                        state,
+                        "planner_guard=heuristic_fallback_prefers_state_candidate=query_object",
+                    )
+                    return PlannerDecision(
+                        thought=(
+                            f"why 题当前 observation gap 已显式锚定下游对象 `{explicit_gap_hint}`，"
+                            "且当前不再处于 Level 0；优先沿对象轨迹追证，而不是退回泛化的长时域空间回看。"
+                        ),
+                        tool="query_object",
+                        args={"query": explicit_gap_hint, "limit": 24},
+                    )
+                early_gap_recovery = self._recover_action_intent_via_primary_gap(
+                    state=state,
+                    hints=hints,
+                    result=last_result if isinstance(last_result, dict) else {},
+                    blocker_hint=blocker_hint,
+                    primary_gap=primary_gap,
+                )
+                if early_gap_recovery is not None and early_gap_recovery.tool not in {"finish", "rank_choices_from_state"}:
+                    recovered = self._recover_from_open_questions(state=state, hints=hints, used_tools=used_tools)
+                    if recovered is not None:
+                        if recovered.tool not in {"finish", "rank_choices_from_state", early_gap_recovery.tool}:
+                            self._state_add_memory(
+                                state,
+                                (
+                                    "planner_guard="
+                                    "heuristic_fallback_prefers_state_candidate_over_generic_recovery="
+                                    f"{recovered.tool}->{early_gap_recovery.tool}"
+                                ),
+                            )
+                    self._state_add_memory(
+                        state,
+                        f"planner_guard=heuristic_fallback_prefers_state_candidate={early_gap_recovery.tool}",
+                    )
+                    self._state_add_memory(
+                        state,
+                        f"planner_guard=heuristic_fallback_prefers_primary_gap_before_open_question={early_gap_recovery.tool}",
+                    )
+                    return early_gap_recovery
+                if (
+                    self._action_intent_has_explicit_downstream_object_gap(state)
+                    and self._search_window_level(state) > 0
+                ):
+                    self._state_add_memory(
+                        state,
+                        "planner_guard=heuristic_fallback_prefers_primary_gap_before_open_question=query_object",
+                    )
+                    return PlannerDecision(
+                        thought=(
+                            f"why 题当前 primary gap 已显式锚定下游对象 `{primary_gap_target_object}`，"
+                            "且当前不再处于 Level 0；优先沿对象轨迹追证，而不是退回泛化的长时域空间回看。"
+                        ),
+                        tool="query_object",
+                        args={"query": primary_gap_target_object, "limit": 24},
+                    )
             recovered = self._recover_from_open_questions(state=state, hints=hints, used_tools=used_tools)
-            if recovered is not None and recovered.tool:
+            if recovered is not None and recovered.tool and recovered.tool not in {"finish", "rank_choices_from_state"}:
+                preferred_candidate = self._prefer_action_intent_state_candidate_over_generic_recovery(
+                    state=state,
+                    hints=hints,
+                    used_tools=used_tools,
+                    recovered=recovered,
+                    memory_prefix="planner_guard=heuristic_fallback_prefers_state_candidate_over_generic_recovery",
+                )
+                if preferred_candidate is not None:
+                    self._state_add_memory(
+                        state,
+                        f"planner_guard=heuristic_fallback_prefers_state_candidate={preferred_candidate.tool}",
+                    )
+                    return preferred_candidate
                 self._state_add_memory(state, f"planner_override verifier_blocked_finish=finish -> {recovered.tool}")
                 return recovered
+            candidate_plan = self._best_state_candidate_plan(state=state, hints=hints, used_tools=used_tools)
+            if candidate_plan is not None and candidate_plan.decision.tool == "finish":
+                candidate_plan = None
+            if candidate_plan is not None and candidate_plan.decision.tool not in {"finish", "rank_choices_from_state"}:
+                self._state_add_memory(
+                    state,
+                    f"planner_guard=heuristic_fallback_prefers_state_candidate={candidate_plan.decision.tool}",
+                )
+                return candidate_plan.decision
         if verifier_conflicts:
             recovered = self._recover_from_open_questions(state=state, hints=hints, used_tools=used_tools)
             if recovered.tool:
@@ -9742,7 +8662,13 @@ class GraphAgentPlanner:
             and last_result.get("tool_failed")
         ):
             failed_tool = str(last_tool.get("tool") or "")
-            if self._action_intent_failed_tool_count(state, failed_tool) <= 1:
+            provider_level_visual_failure = self._action_intent_failure_is_provider_level_visual_failure(last_result)
+            if provider_level_visual_failure:
+                self._state_add_memory(
+                    state,
+                    f"planner_guard={failed_tool}_provider_failure_skips_visual_retry=1",
+                )
+            if self._action_intent_failed_tool_count(state, failed_tool) <= 1 and not provider_level_visual_failure:
                 if failed_tool == "resolve_action_intent_future_use":
                     retry_future_use = self._build_action_intent_future_use_resolution_decision(
                         state=state,
@@ -9780,13 +8706,40 @@ class GraphAgentPlanner:
                     prediction=best_index,
                     confidence=float(recovered_intent.get("confidence") or 0.0),
                 )
+            if provider_level_visual_failure and self._should_continue_search_from_sufficiency(state):
+                candidate_plan = self._best_state_candidate_plan(state=state, hints=hints, used_tools=used_tools)
+                if candidate_plan is not None and candidate_plan.decision.tool not in {"finish", "rank_choices_from_state"}:
+                    self._state_add_memory(
+                        state,
+                        f"planner_guard={failed_tool}_provider_failure_prefers_state_candidate={candidate_plan.decision.tool}",
+                    )
+                    return candidate_plan.decision
+                evidence_first = self._build_action_intent_evidence_first_recovery_decision(
+                    state=state,
+                    hints=hints,
+                    used_tools=used_tools,
+                )
+                if evidence_first is not None:
+                    return evidence_first
+                recovered = self._recover_from_open_questions(state=state, hints=hints, used_tools=used_tools)
+                if recovered is not None and recovered.tool not in {"finish", "rank_choices_from_state"}:
+                    preferred_candidate = self._prefer_action_intent_state_candidate_over_generic_recovery(
+                        state=state,
+                        hints=hints,
+                        used_tools=used_tools,
+                        recovered=recovered,
+                        memory_prefix=f"planner_guard={failed_tool}_provider_failure_prefers_state_candidate_over_generic_recovery",
+                    )
+                    if preferred_candidate is not None:
+                        return preferred_candidate
+                    return recovered
             action_frames = self._select_action_intent_frames(
                 state,
                 hints,
                 limit=8,
                 require_current_scope=True,
             )
-            if action_frames:
+            if action_frames and not provider_level_visual_failure:
                 return PlannerDecision(
                     thought="why 题专用裁决工具失败，回到当前题时间窗的专用动作目的判断，不使用通用视觉检查。",
                     tool="infer_action_intent",
@@ -9803,8 +8756,9 @@ class GraphAgentPlanner:
             and last_tool.get("tool") == "infer_action_intent"
             and last_result.get("tool_failed")
         ):
+            provider_level_visual_failure = self._action_intent_failure_is_provider_level_visual_failure(last_result)
             retry_count = self._action_intent_failed_tool_count(state, "infer_action_intent")
-            if retry_count <= 2:
+            if retry_count <= 2 and not provider_level_visual_failure:
                 recovered = self._build_action_intent_specialized_recovery_decision(
                     state=state,
                     hints=hints,
@@ -9812,7 +8766,17 @@ class GraphAgentPlanner:
                 )
                 if recovered is not None:
                     return recovered
-            if retry_count >= 3:
+            if provider_level_visual_failure or retry_count >= 3:
+                if provider_level_visual_failure:
+                    self._state_add_memory(
+                        state,
+                        "planner_guard=infer_action_intent_provider_failure_skips_visual_retry=1",
+                    )
+                    if self._action_intent_disable_legacy_specialized_recovery(state):
+                        return self._build_action_intent_text_fallback_rank_decision(
+                            state,
+                            thought="why 题专用视觉判断连续失败，且 legacy specialized recovery 已关闭；直接退回结构化文本裁决，不再进入 generic cached recovery。",
+                        )
                 if (
                     any(
                         isinstance(item, str)
@@ -9828,6 +8792,19 @@ class GraphAgentPlanner:
                     )
                     if transition_recovery is not None:
                         return transition_recovery
+                if self._action_intent_disable_legacy_specialized_recovery(state):
+                    return self._build_action_intent_text_fallback_rank_decision(
+                        state,
+                        thought="why 题专用视觉判断连续失败，且 legacy specialized recovery 已关闭；直接退回结构化文本裁决，不再经过 generic open-question recovery。",
+                    )
+                if self._should_continue_search_from_sufficiency(state):
+                    candidate_plan = self._best_state_candidate_plan(state=state, hints=hints, used_tools=used_tools)
+                    if candidate_plan is not None and candidate_plan.decision.tool not in {"finish", "rank_choices_from_state"}:
+                        self._state_add_memory(
+                            state,
+                            f"planner_guard=infer_failures_prefers_state_candidate={candidate_plan.decision.tool}",
+                        )
+                        return candidate_plan.decision
                 evidence_first = self._build_action_intent_evidence_first_recovery_decision(
                     state=state,
                     hints=hints,
@@ -9841,17 +8818,46 @@ class GraphAgentPlanner:
                 )
                 if specialized_resolution is not None:
                     return specialized_resolution
-                if action_intent_requires_strict_visual_disambiguation(
-                    question=str(getattr(state, "question", "") or ""),
-                    choices=[str(choice) for choice in getattr(state, "choices", [])],
-                    indices=None,
+                if self._action_intent_needs_observation_centric_transition_recovery(
+                    state=state,
+                    result=None,
                 ):
                     strict_recovery = self._build_action_intent_strict_text_fallback_recovery_decision(
                         state=state,
                         hints=hints,
                     )
-                    if strict_recovery is not None:
-                        return strict_recovery
+                if strict_recovery is not None:
+                    return strict_recovery
+                if self._should_continue_search_from_sufficiency(state):
+                    recovered = self._recover_from_open_questions(state=state, hints=hints, used_tools=used_tools)
+                    if recovered is not None and recovered.tool not in {"finish", "rank_choices_from_state"}:
+                        preferred_candidate = self._prefer_action_intent_state_candidate_over_generic_recovery(
+                            state=state,
+                            hints=hints,
+                            used_tools=used_tools,
+                            recovered=recovered,
+                            memory_prefix="planner_guard=infer_failures_prefers_state_candidate_over_generic_recovery",
+                        )
+                        if preferred_candidate is not None:
+                            return preferred_candidate
+                        return recovered
+                    current_scope_recovery = self._build_action_intent_specialized_recovery_decision(
+                        state=state,
+                        hints=hints,
+                        thought="why 题专用视觉判断连续失败后，结构化 sufficiency 仍明确要求继续补证；优先回到当前题时间窗补关键帧或专用恢复，而不是直接退回 textual rank。",
+                    )
+                    if current_scope_recovery is not None and current_scope_recovery.tool != "rank_choices_from_state":
+                        return current_scope_recovery
+                    return PlannerDecision(
+                        thought="why 题专用视觉判断连续失败后，结构化 sufficiency 仍明确要求继续补证；当前又缺少更具体恢复动作时，先重建当前动作片段而不是直接退回 textual rank。",
+                        tool="sample_sparse_frames",
+                        args={
+                            "start_time": None,
+                            "end_time": None,
+                            "sample_count": 4,
+                            "tag": f"{state.task_family}_segment",
+                        },
+                    )
                 return self._build_action_intent_text_fallback_rank_decision(
                     state,
                     thought="why 题专用视觉判断连续失败，改用结构化文本因果裁决，避免继续空转 query_time。",
@@ -9963,24 +8969,6 @@ class GraphAgentPlanner:
             and last_tool.get("tool") == "query_spatial_context"
             and state.retrieved_frames
         ):
-            if self._action_intent_pending_resolution_tool(state) == "resolve_action_intent_future_use":
-                future_use = self._build_action_intent_future_use_resolution_decision(
-                    state=state,
-                    hints=hints,
-                    result=last_result,
-                    thought="why 题已补到空间上下文，回到后续用途裁决，利用对象/fixture 邻域关系判断动作后真实用途。",
-                )
-                if future_use is not None:
-                    return future_use
-            if self._action_intent_pending_resolution_tool(state) == "resolve_action_intent_pairwise":
-                pairwise = self._build_action_intent_pairwise_resolution_decision(
-                    state=state,
-                    hints=hints,
-                    result=last_result,
-                    thought="why 题已补到空间上下文，回到二选一后果裁决，利用对象/fixture 邻域关系排除竞争选项。",
-                )
-                if pairwise is not None:
-                    return pairwise
             action_frames = self._select_action_intent_frames(
                 state,
                 hints,
@@ -10105,6 +9093,35 @@ class GraphAgentPlanner:
                     },
                 )
         if isinstance(last_result, dict) and last_tool.get("tool") == "infer_action_intent" and last_result.get("best_index") is not None:
+            followup_attempt_count = self._action_intent_followup_attempt_count(state)
+            has_runner_up = last_result.get("second_best_index") is not None
+            candidate_count = len(
+                [value for value in (last_result.get("candidate_indices") or []) if value is not None]
+            )
+            has_multi_candidate_uncertainty = has_runner_up or candidate_count >= 2
+            direct_post_resolved = self._action_intent_result_has_direct_post_action_evidence(last_result) and not self._action_intent_direct_evidence_still_needs_resolution(
+                state=state,
+                result=last_result,
+            )
+            needs_followup = self._action_intent_requires_followup(state, result=last_result)
+            needs_pairwise_resolution = self._action_intent_pair_needs_outcome_resolution(state=state, result=last_result)
+            needs_future_use_resolution = self._action_intent_needs_future_use_evidence(state=state, result=last_result)
+            pairwise_coverage_short = self._action_intent_pairwise_needs_more_post_action_coverage(
+                state=state,
+                hints=hints,
+                result=last_result,
+            )
+            future_use_coverage_short = self._action_intent_future_use_needs_more_post_action_coverage(
+                state=state,
+                hints=hints,
+                result=last_result,
+            )
+            support_text = self._action_intent_result_support_text(last_result)
+            transition_uncertainty = self._action_intent_result_has_immediate_post_action_uncertainty(last_result)
+            mixed_temporal_uncertainty = self._action_intent_pair_spans_immediate_and_later_outcomes(
+                state=state,
+                result=last_result,
+            )
             if (
                 self._action_intent_needs_precondition_context(state=state, result=last_result)
                 and not self._action_intent_has_precondition_frames(state=state, hints=hints)
@@ -10121,67 +9138,257 @@ class GraphAgentPlanner:
                 )
                 if precondition is not None:
                     return precondition
-            if self._action_intent_requires_followup(state, result=last_result):
-                needed_observation_relation_revisit = self._build_action_intent_needed_observation_relation_revisit_decision(
+            if direct_post_resolved:
+                spatial_probe = self._build_action_intent_spatial_probe_decision(
                     state=state,
                     hints=hints,
                     result=last_result,
-                    thought="why 题当前已经知道要确认的不只是某个目标，而是动作物体与该目标之间的判别关系；优先去查这个关系是否真的变成 `on/into/over/returned`，而不是继续泛化补帧。",
+                    thought="why 题当前已经看到直接动作后结果，但若空间关系仍未闭合，则先补空间邻域，再决定是否结束。",
                 )
-                if needed_observation_relation_revisit is not None:
-                    return needed_observation_relation_revisit
-                needed_observation_target_revisit = self._build_action_intent_needed_observation_target_revisit_decision(
-                    state=state,
-                    hints=hints,
-                    result=last_result,
-                    thought="why 题当前已经知道真正需要确认的是某个判别目标/位置；优先去追 `needed_observation` 明确点名的目标，而不是继续做泛化 followup 或只沿动作物体后追。",
-                )
-                if needed_observation_target_revisit is not None:
-                    return needed_observation_target_revisit
-                weak_late_anchor_revisit = self._build_action_intent_weak_late_anchor_revisit_decision(
-                    state=state,
-                    hints=hints,
-                    result=last_result,
-                    thought="why 题当前虽然已经补到晚锚点，但输出仍只是弱邻近/手持证据；继续沿更晚节点向后追，再决定是否补近窗或进入专用裁决。",
-                )
-                if weak_late_anchor_revisit is not None:
-                    return weak_late_anchor_revisit
-                nonexclusive_concrete_late_anchor_revisit = self._build_action_intent_nonexclusive_concrete_late_anchor_revisit_decision(
-                    state=state,
-                    hints=hints,
-                    result=last_result,
-                    thought="why 题当前虽然给出了更具体的晚锚点描述，但本质上仍只是标签可见/物体被放在某处附近的中间态，不足以在候选间形成排他结论；继续沿更晚节点向后追。",
-                )
-                if nonexclusive_concrete_late_anchor_revisit is not None:
-                    return nonexclusive_concrete_late_anchor_revisit
-                initial_transition_probe = self._build_action_intent_transition_probe_decision(
-                    state=state,
-                    hints=hints,
-                    result=last_result,
-                    thought="why 题一开始就落在近窗结果歧义上；先直接围绕动作尾部做更密的关键帧搜索，确认是否真的出现掉回水槽/容器这类决定性结果，再决定是否补泛化 followup。",
-                )
-                if initial_transition_probe is not None and self._action_intent_followup_attempt_count(state) < 1:
-                    return initial_transition_probe
-                if self._action_intent_followup_attempt_count(state) < self._action_intent_initial_followup_budget(state):
-                    followup = self._build_action_intent_followup_sampling_decision(state=state, hints=hints)
+                if spatial_probe is not None:
+                    return spatial_probe
+                best_index = self._coerce_choice_index(last_result.get("best_index"), list(getattr(state, "choices", [])))
+                if best_index is not None:
+                    answer = str(last_result.get("answer") or state.choices[best_index])
+                    return PlannerDecision(
+                        thought="why 题当前已经看到直接动作后结果，且没有剩余 observation gap 需要继续搜索，直接结束。",
+                        tool="finish",
+                        args={
+                            "prediction": best_index,
+                            "answer": answer,
+                            "confidence": float(last_result.get("confidence") or 0.0),
+                        },
+                        done=True,
+                        answer=answer,
+                        prediction=best_index,
+                        confidence=float(last_result.get("confidence") or 0.0),
+                    )
+            if needs_followup or needs_pairwise_resolution or needs_future_use_resolution or has_multi_candidate_uncertainty:
+                if (
+                    followup_attempt_count < 1
+                    and self._action_intent_should_preempt_initial_followup_with_transition(
+                        state=state,
+                        hints=hints,
+                        result=last_result,
+                    )
+                ):
+                    initial_transition_probe = self._build_action_intent_transition_probe_decision(
+                        state=state,
+                        hints=hints,
+                        result=last_result,
+                        thought="why 题一开始就落在近窗结果歧义上；先直接围绕动作尾部做更密的关键帧搜索，确认是否真的出现决定性微结果，再决定是否补泛化 followup。",
+                    )
+                    if initial_transition_probe is not None:
+                        return initial_transition_probe
+                if followup_attempt_count < 1 and (
+                    needs_followup
+                    or needs_pairwise_resolution
+                    or needs_future_use_resolution
+                    or has_multi_candidate_uncertainty
+                ):
+                    followup = self._build_action_intent_followup_sampling_decision(
+                        state=state,
+                        hints=hints,
+                        result=last_result,
+                    )
                     if followup is not None:
                         return followup
-                transition_probe = self._build_action_intent_transition_probe_decision(
+                if self._action_intent_first_followup_needs_more_observation_coverage(
                     state=state,
                     hints=hints,
                     result=last_result,
-                    thought="why 题第一轮 followup 后仍缺少决定性结果；先在动作尾部和紧随其后的短窗口做更密的关键帧搜索，再决定是否进入专用裁决。",
-                )
-                if transition_probe is not None:
-                    return transition_probe
-                long_horizon_revisit = self._build_action_intent_cached_long_horizon_revisit_decision(
+                    pairwise_coverage_short=pairwise_coverage_short,
+                    future_use_coverage_short=future_use_coverage_short,
+                ):
+                    extra_followup = self._build_action_intent_extra_followup_sampling_decision(
+                        state=state,
+                        hints=hints,
+                        focus=(
+                            "pairwise_post_action_coverage_extension"
+                            if pairwise_coverage_short and not future_use_coverage_short
+                            else (
+                                "future_use_post_action_coverage_extension"
+                                if future_use_coverage_short
+                                else "observation_post_action_coverage_extension"
+                            )
+                        ),
+                        window_s=8.0,
+                    )
+                    if extra_followup is not None:
+                        return extra_followup
+                if (
+                    followup_attempt_count == 1
+                    and needs_future_use_resolution
+                    and not future_use_coverage_short
+                    and not pairwise_coverage_short
+                    and not mixed_temporal_uncertainty
+                ):
+                    future_use = self._build_action_intent_future_use_resolution_decision(
+                        state=state,
+                        hints=hints,
+                        result=last_result,
+                        thought="why 题第一轮 followup 已覆盖到当前 long-horizon gap；直接进入 observation-first 的 future-use 裁决，而不是继续泛化扩窗。",
+                        allow_post_action_coverage_extension=False,
+                    )
+                    if future_use is not None:
+                        return future_use
+                reveal_subtype = self._action_intent_reveal_conflict_subtype(state=state, result=last_result)
+                if followup_attempt_count == 1 and (
+                    pairwise_coverage_short
+                    or (
+                        future_use_coverage_short
+                        and reveal_subtype == "revealed_target_retrieval"
+                        and not self._action_intent_has_next_use_followup_gap(state=state, result=last_result)
+                    )
+                    or (
+                        not support_text
+                        and has_multi_candidate_uncertainty
+                        and reveal_subtype == "revealed_target_retrieval"
+                        and not self._action_intent_has_next_use_followup_gap(state=state, result=last_result)
+                    )
+                ) and not self._action_intent_should_try_transition_probe(
                     state=state,
                     hints=hints,
-                    thought="why 题当前这轮后续帧仍不足以区分更晚用途或最终放置；沿目标对象已知的后续轨迹继续往后追，再决定是否进入专用裁决。",
+                    result=last_result,
+                ):
+                    extra_followup = self._build_action_intent_extra_followup_sampling_decision(
+                        state=state,
+                        hints=hints,
+                        focus=(
+                            "pairwise_post_action_coverage_extension"
+                            if pairwise_coverage_short and not future_use_coverage_short
+                            else "future_use_post_action_coverage_extension"
+                        ),
+                        window_s=8.0,
+                    )
+                    if extra_followup is not None:
+                        return extra_followup
+                if followup_attempt_count == 1 and (
+                    transition_uncertainty
+                    or (
+                        self._action_intent_should_try_transition_probe(
+                            state=state,
+                            hints=hints,
+                            result=last_result,
+                        )
+                        and (
+                            mixed_temporal_uncertainty
+                            or self._action_intent_prefers_followup_state_change_only(state)
+                            or self._action_intent_result_is_weak_generic_claim(state=state, result=last_result)
+                            or self._action_intent_result_is_workspace_or_final_placement_close_call(
+                                state=state,
+                                result=last_result,
+                            )
+                        )
+                    )
+                ):
+                    transition_probe = self._build_action_intent_transition_probe_decision(
+                        state=state,
+                        hints=hints,
+                        result=last_result,
+                        thought="why 题第一轮 followup 后仍缺少动作尾部和紧随其后的决定性微结果；先围绕动作尾部做更密的关键帧搜索，再决定是否进入专用裁决。",
+                    )
+                    if transition_probe is not None:
+                        return transition_probe
+                if followup_attempt_count == 1 and needs_pairwise_resolution and pairwise_coverage_short:
+                    extra_followup = self._build_action_intent_extra_followup_sampling_decision(
+                        state=state,
+                        hints=hints,
+                        focus="pairwise_post_action_coverage_extension",
+                        window_s=8.0,
+                    )
+                    if extra_followup is not None:
+                        return extra_followup
+                if (
+                    followup_attempt_count >= 2
+                    and not self._action_intent_has_transition_followup_frames(state)
+                    and not self._action_intent_has_peak_guided_followup_frames(state)
+                    and self._action_intent_result_has_indecisive_post_action_support(last_result)
+                ):
+                    peak_followup = self._build_action_intent_peak_guided_followup_decision(
+                        state=state,
+                        hints=hints,
+                        last_tool=last_tool,
+                        last_result=last_result,
+                        focus="observation_gap_peak_probe",
+                    )
+                    if peak_followup is not None:
+                        return peak_followup
+                if (
+                    followup_attempt_count >= 2
+                    and any(
+                        isinstance(item, str)
+                        and item.startswith("action_intent_resolution_withheld_for_weak_cooking_inspection_evidence=1")
+                        for item in list(getattr(state, "working_memory", []))[-12:]
+                    )
+                    and not self._action_intent_has_peak_guided_followup_frames(state)
+                ):
+                    peak_followup = self._build_action_intent_peak_guided_followup_decision(
+                        state=state,
+                        hints=hints,
+                        last_tool=last_tool,
+                        last_result=last_result,
+                        focus="weak_cooking_inspection_peak_probe",
+                    )
+                    if peak_followup is not None:
+                        return peak_followup
+                if followup_attempt_count >= 1:
+                    long_horizon_revisit = self._build_action_intent_cached_long_horizon_revisit_decision(
+                        state=state,
+                        hints=hints,
+                        thought="why 题当前近窗证据已经补过，但更晚用途或最终放置仍未闭合；沿目标对象已知的后续轨迹继续往后追，再决定是否进入专用裁决。",
+                        after_time=self._latest_action_intent_followup_end_time(state),
+                    )
+                    if long_horizon_revisit is not None and (
+                        needs_future_use_resolution
+                        or self._action_intent_prefers_long_horizon_object_retrieval(state=state)
+                    ):
+                        return long_horizon_revisit
+                if (
+                    followup_attempt_count >= 1
+                    and self._action_intent_should_try_transition_probe(
+                        state=state,
+                        hints=hints,
+                        result=last_result,
+                    )
+                ):
+                    transition_probe = self._build_action_intent_transition_probe_decision(
+                        state=state,
+                        hints=hints,
+                        result=last_result,
+                        thought="why 题当前仍缺少动作后关键转场证据；先补短窗口密采样，再决定是否进入专用裁决。",
+                    )
+                    if transition_probe is not None:
+                        return transition_probe
+                if self._action_intent_result_has_direct_post_action_evidence(last_result) and not self._action_intent_direct_evidence_still_needs_resolution(
+                    state=state,
+                    result=last_result,
+                ):
+                    best_index = self._coerce_choice_index(last_result.get("best_index"), list(getattr(state, "choices", [])))
+                    if best_index is not None:
+                        answer = str(last_result.get("answer") or state.choices[best_index])
+                        return PlannerDecision(
+                            thought="why 题当前已经看到直接动作后结果，且没有剩余 observation gap 需要继续搜索，直接结束。",
+                            tool="finish",
+                            args={
+                                "prediction": best_index,
+                                "answer": answer,
+                                "confidence": float(last_result.get("confidence") or 0.0),
+                            },
+                            done=True,
+                            answer=answer,
+                            prediction=best_index,
+                            confidence=float(last_result.get("confidence") or 0.0),
+                        )
+                spatial_probe = self._build_action_intent_spatial_probe_decision(
+                    state=state,
+                    hints=hints,
+                    result=last_result,
+                    thought="why 题当前近窗结果已足够稳定，但仍缺明确空间关系；先补空间邻域，再决定是否直接收口。",
                 )
-                if long_horizon_revisit is not None:
-                    return long_horizon_revisit
-                if self._action_intent_needs_future_use_evidence(state=state, result=last_result):
+                if spatial_probe is not None:
+                    return spatial_probe
+                if needs_future_use_resolution:
                     future_use = self._build_action_intent_future_use_resolution_decision(
                         state=state,
                         hints=hints,
@@ -10190,14 +9397,24 @@ class GraphAgentPlanner:
                     )
                     if future_use is not None:
                         return future_use
-                pairwise = self._build_action_intent_pairwise_resolution_decision(
-                    state=state,
-                    hints=hints,
-                    result=last_result,
-                    thought="why 题已补过一轮结果帧，改为只在前两名歧义候选之间做最终裁决。",
-                )
-                if pairwise is not None:
-                    return pairwise
+                if needs_pairwise_resolution:
+                    pairwise = self._build_action_intent_pairwise_resolution_decision(
+                        state=state,
+                        hints=hints,
+                        result=last_result,
+                        thought="why 题已补过一轮结果帧，改为只在前两名歧义候选之间做最终裁决。",
+                    )
+                    if pairwise is not None:
+                        return pairwise
+                if followup_attempt_count >= 2 and has_multi_candidate_uncertainty:
+                    pairwise = self._build_action_intent_pairwise_resolution_decision(
+                        state=state,
+                        hints=hints,
+                        result=last_result,
+                        thought="why 题当前已经补过足够的动作后覆盖，进入 observation-first 的 pairwise 结果裁决。",
+                    )
+                    if pairwise is not None:
+                        return pairwise
                 if not self._action_intent_intent_payload_is_ready_to_fall_back_to_text_rank(
                     state=state,
                     payload=last_result,
@@ -10220,7 +9437,7 @@ class GraphAgentPlanner:
                         },
                     )
                 return PlannerDecision(
-                    thought="why 题已补过一轮动作后结果帧，仍有歧义；改为基于累计证据做聚合评分收口。",
+                    thought="why 题已补过动作后证据并完成必要的专用裁决，改为基于累计证据做聚合评分收口。",
                     tool="rank_choices_from_state",
                     args={
                         "question": state.question,
@@ -10239,7 +9456,11 @@ class GraphAgentPlanner:
                 if initial_transition_probe is not None and self._action_intent_followup_attempt_count(state) < 1:
                     return initial_transition_probe
                 if self._action_intent_followup_attempt_count(state) < self._action_intent_initial_followup_budget(state):
-                    followup = self._build_action_intent_followup_sampling_decision(state=state, hints=hints)
+                    followup = self._build_action_intent_followup_sampling_decision(
+                        state=state,
+                        hints=hints,
+                        result=last_result,
+                    )
                     if followup is not None:
                         return followup
                 transition_probe = self._build_action_intent_transition_probe_decision(
@@ -10266,14 +9487,6 @@ class GraphAgentPlanner:
                 if pairwise is not None:
                     return pairwise
             if self._action_intent_needs_future_use_evidence(state=state, result=last_result):
-                weak_late_anchor_revisit = self._build_action_intent_weak_late_anchor_revisit_decision(
-                    state=state,
-                    hints=hints,
-                    result=last_result,
-                    thought="why 题当前晚锚点给出的只是弱邻近/手持证据，仍不能排除多个后续用途；继续沿更晚节点向后追，再决定是否进入用途专用裁决。",
-                )
-                if weak_late_anchor_revisit is not None:
-                    return weak_late_anchor_revisit
                 initial_transition_probe = self._build_action_intent_transition_probe_decision(
                     state=state,
                     hints=hints,
@@ -10283,7 +9496,11 @@ class GraphAgentPlanner:
                 if initial_transition_probe is not None and self._action_intent_followup_attempt_count(state) < 1:
                     return initial_transition_probe
                 if self._action_intent_followup_attempt_count(state) < self._action_intent_initial_followup_budget(state):
-                    followup = self._build_action_intent_followup_sampling_decision(state=state, hints=hints)
+                    followup = self._build_action_intent_followup_sampling_decision(
+                        state=state,
+                        hints=hints,
+                        result=last_result,
+                    )
                     if followup is not None:
                         return followup
                 transition_probe = self._build_action_intent_transition_probe_decision(
@@ -10310,7 +9527,7 @@ class GraphAgentPlanner:
                 if future_use is not None:
                     return future_use
             if self._action_intent_result_is_weak_generic_claim(state=state, result=last_result):
-                if self._action_intent_followup_attempt_count(state) < 3:
+                if self._action_intent_followup_attempt_count(state) < self._action_intent_extra_followup_budget(state):
                     extra_followup = self._build_action_intent_extra_followup_sampling_decision(
                         state=state,
                         hints=hints,
@@ -10368,6 +9585,23 @@ class GraphAgentPlanner:
             and last_tool.get("tool") == "inspect_visual_evidence"
             and not str(getattr(state, "task_family", "")).startswith("open_query")
         ):
+            if (
+                self._is_action_intent_task(state)
+                and self._action_intent_followup_attempt_count(state) < self._action_intent_extra_followup_budget(state)
+            ):
+                bias_profile = self._action_intent_timeline_review_bias_profile(state)
+                if (
+                    (bool(bias_profile.get("next_use_unclear")) or bool(bias_profile.get("final_location_unclear")))
+                    and not self._action_intent_prefers_long_horizon_object_retrieval(state=state)
+                ):
+                    extra_followup = self._build_action_intent_extra_followup_sampling_decision(
+                        state=state,
+                        hints=hints,
+                        focus="timeline_review_requested_more_evidence",
+                        window_s=6.0,
+                    )
+                    if extra_followup is not None:
+                        return extra_followup
             if self._is_action_mechanism_task(state) and state.retrieved_frames:
                 return PlannerDecision(
                     thought="how 题已经拿到关键帧，视觉检查后直接进入动作机制判断。",
@@ -10380,59 +9614,13 @@ class GraphAgentPlanner:
                 )
             if self._is_action_intent_task(state) and state.retrieved_frames:
                 if self._action_intent_is_timeline_review_payload(last_result):
-                    latest_intent = self._latest_successful_action_intent_result(state)
-                    if self._action_intent_timeline_review_needs_more_evidence(last_result):
-                        long_horizon_revisit = self._build_action_intent_cached_long_horizon_revisit_decision(
-                            state=state,
-                            hints=hints,
-                            thought="why 题在当前长时域关键帧上仍有多个 plausible 解释；继续沿目标对象更晚的再次出现位置向后追，确认它到底被放回、继续使用，还是只是暂时移开。",
-                        )
-                        if long_horizon_revisit is not None:
-                            return long_horizon_revisit
-                        transition_probe = self._build_action_intent_transition_probe_decision(
-                            state=state,
-                            hints=hints,
-                            result=latest_intent,
-                            thought="why 题短时序复核已经明确当前仍有多种解释；先在动作尾部和紧随其后的短窗口主动密采样关键帧，优先寻找能立刻排除竞争目的的决定性瞬间。",
-                        )
-                        if transition_probe is not None:
-                            return transition_probe
-                        if self._action_intent_followup_attempt_count(state) < 3:
-                            extra_followup = self._build_action_intent_extra_followup_sampling_decision(
-                                state=state,
-                                hints=hints,
-                                focus="timeline_review_requested_more_evidence",
-                                window_s=6.0,
-                            )
-                            if extra_followup is not None:
-                                return PlannerDecision(
-                                    thought="why 题短时序复核明确说仍有多个解释成立；继续向后补更远一点的结果帧，再决定动作真实目的。",
-                                    tool=extra_followup.tool,
-                                    args=extra_followup.args,
-                                    done=extra_followup.done,
-                                    answer=extra_followup.answer,
-                                    prediction=extra_followup.prediction,
-                                    confidence=extra_followup.confidence,
-                                )
-                    pending_tool = self._action_intent_pending_resolution_tool(state)
-                    if pending_tool == "resolve_action_intent_future_use":
-                        future_use = self._build_action_intent_future_use_resolution_decision(
-                            state=state,
-                            hints=hints,
-                            result=latest_intent,
-                            thought="why 题短时序复核后仍不唯一；改走后续用途专用裁决，而不是直接重做五选一判断。",
-                        )
-                        if future_use is not None:
-                            return future_use
-                    if pending_tool == "resolve_action_intent_pairwise":
-                        pairwise = self._build_action_intent_pairwise_resolution_decision(
-                            state=state,
-                            hints=hints,
-                            result=latest_intent,
-                            thought="why 题短时序复核后仍不唯一；改走二选一专用裁决，而不是直接重做五选一判断。",
-                        )
-                        if pairwise is not None:
-                            return pairwise
+                    timeline_review_resolution = self._resume_action_intent_specialized_resolution_from_timeline_review(
+                        state=state,
+                        hints=hints,
+                        timeline_review_result=last_result,
+                    )
+                    if timeline_review_resolution is not None:
+                        return timeline_review_resolution
                     action_frames = self._select_action_intent_frames(
                         state,
                         hints,
@@ -10510,49 +9698,15 @@ class GraphAgentPlanner:
             and last_tool.get("tool") in {"sample_sparse_frames", "extract_frames_for_range", "retrieve_cached_artifacts", "sample_frames_around_peaks"}
             and self._is_action_intent_task(state)
             and state.retrieved_frames
-            and self._action_intent_pending_resolution_tool(state)
         ):
-            transition_peak_probe = self._build_action_intent_peak_probe_after_transition_decision(
+            followup_resolution = self._resume_action_intent_specialized_resolution_from_followup_artifacts(
                 state=state,
+                hints=hints,
                 last_tool=last_tool,
-                result=self._latest_successful_action_intent_result(state),
+                last_result=last_result,
             )
-            if transition_peak_probe is not None:
-                return transition_peak_probe
-            pending_tool = self._action_intent_pending_resolution_tool(state)
-            if (
-                self._action_intent_needs_precondition_context(state=state, result=None)
-                and not self._action_intent_has_precondition_frames(state=state, hints=hints)
-            ):
-                precondition = self._build_action_intent_precondition_sampling_decision(
-                    state=state,
-                    hints=hints,
-                    focus=(
-                        "precondition_before_pending_resolution"
-                        if pending_tool
-                        else "precondition_before_action_intent_resolution"
-                    ),
-                )
-                if precondition is not None:
-                    return precondition
-            if pending_tool == "resolve_action_intent_future_use":
-                future_use = self._build_action_intent_future_use_resolution_decision(
-                    state=state,
-                    hints=hints,
-                    result=last_result,
-                    thought="why 题已补到额外后续帧，回到后续用途裁决，逐项检查动作后真实用途。",
-                )
-                if future_use is not None:
-                    return future_use
-            if pending_tool == "resolve_action_intent_pairwise":
-                pairwise = self._build_action_intent_pairwise_resolution_decision(
-                    state=state,
-                    hints=hints,
-                    result=last_result,
-                    thought="why 题已补到额外后续帧，回到二选一后果裁决，检查后续是否能排除竞争选项。",
-                )
-                if pairwise is not None:
-                    return pairwise
+            if followup_resolution is not None:
+                return followup_resolution
         if (
             isinstance(last_result, dict)
             and last_tool.get("tool") in {"sample_sparse_frames", "extract_frames_for_range", "retrieve_cached_artifacts", "sample_frames_around_peaks"}
@@ -10599,22 +9753,6 @@ class GraphAgentPlanner:
                 },
             )
         if isinstance(last_result, dict) and last_tool.get("tool") == "resolve_action_intent_pairwise" and last_result.get("best_index") is not None:
-            needed_observation_relation_revisit = self._build_action_intent_needed_observation_relation_revisit_decision(
-                state=state,
-                hints=hints,
-                result=last_result,
-                thought="why 题 pairwise 已经明确真正缺的是某个关系型判别证据；优先去查动作物体与目标之间是否真的出现了 `on/into/over/returned` 这类关系，而不是继续泛化补帧。",
-            )
-            if needed_observation_relation_revisit is not None:
-                return needed_observation_relation_revisit
-            needed_observation_target_revisit = self._build_action_intent_needed_observation_target_revisit_decision(
-                state=state,
-                hints=hints,
-                result=last_result,
-                thought="why 题 pairwise 已经明确真正缺的是某个判别目标/位置上的后续证据；优先去追 `needed_observation` 点名的目标，而不是继续只沿动作物体做泛化补帧。",
-            )
-            if needed_observation_target_revisit is not None:
-                return needed_observation_target_revisit
             if self._action_intent_resolution_should_backfill_precondition(
                 state=state,
                 hints=hints,
@@ -10623,7 +9761,12 @@ class GraphAgentPlanner:
                 precondition = self._build_action_intent_precondition_sampling_decision(
                     state=state,
                     hints=hints,
-                    focus=str(last_result.get("needed_observation") or "precondition_before_pairwise_followup"),
+                    focus=self._action_intent_pairwise_observation_focus(
+                        state=state,
+                        hints=hints,
+                        result=last_result,
+                        phase="precondition",
+                    ),
                 )
                 if precondition is not None:
                     return precondition
@@ -10631,7 +9774,7 @@ class GraphAgentPlanner:
                 isinstance(item, str)
                 and item.startswith("action_intent_resolution_withheld_for_missing_state_change_prereq=1")
                 for item in list(getattr(state, "working_memory", []))[-12:]
-            ) and self._action_intent_followup_attempt_count(state) < 3:
+            ) and self._action_intent_followup_attempt_count(state) < self._action_intent_extra_followup_budget(state):
                 extra_followup = self._build_action_intent_extra_followup_sampling_decision(
                     state=state,
                     hints=hints,
@@ -10640,75 +9783,6 @@ class GraphAgentPlanner:
                 )
                 if extra_followup is not None:
                     return extra_followup
-            finalize_access_or_space_revisit = self._build_action_intent_finalize_withheld_generic_access_or_space_revisit_decision(
-                state=state,
-                hints=hints,
-                thought="why 题专用裁决刚被 finalizer 拦下，因为当前仍停留在 generic access / make-space 层；直接改追 finalizer 指出的真实 reveal/use 下游目标，而不是立即 finish。",
-            )
-            if finalize_access_or_space_revisit is not None:
-                return finalize_access_or_space_revisit
-            finalize_mixed_horizon_later_target_revisit = (
-                self._build_action_intent_finalize_withheld_mixed_horizon_later_target_revisit_decision(
-                    state=state,
-                    hints=hints,
-                    thought="why 题专用裁决刚被 finalizer 拦下，因为当前只看到了 `check/open` 这类立刻微结果；直接改追 mixed-horizon 竞争里更晚结果对应的真实目标，而不是继续围着动作物体做泛化补帧。",
-                )
-            )
-            if finalize_mixed_horizon_later_target_revisit is not None:
-                return finalize_mixed_horizon_later_target_revisit
-            finalize_relocation_or_storage_revisit = (
-                self._build_action_intent_finalize_withheld_generic_relocation_or_storage_revisit_decision(
-                    state=state,
-                    hints=hints,
-                    thought="why 题专用裁决刚被 finalizer 拦下，因为当前把 generic put-away / temporary relocation 当成结论；直接改追真实的后续用途或下游目标，而不是立即 finish。",
-                )
-            )
-            if finalize_relocation_or_storage_revisit is not None:
-                return finalize_relocation_or_storage_revisit
-            finalize_hand_free_revisit = self._build_action_intent_finalize_withheld_generic_hand_free_revisit_decision(
-                state=state,
-                hints=hints,
-                thought="why 题专用裁决刚被 finalizer 拦下，因为当前只停留在 generic hand-free 中间态；直接改追 finalizer 指出的真实下游对象，而不是立即 finish。",
-            )
-            if finalize_hand_free_revisit is not None:
-                return finalize_hand_free_revisit
-            unresolved_rerank_downstream_fixture_revisit = self._build_action_intent_unresolved_rerank_downstream_fixture_revisit_decision(
-                state=state,
-                hints=hints,
-                thought="why 题 unresolved rerank 已指出 hand-free / fixture enablement 仍缺决定性证据；优先转去追踪真正的下游装置，而不是继续只盯动作物体或泛化补帧。",
-            )
-            if unresolved_rerank_downstream_fixture_revisit is not None:
-                return unresolved_rerank_downstream_fixture_revisit
-            unresolved_rerank_hand_free_object_revisit = self._build_action_intent_unresolved_rerank_hand_free_object_revisit_decision(
-                state=state,
-                hints=hints,
-                thought="why 题 unresolved rerank 表明当前只是停留在泛化 hand-free 描述上；优先去追真正被拿起、被使用，或继续被操作的下游对象，而不是把“手空出来了”当成最终目的。",
-            )
-            if unresolved_rerank_hand_free_object_revisit is not None:
-                return unresolved_rerank_hand_free_object_revisit
-            unresolved_rerank_downstream_target_revisit = self._build_action_intent_unresolved_rerank_downstream_target_revisit_decision(
-                state=state,
-                hints=hints,
-                thought="why 题 unresolved rerank 已指出 freed-slot / revealed-target 仍缺证据；优先转去追踪下游目标物体，而不是继续盯着被移动的物体本身。",
-            )
-            if unresolved_rerank_downstream_target_revisit is not None:
-                return unresolved_rerank_downstream_target_revisit
-            unresolved_rerank_mixed_horizon_later_target_revisit = (
-                self._build_action_intent_unresolved_rerank_mixed_horizon_later_target_revisit_decision(
-                    state=state,
-                    hints=hints,
-                    thought="why 题 unresolved rerank 已明确 mixed-horizon 的更晚结果还没看到；优先转去追 later outcome 对应的真实目标，而不是继续只沿动作物体做泛化 long-horizon 后追。",
-                )
-            )
-            if unresolved_rerank_mixed_horizon_later_target_revisit is not None:
-                return unresolved_rerank_mixed_horizon_later_target_revisit
-            unresolved_rerank_long_horizon_revisit = self._build_action_intent_unresolved_rerank_long_horizon_revisit_decision(
-                state=state,
-                hints=hints,
-                thought="why 题当前 unresolved rerank 已明确指出更晚用途/最终落点仍缺证据；直接沿缓存的目标 object node 向后追，而不是继续做泛化 pairwise followup。",
-            )
-            if unresolved_rerank_long_horizon_revisit is not None:
-                return unresolved_rerank_long_horizon_revisit
             transition_probe = self._build_action_intent_resolution_transition_recovery_decision(
                 state=state,
                 hints=hints,
@@ -10722,7 +9796,12 @@ class GraphAgentPlanner:
                 hints=hints,
                 last_tool=last_tool,
                 last_result=last_result,
-                focus=str(last_result.get("needed_observation") or "pairwise_outcome_resolution"),
+                focus=self._action_intent_pairwise_observation_focus(
+                    state=state,
+                    hints=hints,
+                    result=last_result,
+                    phase="followup",
+                ),
             )
             if peak_guided is not None:
                 return peak_guided
@@ -10731,17 +9810,22 @@ class GraphAgentPlanner:
                     tool_name="resolve_action_intent_pairwise",
                     result=last_result,
                 )
-                and self._action_intent_followup_attempt_count(state) < 3
+                and self._action_intent_followup_attempt_count(state) < self._action_intent_extra_followup_budget(state)
             ):
                 extra_followup = self._build_action_intent_extra_followup_sampling_decision(
                     state=state,
                     hints=hints,
-                    focus=str(last_result.get("needed_observation") or "pairwise_outcome_resolution"),
+                    focus=self._action_intent_pairwise_observation_focus(
+                        state=state,
+                        hints=hints,
+                        result=last_result,
+                        phase="followup",
+                    ),
                 )
                 if extra_followup is not None:
                     return extra_followup
             if self._action_intent_result_is_weak_generic_claim(state=state, result=last_result):
-                if self._action_intent_followup_attempt_count(state) < 3:
+                if self._action_intent_followup_attempt_count(state) < self._action_intent_extra_followup_budget(state):
                     extra_followup = self._build_action_intent_extra_followup_sampling_decision(
                         state=state,
                         hints=hints,
@@ -10751,7 +9835,7 @@ class GraphAgentPlanner:
                     if extra_followup is not None:
                         return extra_followup
             if self._action_intent_result_is_workspace_or_final_placement_close_call(state=state, result=last_result):
-                if self._action_intent_followup_attempt_count(state) < 3:
+                if self._action_intent_followup_attempt_count(state) < self._action_intent_extra_followup_budget(state):
                     extra_followup = self._build_action_intent_extra_followup_sampling_decision(
                         state=state,
                         hints=hints,
@@ -10761,23 +9845,49 @@ class GraphAgentPlanner:
                     if extra_followup is not None:
                         return extra_followup
             if not self._action_intent_resolution_payload_is_ready_to_finish(state=state, payload=last_result):
-                recovered = self._build_action_intent_specialized_recovery_decision(
+                return self._build_action_intent_resolution_not_ready_recovery(
                     state=state,
                     hints=hints,
-                    thought="why 题二选一裁决仍明确承认证据不够，不能直接结束；先恢复当前题时间窗关键帧或专用判断，再继续追决定性结果证据。",
+                    used_tools=used_tools,
+                    specialized_recovery_thought="why 题二选一裁决仍明确承认证据不够，不能直接结束；先恢复当前题时间窗关键帧或专用判断，再继续追决定性结果证据。",
+                    state_candidate_guard="pairwise_resolution_prefers_state_candidate",
+                    generic_resample_thought="why 题二选一裁决仍明确承认证据不够，当前又没有可直接复用的时间锚点；退回当前题动作片段重抽，而不是直接结束。",
                 )
-                if recovered is not None:
+            if self._should_continue_search_from_sufficiency(state):
+                recovered = self._recover_from_open_questions(state=state, hints=hints, used_tools=used_tools)
+                if recovered is not None and recovered.tool not in {"finish", "rank_choices_from_state"}:
+                    preferred_candidate = self._prefer_action_intent_state_candidate_over_generic_recovery(
+                        state=state,
+                        hints=hints,
+                        used_tools=used_tools,
+                        recovered=recovered,
+                        memory_prefix="planner_guard=verifier_blocked_finish_prefers_state_candidate_over_generic_recovery",
+                    )
+                    if preferred_candidate is not None:
+                        return preferred_candidate
+                    self._state_add_memory(
+                        state,
+                        f"planner_override pairwise_resolution_continue_search={recovered.tool}",
+                    )
                     return recovered
-                return PlannerDecision(
-                    thought="why 题二选一裁决仍明确承认证据不够，当前又没有可直接复用的时间锚点；退回当前题动作片段重抽，而不是直接结束。",
-                    tool="sample_sparse_frames",
-                    args={
-                        "start_time": None,
-                        "end_time": None,
-                        "sample_count": 4,
-                        "tag": f"{state.task_family}_segment",
-                    },
+                candidate_plan = self._best_state_candidate_plan(state=state, hints=hints, used_tools=used_tools)
+                if candidate_plan is not None and candidate_plan.decision.tool not in {"finish", "rank_choices_from_state"}:
+                    self._state_add_memory(
+                        state,
+                        f"planner_guard=pairwise_resolution_continue_search_prefers_state_candidate={candidate_plan.decision.tool}",
+                    )
+                    return candidate_plan.decision
+                current_scope_recovery = self._build_action_intent_specialized_recovery_decision(
+                    state=state,
+                    hints=hints,
+                    thought="why 题二选一裁决虽然已有一轮结果，但 structured sufficiency 仍明确要求继续补证；当前又没有 generic recovery 或 targeted candidate 接管时，先回到当前题时间窗补关键帧，而不是直接 finish。",
                 )
+                if current_scope_recovery is not None and current_scope_recovery.tool not in {"finish", "rank_choices_from_state"}:
+                    self._state_add_memory(
+                        state,
+                        f"planner_override pairwise_resolution_continue_search_current_scope={current_scope_recovery.tool}",
+                    )
+                    return current_scope_recovery
             best_index = int(last_result["best_index"])
             return PlannerDecision(
                 thought="why 题二选一裁决已完成，直接结束。",
@@ -10793,27 +9903,11 @@ class GraphAgentPlanner:
                 confidence=float(last_result.get("confidence") or 0.0),
             )
         if isinstance(last_result, dict) and last_tool.get("tool") == "resolve_action_intent_future_use" and last_result.get("best_index") is not None:
-            needed_observation_relation_revisit = self._build_action_intent_needed_observation_relation_revisit_decision(
-                state=state,
-                hints=hints,
-                result=last_result,
-                thought="why 题 future-use 裁决已经明确真正缺的是某个关系型判别证据；优先去查动作物体与目标之间是否真的出现了 `on/into/over/returned` 这类关系，而不是继续泛化补帧。",
-            )
-            if needed_observation_relation_revisit is not None:
-                return needed_observation_relation_revisit
-            needed_observation_target_revisit = self._build_action_intent_needed_observation_target_revisit_decision(
-                state=state,
-                hints=hints,
-                result=last_result,
-                thought="why 题 future-use 裁决已经明确真正缺的是某个判别目标/位置上的后续证据；优先去追 `needed_observation` 点名的目标，而不是继续只沿动作物体做泛化补帧。",
-            )
-            if needed_observation_target_revisit is not None:
-                return needed_observation_target_revisit
             if any(
                 isinstance(item, str)
                 and item.startswith("action_intent_resolution_withheld_for_weak_surface_wiping_evidence=1")
                 for item in list(getattr(state, "working_memory", []))[-12:]
-            ) and self._action_intent_followup_attempt_count(state) < 3:
+            ) and self._action_intent_followup_attempt_count(state) < self._action_intent_extra_followup_budget(state):
                 extra_followup = self._build_action_intent_extra_followup_sampling_decision(
                     state=state,
                     hints=hints,
@@ -10830,79 +9924,60 @@ class GraphAgentPlanner:
                 precondition = self._build_action_intent_precondition_sampling_decision(
                     state=state,
                     hints=hints,
-                    focus=str(last_result.get("needed_observation") or "precondition_before_additional_followup"),
+                    focus=self._action_intent_future_use_observation_focus(
+                        state=state,
+                        hints=hints,
+                        result=last_result,
+                        phase="precondition",
+                    ),
                 )
                 if precondition is not None:
                     return precondition
-            finalize_access_or_space_revisit = self._build_action_intent_finalize_withheld_generic_access_or_space_revisit_decision(
-                state=state,
-                hints=hints,
-                thought="why 题专用裁决刚被 finalizer 拦下，因为当前把 generic access / make-space 当结论；优先转去追真正的 reveal/use 下游目标，而不是直接 finish。",
-            )
-            if finalize_access_or_space_revisit is not None:
-                return finalize_access_or_space_revisit
-            finalize_mixed_horizon_later_target_revisit = (
-                self._build_action_intent_finalize_withheld_mixed_horizon_later_target_revisit_decision(
+            if self._action_intent_result_has_direct_post_action_evidence(last_result) and not self._action_intent_resolution_needs_more_evidence(
+                tool_name="resolve_action_intent_future_use",
+                result=last_result,
+            ):
+                best_index = int(last_result["best_index"])
+                return PlannerDecision(
+                    thought="why 题后续用途专用裁决已经给出决定性动作后证据，直接结束。",
+                    tool="finish",
+                    args={
+                        "prediction": best_index,
+                        "answer": str(last_result.get("answer") or state.choices[best_index]),
+                        "confidence": float(last_result.get("confidence") or 0.0),
+                    },
+                    done=True,
+                    answer=str(last_result.get("answer") or state.choices[best_index]),
+                    prediction=best_index,
+                    confidence=float(last_result.get("confidence") or 0.0),
+                )
+            if any(
+                isinstance(item, str)
+                and item.startswith("action_intent_resolution_withheld_for_weak_cooking_inspection_evidence=1")
+                for item in list(getattr(state, "working_memory", []))[-12:]
+            ):
+                peak_guided = self._build_action_intent_peak_guided_followup_decision(
                     state=state,
                     hints=hints,
-                    thought="why 题专用裁决刚被 finalizer 拦下，因为当前仍停留在 `check/open` 这类立刻微结果；优先转去追 mixed-horizon 竞争里更晚结果对应的真实目标，而不是继续围着动作物体做泛化补帧。",
+                    last_tool=last_tool,
+                    last_result=last_result,
+                    focus="weak_cooking_inspection_peak_probe",
                 )
-            )
-            if finalize_mixed_horizon_later_target_revisit is not None:
-                return finalize_mixed_horizon_later_target_revisit
-            finalize_relocation_or_storage_revisit = (
-                self._build_action_intent_finalize_withheld_generic_relocation_or_storage_revisit_decision(
+                if peak_guided is not None:
+                    return peak_guided
+            if (
+                self._action_intent_followup_attempt_count(state) >= 2
+                and self._latest_action_intent_long_horizon_nodes(state)
+                and not self._action_intent_result_has_direct_post_action_evidence(last_result)
+            ):
+                extra_followup = self._build_action_intent_extra_followup_sampling_decision(
                     state=state,
                     hints=hints,
-                    thought="why 题专用裁决刚被 finalizer 拦下，因为当前仍把 generic put-away / temporary relocation 当成结论；优先转去追真正的后续用途或下游目标，而不是直接 finish。",
+                    focus="verifier_blocked_close_call_recovery",
+                    window_s=self._action_intent_close_call_followup_window(state, profile="future_use"),
                 )
-            )
-            if finalize_relocation_or_storage_revisit is not None:
-                return finalize_relocation_or_storage_revisit
-            finalize_hand_free_revisit = self._build_action_intent_finalize_withheld_generic_hand_free_revisit_decision(
-                state=state,
-                hints=hints,
-                thought="why 题专用裁决刚被 finalizer 拦下，因为当前仍把 generic hand-free 当结论；优先转去追真正的后续对象/用途，而不是直接 finish。",
-            )
-            if finalize_hand_free_revisit is not None:
-                return finalize_hand_free_revisit
-            unresolved_rerank_downstream_fixture_revisit = self._build_action_intent_unresolved_rerank_downstream_fixture_revisit_decision(
-                state=state,
-                hints=hints,
-                thought="why 题 unresolved rerank 已指出 hand-free / fixture enablement 的真正下游装置还没被确认；优先转去追踪那个 fixture，而不是继续只看动作物体。",
-            )
-            if unresolved_rerank_downstream_fixture_revisit is not None:
-                return unresolved_rerank_downstream_fixture_revisit
-            unresolved_rerank_hand_free_object_revisit = self._build_action_intent_unresolved_rerank_hand_free_object_revisit_decision(
-                state=state,
-                hints=hints,
-                thought="why 题 unresolved rerank 表明当前只看到“腾出一只手”这类中间态；优先去追 hand-free 之后真正要操作的对象或同一物体的后续用途。",
-            )
-            if unresolved_rerank_hand_free_object_revisit is not None:
-                return unresolved_rerank_hand_free_object_revisit
-            unresolved_rerank_downstream_target_revisit = self._build_action_intent_unresolved_rerank_downstream_target_revisit_decision(
-                state=state,
-                hints=hints,
-                thought="why 题 unresolved rerank 已指出 revealed-target / freed-slot 的真正下游目标还没被确认；优先转去追踪那个目标物体，而不是继续只看动作物体。",
-            )
-            if unresolved_rerank_downstream_target_revisit is not None:
-                return unresolved_rerank_downstream_target_revisit
-            unresolved_rerank_mixed_horizon_later_target_revisit = (
-                self._build_action_intent_unresolved_rerank_mixed_horizon_later_target_revisit_decision(
-                    state=state,
-                    hints=hints,
-                    thought="why 题 unresolved rerank 已明确 mixed-horizon 的更晚结果还没被确认；优先转去追 later outcome 对应的真实目标，而不是继续只沿动作物体做泛化 long-horizon 后追。",
-                )
-            )
-            if unresolved_rerank_mixed_horizon_later_target_revisit is not None:
-                return unresolved_rerank_mixed_horizon_later_target_revisit
-            unresolved_rerank_long_horizon_revisit = self._build_action_intent_unresolved_rerank_long_horizon_revisit_decision(
-                state=state,
-                hints=hints,
-                thought="why 题 unresolved rerank 已明确指出 later-use / final-location 还缺更晚证据；直接沿缓存目标节点向后追，而不是继续做泛化 future-use followup。",
-            )
-            if unresolved_rerank_long_horizon_revisit is not None:
-                return unresolved_rerank_long_horizon_revisit
+                if extra_followup is not None:
+                    return extra_followup
             transition_probe = self._build_action_intent_resolution_transition_recovery_decision(
                 state=state,
                 hints=hints,
@@ -10911,28 +9986,17 @@ class GraphAgentPlanner:
             )
             if transition_probe is not None:
                 return transition_probe
-            weak_late_anchor_revisit = self._build_action_intent_weak_late_anchor_revisit_decision(
-                state=state,
-                hints=hints,
-                result=last_result,
-                thought="why 题当前后续用途裁决仍只落在晚锚点的弱邻近/手持证据上，排他性仍不足；继续沿更晚节点向后追，再决定是否允许收口。",
-            )
-            if weak_late_anchor_revisit is not None:
-                return weak_late_anchor_revisit
-            nonexclusive_concrete_late_anchor_revisit = self._build_action_intent_nonexclusive_concrete_late_anchor_revisit_decision(
-                state=state,
-                hints=hints,
-                result=last_result,
-                thought="why 题当前后续用途裁决虽然给出了更具体的晚锚点描述，但仍只是标签显露或物体暂放邻近位置这类非排他中间态；继续沿更晚节点向后追，再决定是否允许收口。",
-            )
-            if nonexclusive_concrete_late_anchor_revisit is not None:
-                return nonexclusive_concrete_late_anchor_revisit
             peak_guided = self._build_action_intent_peak_guided_followup_decision(
                 state=state,
                 hints=hints,
                 last_tool=last_tool,
                 last_result=last_result,
-                focus=str(last_result.get("needed_observation") or "future_use_resolution"),
+                focus=self._action_intent_future_use_observation_focus(
+                    state=state,
+                    hints=hints,
+                    result=last_result,
+                    phase="followup",
+                ),
             )
             if peak_guided is not None:
                 return peak_guided
@@ -10941,17 +10005,22 @@ class GraphAgentPlanner:
                     tool_name="resolve_action_intent_future_use",
                     result=last_result,
                 )
-                and self._action_intent_followup_attempt_count(state) < 3
+                and self._action_intent_followup_attempt_count(state) < self._action_intent_extra_followup_budget(state)
             ):
                 extra_followup = self._build_action_intent_extra_followup_sampling_decision(
                     state=state,
                     hints=hints,
-                    focus=str(last_result.get("needed_observation") or "future_use_resolution"),
+                    focus=self._action_intent_future_use_observation_focus(
+                        state=state,
+                        hints=hints,
+                        result=last_result,
+                        phase="followup",
+                    ),
                 )
                 if extra_followup is not None:
                     return extra_followup
             if self._action_intent_result_is_weak_generic_claim(state=state, result=last_result):
-                if self._action_intent_followup_attempt_count(state) < 3:
+                if self._action_intent_followup_attempt_count(state) < self._action_intent_extra_followup_budget(state):
                     extra_followup = self._build_action_intent_extra_followup_sampling_decision(
                         state=state,
                         hints=hints,
@@ -10961,7 +10030,7 @@ class GraphAgentPlanner:
                     if extra_followup is not None:
                         return extra_followup
             if self._action_intent_result_is_workspace_or_final_placement_close_call(state=state, result=last_result):
-                if self._action_intent_followup_attempt_count(state) < 3:
+                if self._action_intent_followup_attempt_count(state) < self._action_intent_extra_followup_budget(state):
                     extra_followup = self._build_action_intent_extra_followup_sampling_decision(
                         state=state,
                         hints=hints,
@@ -10971,23 +10040,49 @@ class GraphAgentPlanner:
                     if extra_followup is not None:
                         return extra_followup
             if not self._action_intent_resolution_payload_is_ready_to_finish(state=state, payload=last_result):
-                recovered = self._build_action_intent_specialized_recovery_decision(
+                return self._build_action_intent_resolution_not_ready_recovery(
                     state=state,
                     hints=hints,
-                    thought="why 题后续用途裁决仍明确承认证据不够，不能直接结束；先恢复当前题时间窗关键帧或专用判断，再继续追决定性动作后证据。",
+                    used_tools=used_tools,
+                    specialized_recovery_thought="why 题后续用途裁决仍明确承认证据不够，不能直接结束；先恢复当前题时间窗关键帧或专用判断，再继续追决定性动作后证据。",
+                    state_candidate_guard="future_use_resolution_prefers_state_candidate",
+                    generic_resample_thought="why 题后续用途裁决仍明确承认证据不够，当前又没有可直接复用的时间锚点；退回当前题动作片段重抽，而不是直接结束。",
                 )
-                if recovered is not None:
+            if self._should_continue_search_from_sufficiency(state):
+                recovered = self._recover_from_open_questions(state=state, hints=hints, used_tools=used_tools)
+                if recovered is not None and recovered.tool not in {"finish", "rank_choices_from_state"}:
+                    preferred_candidate = self._prefer_action_intent_state_candidate_over_generic_recovery(
+                        state=state,
+                        hints=hints,
+                        used_tools=used_tools,
+                        recovered=recovered,
+                        memory_prefix="planner_guard=future_use_resolution_prefers_state_candidate_over_generic_recovery",
+                    )
+                    if preferred_candidate is not None:
+                        return preferred_candidate
+                    self._state_add_memory(
+                        state,
+                        f"planner_override future_use_resolution_continue_search={recovered.tool}",
+                    )
                     return recovered
-                return PlannerDecision(
-                    thought="why 题后续用途裁决仍明确承认证据不够，当前又没有可直接复用的时间锚点；退回当前题动作片段重抽，而不是直接结束。",
-                    tool="sample_sparse_frames",
-                    args={
-                        "start_time": None,
-                        "end_time": None,
-                        "sample_count": 4,
-                        "tag": f"{state.task_family}_segment",
-                    },
+                candidate_plan = self._best_state_candidate_plan(state=state, hints=hints, used_tools=used_tools)
+                if candidate_plan is not None and candidate_plan.decision.tool not in {"finish", "rank_choices_from_state"}:
+                    self._state_add_memory(
+                        state,
+                        f"planner_guard=future_use_resolution_continue_search_prefers_state_candidate={candidate_plan.decision.tool}",
+                    )
+                    return candidate_plan.decision
+                current_scope_recovery = self._build_action_intent_specialized_recovery_decision(
+                    state=state,
+                    hints=hints,
+                    thought="why 题后续用途裁决虽然已有一轮结果，但 structured sufficiency 仍明确要求继续补证；当前又没有 generic recovery 或 targeted candidate 接管时，先回到当前题时间窗补关键帧，而不是直接 finish。",
                 )
+                if current_scope_recovery is not None and current_scope_recovery.tool not in {"finish", "rank_choices_from_state"}:
+                    self._state_add_memory(
+                        state,
+                        f"planner_override future_use_resolution_continue_search_current_scope={current_scope_recovery.tool}",
+                    )
+                    return current_scope_recovery
             best_index = int(last_result["best_index"])
             return PlannerDecision(
                 thought="why 题后续用途证据裁决已完成，直接结束。",
@@ -11043,144 +10138,6 @@ class GraphAgentPlanner:
             if self._action_intent_text_fallback_ready(state):
                 latest_resolution = self._latest_action_intent_resolution_payload(state)
                 latest_action_intent_result = latest_resolution[1] if latest_resolution is not None else {}
-                latest_needed_observation = str(latest_action_intent_result.get("needed_observation") or "").lower()
-                if self._is_action_intent_task(state) and isinstance(latest_action_intent_result, dict):
-                    needed_observation_relation_revisit = self._build_action_intent_needed_observation_relation_revisit_decision(
-                        state=state,
-                        hints=hints,
-                        result=latest_action_intent_result,
-                        thought="why 题 repeated textual fallback 前，`needed_observation` 已经明确收敛到某个关系型判别证据；直接追动作物体与目标之间是否真的形成 `on/into/over/returned` 这类关系，而不是先退回 generic visual review。",
-                    )
-                    if needed_observation_relation_revisit is not None:
-                        return needed_observation_relation_revisit
-                    needed_observation_target_revisit = self._build_action_intent_needed_observation_target_revisit_decision(
-                        state=state,
-                        hints=hints,
-                        result=latest_action_intent_result,
-                        thought="why 题 repeated textual fallback 前，`needed_observation` 已经明确点名了判别目标/位置；直接去追该目标的更晚证据，而不是先退回 generic visual review。",
-                    )
-                    if needed_observation_target_revisit is not None:
-                        return needed_observation_target_revisit
-                    finalize_access_or_space_revisit = self._build_action_intent_finalize_withheld_generic_access_or_space_revisit_decision(
-                        state=state,
-                        hints=hints,
-                        thought="why 题 repeated textual fallback 前，finalizer 已明确 generic access / make-space 不是结论；直接追真正的 reveal/use 下游目标，而不是先退回 generic visual review。",
-                    )
-                    if finalize_access_or_space_revisit is not None:
-                        return finalize_access_or_space_revisit
-                    finalize_relocation_or_storage_revisit = self._build_action_intent_finalize_withheld_generic_relocation_or_storage_revisit_decision(
-                        state=state,
-                        hints=hints,
-                        thought="why 题 repeated textual fallback 前，finalizer 已明确 generic put-away / relocation 不是结论；直接追真实后续目标，而不是先退回 generic visual review。",
-                    )
-                    if finalize_relocation_or_storage_revisit is not None:
-                        return finalize_relocation_or_storage_revisit
-                    finalize_hand_free_revisit = self._build_action_intent_finalize_withheld_generic_hand_free_revisit_decision(
-                        state=state,
-                        hints=hints,
-                        thought="why 题 repeated textual fallback 前，finalizer 已明确 generic hand-free 不是结论；直接追真实 downstream object / same-object use，而不是先退回 generic visual review。",
-                    )
-                    if finalize_hand_free_revisit is not None:
-                        return finalize_hand_free_revisit
-                    weak_late_anchor_revisit = self._build_action_intent_weak_late_anchor_revisit_decision(
-                        state=state,
-                        hints=hints,
-                        result=latest_action_intent_result,
-                        thought="why 题 repeated textual fallback 前，当前只停留在晚锚点的弱邻近/手持证据；继续沿更晚节点向后追，再决定是否允许收口。",
-                    )
-                    if weak_late_anchor_revisit is not None:
-                        return weak_late_anchor_revisit
-                    nonexclusive_concrete_late_anchor_revisit = self._build_action_intent_nonexclusive_concrete_late_anchor_revisit_decision(
-                        state=state,
-                        hints=hints,
-                        result=latest_action_intent_result,
-                        thought="why 题 repeated textual fallback 前，当前虽然出现了更具体的晚锚点描述，但本质上仍只是非排他中间态；继续沿更晚节点向后追，而不是先退回 generic visual review。",
-                    )
-                    if nonexclusive_concrete_late_anchor_revisit is not None:
-                        return nonexclusive_concrete_late_anchor_revisit
-                    measurement_target_revisit = self._build_action_intent_verifier_blocked_measurement_target_revisit_decision(
-                        state=state,
-                        hints=hints,
-                        result=latest_action_intent_result,
-                        blocker_hint="future_use_close_call",
-                    )
-                    if measurement_target_revisit is not None:
-                        return PlannerDecision(
-                            thought=(
-                                "why 题 repeated textual fallback 前，当前已经收敛到 generic measurement-meta vs exact weighing target 的冲突；"
-                                "直接追 `scale`/称量目标的更晚证据，而不是先退回 generic visual review。"
-                            ),
-                            tool=measurement_target_revisit.tool,
-                            args=measurement_target_revisit.args,
-                        )
-                    phone_record_target_revisit = self._build_action_intent_verifier_blocked_phone_record_target_revisit_decision(
-                        state=state,
-                        hints=hints,
-                        result=latest_action_intent_result,
-                        blocker_hint="future_use_close_call",
-                    )
-                    if phone_record_target_revisit is not None:
-                        return PlannerDecision(
-                            thought=(
-                                "why 题 repeated textual fallback 前，当前已经收敛到 generic phone-measure vs exact ingredient record target 的冲突；"
-                                "直接追具体记录目标的更晚证据，而不是先退回 generic visual review。"
-                            ),
-                            tool=phone_record_target_revisit.tool,
-                            args=phone_record_target_revisit.args,
-                        )
-                    hand_free_target_revisit = self._build_action_intent_verifier_blocked_hand_free_target_revisit_decision(
-                        state=state,
-                        hints=hints,
-                        result=latest_action_intent_result,
-                        blocker_hint="future_use_close_call",
-                    )
-                    if hand_free_target_revisit is not None:
-                        return PlannerDecision(
-                            thought=(
-                                "why 题 repeated textual fallback 前，当前已经收敛到 generic hand-free vs exact downstream use 的冲突；"
-                                "直接追 hand-free 背后真正的下游 fixture/object，而不是先退回 generic visual review。"
-                            ),
-                            tool=hand_free_target_revisit.tool,
-                            args=hand_free_target_revisit.args,
-                        )
-                    same_object_active_use_revisit = (
-                        self._build_action_intent_verifier_blocked_same_object_active_use_revisit_decision(
-                            state=state,
-                            hints=hints,
-                            result=latest_action_intent_result,
-                            blocker_hint="future_use_close_call",
-                        )
-                    )
-                    if same_object_active_use_revisit is not None:
-                        return PlannerDecision(
-                            thought=(
-                                "why 题 repeated textual fallback 前，当前已经收敛到 same-object active use 与其它近窗/后续解释的冲突；"
-                                "直接追动作物体本身在更晚时刻的真实状态，而不是先退回 generic visual review。"
-                            ),
-                            tool=same_object_active_use_revisit.tool,
-                            args=same_object_active_use_revisit.args,
-                        )
-                    unresolved_rerank_downstream_target_revisit = self._build_action_intent_unresolved_rerank_downstream_target_revisit_decision(
-                        state=state,
-                        hints=hints,
-                        thought="why 题 repeated textual fallback 前，unresolved rerank 已指出 revealed-target / freed-slot 的真正下游目标还没被确认；优先追那个下游对象，而不是先退回 generic visual review。",
-                    )
-                    unresolved_rerank_downstream_fixture_revisit = self._build_action_intent_unresolved_rerank_downstream_fixture_revisit_decision(
-                        state=state,
-                        hints=hints,
-                        thought="why 题 repeated textual fallback 前，unresolved rerank 已指出 hand-free / fixture enablement 的真正下游装置还没被确认；优先追那个下游 fixture，而不是先退回 generic visual review。",
-                    )
-                    if unresolved_rerank_downstream_fixture_revisit is not None:
-                        return unresolved_rerank_downstream_fixture_revisit
-                    if unresolved_rerank_downstream_target_revisit is not None:
-                        return unresolved_rerank_downstream_target_revisit
-                    unresolved_rerank_long_horizon_revisit = self._build_action_intent_unresolved_rerank_long_horizon_revisit_decision(
-                        state=state,
-                        hints=hints,
-                        thought="why 题 repeated textual fallback 前，unresolved rerank 已明确 later-use / final-location 还缺更晚证据；直接沿缓存目标节点向后追，而不是先退回 generic visual review。",
-                    )
-                    if unresolved_rerank_long_horizon_revisit is not None:
-                        return unresolved_rerank_long_horizon_revisit
                 if (
                     self._is_action_intent_task(state)
                     and isinstance(latest_action_intent_result, dict)
@@ -11189,33 +10146,16 @@ class GraphAgentPlanner:
                         and item.startswith("action_intent_resolution_withheld_for_missing_state_change_prereq=1")
                         for item in list(getattr(state, "working_memory", []))[-12:]
                     )
-                    and (
-                        self._action_intent_resolution_should_backfill_precondition(
-                            state=state,
-                            hints=hints,
-                            result=latest_action_intent_result,
-                        )
-                        or any(
-                            marker in latest_needed_observation
-                            for marker in (
-                                "before the tap",
-                                "already on",
-                                "scale was already on",
-                                "container was already on the scale",
-                                "container already on the scale",
-                                "container on the scale before the tap",
-                                "bowl already on the scale",
-                            )
-                        )
+                    and self._action_intent_resolution_should_backfill_precondition(
+                        state=state,
+                        hints=hints,
+                        result=latest_action_intent_result,
                     )
                 ):
                     precondition = self._build_action_intent_precondition_sampling_decision(
                         state=state,
                         hints=hints,
-                        focus=str(
-                            latest_action_intent_result.get("needed_observation")
-                            or "textual_fallback_missing_state_change_prereq"
-                        ),
+                        focus="verifier_blocked_missing_state_change_prereq",
                     )
                     if precondition is not None:
                         return precondition
@@ -11233,7 +10173,7 @@ class GraphAgentPlanner:
                         state=state,
                         hints=hints,
                         result=latest_action_intent_result,
-                        blocker_hint="future_use_close_call",
+                        blocker_hint=self._action_intent_verifier_blocker_hint(state),
                     )
                 )
                 if infer_mixed_horizon_later_target_revisit is not None:
@@ -11267,10 +10207,9 @@ class GraphAgentPlanner:
                 )
                 if evidence_first is not None and evidence_first.tool != "rank_choices_from_state":
                     return evidence_first
-                if action_intent_requires_strict_visual_disambiguation(
-                    question=str(getattr(state, "question", "") or ""),
-                    choices=[str(choice) for choice in getattr(state, "choices", [])],
-                    indices=None,
+                if self._action_intent_needs_observation_centric_transition_recovery(
+                    state=state,
+                    result=None,
                 ):
                     strict_recovery = self._build_action_intent_strict_text_fallback_recovery_decision(
                         state=state,
@@ -11278,6 +10217,50 @@ class GraphAgentPlanner:
                     )
                     if strict_recovery is not None:
                         return strict_recovery
+                if self._should_continue_search_from_sufficiency(state):
+                    recovered = self._recover_from_open_questions(state=state, hints=hints, used_tools=used_tools)
+                    if recovered is not None and recovered.tool not in {"finish", "rank_choices_from_state"}:
+                        preferred_candidate = self._prefer_action_intent_state_candidate_over_generic_recovery(
+                            state=state,
+                            hints=hints,
+                            used_tools=used_tools,
+                            recovered=recovered,
+                            memory_prefix="planner_guard=textual_finish_prefers_state_candidate_over_generic_recovery",
+                        )
+                        if preferred_candidate is not None:
+                            return preferred_candidate
+                        return recovered
+                    candidate_plan = self._best_state_candidate_plan(state=state, hints=hints, used_tools=used_tools)
+                    if candidate_plan is not None and candidate_plan.decision.tool not in {"finish", "rank_choices_from_state"}:
+                        self._state_add_memory(
+                            state,
+                            f"planner_guard=textual_finish_prefers_state_candidate={candidate_plan.decision.tool}",
+                        )
+                        return candidate_plan.decision
+                    combined_times = sorted(
+                        [float(value) for value in hints.get("times") or []]
+                        + [float(value) for value in hints.get("input_times") or []]
+                    )
+                    if combined_times:
+                        return PlannerDecision(
+                            thought="why 题结构化文本裁决后，sufficiency 仍明确要求继续补证；当前恢复链没有产出更强动作时，先回到时间检索而不是直接结束。",
+                            tool="query_time",
+                            args={
+                                "start_time": min(combined_times),
+                                "end_time": max(combined_times),
+                                "limit": 12,
+                            },
+                        )
+                    return PlannerDecision(
+                        thought="why 题结构化文本裁决后，sufficiency 仍明确要求继续补证；当前又缺少时间锚点时，先重建当前动作片段而不是直接结束。",
+                        tool="sample_sparse_frames",
+                        args={
+                            "start_time": None,
+                            "end_time": None,
+                            "sample_count": 4,
+                            "tag": f"{state.task_family}_segment",
+                        },
+                    )
                 best_index = int(last_result["best_index"])
                 return PlannerDecision(
                     thought="why 题专用视觉判断连续失败后，结构化文本因果裁决已完成，直接结束。",
@@ -11292,8 +10275,72 @@ class GraphAgentPlanner:
                     prediction=best_index,
                     confidence=float(last_result.get("confidence") or 0.0),
                 )
-            if self._has_unresolved_evidence_gap(open_questions) and float(last_result.get("confidence") or 0.0) < 0.8:
-                return self._recover_from_open_questions(state=state, hints=hints, used_tools=used_tools)
+            if self._has_unresolved_evidence_gap(state, open_questions=open_questions) and float(last_result.get("confidence") or 0.0) < 0.8:
+                recovered = self._recover_from_open_questions(state=state, hints=hints, used_tools=used_tools)
+                if recovered is not None and recovered.tool not in {"finish", "rank_choices_from_state"}:
+                    preferred_candidate = self._prefer_action_intent_state_candidate_over_generic_recovery(
+                        state=state,
+                        hints=hints,
+                        used_tools=used_tools,
+                        recovered=recovered,
+                        memory_prefix="planner_guard=unresolved_gap_prefers_state_candidate_over_generic_recovery",
+                    )
+                    if preferred_candidate is not None:
+                        return preferred_candidate
+                    return recovered
+                if self._is_action_intent_task(state) and self._should_continue_search_from_sufficiency(state):
+                    candidate_plan = self._best_state_candidate_plan(state=state, hints=hints, used_tools=used_tools)
+                    if candidate_plan is not None and candidate_plan.decision.tool not in {"finish", "rank_choices_from_state"}:
+                        self._state_add_memory(
+                            state,
+                            f"planner_guard=unresolved_gap_prefers_state_candidate={candidate_plan.decision.tool}",
+                        )
+                        return candidate_plan.decision
+                return recovered
+            if self._is_action_intent_task(state) and self._should_continue_search_from_sufficiency(state):
+                recovered = self._recover_from_open_questions(state=state, hints=hints, used_tools=used_tools)
+                if recovered is not None and recovered.tool not in {"finish", "rank_choices_from_state"}:
+                    preferred_candidate = self._prefer_action_intent_state_candidate_over_generic_recovery(
+                        state=state,
+                        hints=hints,
+                        used_tools=used_tools,
+                        recovered=recovered,
+                        memory_prefix="planner_guard=textual_rank_continue_search_prefers_state_candidate_over_generic_recovery",
+                    )
+                    if preferred_candidate is not None:
+                        return preferred_candidate
+                    return recovered
+                candidate_plan = self._best_state_candidate_plan(state=state, hints=hints, used_tools=used_tools)
+                if candidate_plan is not None and candidate_plan.decision.tool not in {"finish", "rank_choices_from_state"}:
+                    self._state_add_memory(
+                        state,
+                        f"planner_guard=textual_rank_continue_search_prefers_state_candidate={candidate_plan.decision.tool}",
+                    )
+                    return candidate_plan.decision
+                combined_times = sorted(
+                    [float(value) for value in hints.get("times") or []]
+                    + [float(value) for value in hints.get("input_times") or []]
+                )
+                if combined_times:
+                    return PlannerDecision(
+                        thought="why 题已有一次文本评分，但 sufficiency 仍明确要求继续补证；当前恢复链没有产出更强动作时，先回到时间检索而不是直接结束。",
+                        tool="query_time",
+                        args={
+                            "start_time": min(combined_times),
+                            "end_time": max(combined_times),
+                            "limit": 12,
+                        },
+                    )
+                return PlannerDecision(
+                    thought="why 题已有一次文本评分，但 sufficiency 仍明确要求继续补证；当前又缺少时间锚点时，先重建当前动作片段而不是直接结束。",
+                    tool="sample_sparse_frames",
+                    args={
+                        "start_time": None,
+                        "end_time": None,
+                        "sample_count": 4,
+                        "tag": f"{state.task_family}_segment",
+                    },
+                )
             best_index = int(last_result["best_index"])
             return PlannerDecision(
                 thought="已经有选项评分结果，直接结束。",
@@ -11308,6 +10355,37 @@ class GraphAgentPlanner:
                 prediction=best_index,
                 confidence=float(last_result.get("confidence") or 0.0),
             )
+        if self._is_action_intent_task(state) and self._should_continue_search_from_sufficiency(state):
+            primary_gap = self._action_intent_primary_gap(state)
+            if isinstance(primary_gap, dict):
+                gap_fallback = self._recover_action_intent_via_primary_gap(
+                    state=state,
+                    hints=hints,
+                    result=last_result if isinstance(last_result, dict) else {},
+                    blocker_hint=self._action_intent_verifier_blocker_hint(state),
+                    primary_gap=primary_gap,
+                )
+                if gap_fallback is not None:
+                    self._state_add_memory(
+                        state,
+                        f"planner_guard=verifier_blocked_finish_gap_fallback={gap_fallback.tool}",
+                    )
+                    return gap_fallback
+            combined_times = sorted(
+                [float(value) for value in hints.get("times") or []]
+                + [float(value) for value in hints.get("input_times") or []]
+            )
+            if combined_times:
+                return PlannerDecision(
+                    thought="why 题在 verifier_blocked 收尾阶段仍缺证，且更具体恢复动作都未命中；回到当前动作时间窗继续补原始关键帧。",
+                    tool="sample_sparse_frames",
+                    args={
+                        "start_time": max(0.0, min(combined_times) - 1.5),
+                        "end_time": max(combined_times) + 4.5,
+                        "sample_count": 4,
+                        "tag": f"{state.task_family}_verifier_blocked_recover",
+                    },
+                )
         precombined_times = sorted(
             [float(value) for value in hints.get("times") or []]
             + [float(value) for value in hints.get("input_times") or []]
@@ -11346,6 +10424,34 @@ class GraphAgentPlanner:
         if state.current_step <= 1 and direct_structured is not None:
             tool, thought, args = direct_structured
             return PlannerDecision(thought=thought, tool=tool, args=args)
+        if self._is_action_intent_task(state) and self._should_continue_search_from_sufficiency(state):
+            last_tool_name = str(last_tool.get("tool") or "") if isinstance(last_tool, dict) else ""
+            allow_early_observation_recovery = last_tool_name in {
+                "query_object",
+                "query_spatial_context",
+                "sample_sparse_frames",
+                "extract_frames_for_range",
+                "retrieve_cached_artifacts",
+            }
+            primary_gap = self._action_intent_primary_gap(state)
+            if (
+                allow_early_observation_recovery
+                and isinstance(primary_gap, dict)
+            ):
+                blocker_hint = self._action_intent_verifier_blocker_hint(state)
+                early_gap_recovery = self._recover_action_intent_via_primary_gap(
+                    state=state,
+                    hints=hints,
+                    result=last_result if isinstance(last_result, dict) else {},
+                    blocker_hint=blocker_hint,
+                    primary_gap=primary_gap,
+                )
+                if early_gap_recovery is not None:
+                    self._state_add_memory(
+                        state,
+                        f"planner_guard=heuristic_fallback_prefers_primary_gap_early={early_gap_recovery.tool}",
+                    )
+                    return early_gap_recovery
         if state.current_step == 0 and combined_times:
             return PlannerDecision(
                 thought="先查题目时间窗口附近的图谱节点。",
@@ -11517,6 +10623,35 @@ class GraphAgentPlanner:
                     "tag": f"{state.task_family}_step{state.current_step}",
                 },
             )
+        if self._is_action_intent_task(state) and self._should_continue_search_from_sufficiency(state):
+            current_scope_recovery = self._build_action_intent_specialized_recovery_decision(
+                state=state,
+                hints=hints,
+                thought="why 题在 open-question recovery 尾部仍被 structured sufficiency 判为缺证；当前没有更具体恢复动作时，回到当前题时间窗补关键帧，而不是退回文本评分。",
+            )
+            if current_scope_recovery is not None:
+                return current_scope_recovery
+            if combined_times:
+                return PlannerDecision(
+                    thought="why 题在 open-question recovery 尾部仍缺证，先围绕当前动作时间窗继续补原始关键帧，而不是退回文本评分。",
+                    tool="sample_sparse_frames",
+                    args={
+                        "start_time": max(0.0, min(combined_times) - 2.0),
+                        "end_time": max(combined_times) + 2.0,
+                        "sample_count": 4,
+                        "tag": f"{state.task_family}_recover_tail",
+                    },
+                )
+            return PlannerDecision(
+                thought="why 题在 open-question recovery 尾部仍缺证，且没有可用时间锚点；先重建当前动作片段，而不是退回文本评分。",
+                tool="sample_sparse_frames",
+                args={
+                    "start_time": None,
+                    "end_time": None,
+                    "sample_count": 4,
+                    "tag": f"{state.task_family}_segment",
+                },
+            )
         if state.current_step >= max(1, state.max_steps - 2):
             return PlannerDecision(
                 thought="收尾阶段，直接基于当前证据对选项评分。",
@@ -11670,16 +10805,69 @@ class GraphAgentPlanner:
         )
 
     def _recover_if_low_confidence(self, *, state: AgentState, hints: dict[str, Any], decision: PlannerDecision) -> PlannerDecision:
+        if self._search_budget_exhausted(state):
+            return self._decorate_finish_decision_with_metadata(
+                state=state,
+                decision=decision if decision.tool == "finish" else PlannerDecision(
+                    thought=decision.thought or "搜索预算已耗尽，停止继续恢复。",
+                    tool="finish",
+                    args={
+                        "prediction": getattr(state, "final_prediction", None),
+                        "answer": str(getattr(state, "final_answer", "") or ""),
+                        "confidence": float(getattr(state, "confidence", 0.0) or 0.0),
+                    },
+                    done=True,
+                    answer=str(getattr(state, "final_answer", "") or ""),
+                    prediction=getattr(state, "final_prediction", None),
+                    confidence=float(getattr(state, "confidence", 0.0) or 0.0),
+                ),
+            )
         open_questions = list(getattr(state, "open_questions", []) or [])
         latest_verification = self._state_latest_verification(state)
         if latest_verification and decision.tool == "finish":
-            if not bool(latest_verification.get("sufficient")):
+            if not bool(latest_verification.get("sufficient")) or self._should_continue_search_from_sufficiency(state):
                 recovered = self._recover_from_open_questions(state=state, hints=hints, used_tools=self._used_tools(state))
-                if recovered is not None and recovered.tool != decision.tool:
+                if recovered is not None and recovered.tool not in {decision.tool, "finish"}:
+                    if not (
+                        self._is_action_intent_task(state)
+                        and recovered.tool == "extract_frames_for_range"
+                    ):
+                        preferred_candidate = self._prefer_action_intent_state_candidate_over_generic_recovery(
+                            state=state,
+                            hints=hints,
+                            used_tools=self._used_tools(state),
+                            recovered=recovered,
+                            memory_prefix="planner_guard=verifier_blocked_finish_prefers_state_candidate_over_generic_recovery",
+                        )
+                        if preferred_candidate is not None:
+                            return preferred_candidate
                     self._state_add_memory(state, f"planner_override verifier_blocked_finish={decision.tool} -> {recovered.tool}")
                     return recovered
+                if self._is_action_intent_task(state) and self._should_continue_search_from_sufficiency(state):
+                    candidate_plan = self._best_state_candidate_plan(
+                        state=state,
+                        hints=hints,
+                        used_tools=self._used_tools(state),
+                    )
+                    if candidate_plan is not None and candidate_plan.decision.tool not in {"finish", "rank_choices_from_state"}:
+                        self._state_add_memory(
+                            state,
+                            f"planner_guard=verifier_blocked_finish_prefers_state_candidate={candidate_plan.decision.tool}",
+                        )
+                        return candidate_plan.decision
+                    fallback_recovery = self._build_action_intent_specialized_recovery_decision(
+                        state=state,
+                        hints=hints,
+                        thought="why 题 finish 被 verifier 拦下且 structured sufficiency 仍明确缺证；当前没有更具体的 targeted candidate 时，至少先回到当前题时间窗补关键帧，而不是继续保留 finish。",
+                    )
+                    if fallback_recovery is not None and fallback_recovery.tool not in {decision.tool, "finish"}:
+                        self._state_add_memory(
+                            state,
+                            f"planner_override verifier_blocked_finish_fallback={decision.tool} -> {fallback_recovery.tool}",
+                        )
+                        return fallback_recovery
                 return decision
-        if not self._has_unresolved_evidence_gap(open_questions, task_family=state.task_family):
+        if not self._has_unresolved_evidence_gap(state, open_questions=open_questions, task_family=state.task_family):
             return decision
         if decision.tool == "finish":
             if self._is_ingredient_order_task(state):
@@ -11708,80 +10896,183 @@ class GraphAgentPlanner:
                     return decision
         if decision.tool == "finish" and str(state.task_family).startswith("open_query"):
             recovered = self._recover_from_open_questions(state=state, hints=hints, used_tools=self._used_tools(state))
-            if recovered is not None and recovered.tool != decision.tool:
+            if recovered is not None and recovered.tool not in {decision.tool, "finish"}:
                 self._state_add_memory(state, f"planner_override open_query_gap_finish={decision.tool} -> {recovered.tool}")
                 return recovered
         last_tool = state.tool_trace[-1] if state.tool_trace else {}
         last_result = last_tool.get("raw_result") if isinstance(last_tool, dict) else {}
         used_tools = [entry.get("tool") for entry in state.tool_trace if isinstance(entry, dict)]
         if decision.tool == "finish" and decision.confidence < 0.8:
+            if self._is_action_intent_task(state) and self._should_continue_search_from_sufficiency(state):
+                recovered = self._recover_from_open_questions(state=state, hints=hints, used_tools=used_tools)
+                if recovered is not None and recovered.tool not in {decision.tool, "finish"}:
+                    preferred_candidate = self._prefer_action_intent_state_candidate_over_generic_recovery(
+                        state=state,
+                        hints=hints,
+                        used_tools=used_tools,
+                        recovered=recovered,
+                        memory_prefix="planner_guard=low_conf_finish_prefers_state_candidate_over_generic_recovery",
+                    )
+                    if preferred_candidate is not None:
+                        return preferred_candidate
+                    self._state_add_memory(state, f"planner_override low_conf_finish={decision.tool} -> {recovered.tool}")
+                    return recovered
+                candidate_plan = self._best_state_candidate_plan(state=state, hints=hints, used_tools=used_tools)
+                if candidate_plan is not None and candidate_plan.decision.tool != decision.tool:
+                    self._state_add_memory(
+                        state,
+                        f"planner_guard=low_conf_finish_prefers_state_candidate={candidate_plan.decision.tool}",
+                    )
+                    return candidate_plan.decision
+                fallback_recovery = self._build_action_intent_specialized_recovery_decision(
+                    state=state,
+                    hints=hints,
+                    thought="why 题低置信 finish 时，structured sufficiency 仍明确要求继续补证；优先回到当前题时间窗补关键帧，而不是直接结束。",
+                )
+                if fallback_recovery is not None and fallback_recovery.tool not in {decision.tool, "finish"}:
+                    self._state_add_memory(
+                        state,
+                        f"planner_override low_conf_finish_fallback={decision.tool} -> {fallback_recovery.tool}",
+                    )
+                    return fallback_recovery
             if (
                 self._is_ingredient_order_task(state)
                 or self._is_ingredient_retrieval_task(state)
                 or self._is_recipe_ingredient_membership_task(state)
                 or self._is_exact_ingredient_amount_task(state)
                 or self._is_action_mechanism_task(state)
-                or self._is_action_intent_task(state)
                 or self._is_recipe_catalog_task(state)
                 or self._is_recipe_nutrition_task(state)
             ):
                 return decision
             if self._is_viewpoint_task(state):
                 recovered = self._recover_viewpoint_low_confidence(state=state, hints=hints, used_tools=used_tools)
-                if recovered is not None and recovered.tool != decision.tool:
+                if recovered is not None and recovered.tool not in {decision.tool, "finish"}:
                     self._state_add_memory(state, f"planner_override low_conf_finish={decision.tool} -> {recovered.tool}")
                     return recovered
             if self._is_recipe_following_activity_task(state) or self._is_nutrition_change_task(state):
                 recovered = self._recover_from_open_questions(state=state, hints=hints, used_tools=used_tools)
-                if recovered is not None and recovered.tool != decision.tool:
+                if recovered is not None and recovered.tool not in {decision.tool, "finish"}:
                     self._state_add_memory(state, f"planner_override low_conf_finish={decision.tool} -> {recovered.tool}")
                     return recovered
             recovered = self._recover_from_open_questions(state=state, hints=hints, used_tools=used_tools)
-            if recovered is not None and recovered.tool != decision.tool:
+            if recovered is not None and recovered.tool not in {decision.tool, "finish"}:
                 self._state_add_memory(state, f"planner_override low_conf_finish={decision.tool} -> {recovered.tool}")
                 return recovered
             return decision
         if decision.tool == "rank_choices_from_state":
             if self._action_intent_text_fallback_ready(state):
+                if self._should_continue_search_from_sufficiency(state):
+                    candidate_plan = self._best_state_candidate_plan(state=state, hints=hints, used_tools=used_tools)
+                    if candidate_plan is not None and candidate_plan.decision.tool not in {"finish", "rank_choices_from_state"}:
+                        self._state_add_memory(
+                            state,
+                            f"planner_guard=action_intent_textual_rank_prefers_state_candidate={candidate_plan.decision.tool}",
+                        )
+                        return candidate_plan.decision
                 recovered = self._build_action_intent_evidence_first_recovery_decision(
                     state=state,
                     hints=hints,
                     used_tools=used_tools,
                 )
-                if recovered is not None and recovered.tool != decision.tool:
+                if recovered is not None and recovered.tool not in {decision.tool, "finish"}:
+                    preferred_candidate = self._prefer_action_intent_state_candidate_over_generic_recovery(
+                        state=state,
+                        hints=hints,
+                        used_tools=used_tools,
+                        recovered=recovered,
+                        memory_prefix="planner_guard=action_intent_textual_rank_prefers_state_candidate_over_generic_recovery",
+                    )
+                    if preferred_candidate is not None:
+                        return preferred_candidate
                     self._state_add_memory(state, f"planner_override action_intent_textual_rank={decision.tool} -> {recovered.tool}")
                     return recovered
-                if action_intent_requires_strict_visual_disambiguation(
-                    question=str(getattr(state, "question", "") or ""),
-                    choices=[str(choice) for choice in getattr(state, "choices", [])],
-                    indices=None,
+                if self._action_intent_needs_observation_centric_transition_recovery(
+                    state=state,
+                    result=None,
                 ):
                     recovered = self._build_action_intent_strict_text_fallback_recovery_decision(
                         state=state,
                         hints=hints,
                     )
-                    if recovered is not None and recovered.tool != decision.tool:
+                    if recovered is not None and recovered.tool not in {decision.tool, "finish"}:
                         self._state_add_memory(state, f"planner_override strict_text_fallback_rank={decision.tool} -> {recovered.tool}")
                         return recovered
+                if self._should_continue_search_from_sufficiency(state):
+                    current_scope_recovery = self._build_action_intent_specialized_recovery_decision(
+                        state=state,
+                        hints=hints,
+                        thought="why 题文本 fallback 后，sufficiency 仍明确要求继续补证；若当前没有更具体的 targeted candidate 接管，再回到当前题时间窗补关键帧，而不是保留文本 rank。",
+                    )
+                    if current_scope_recovery is not None and current_scope_recovery.tool not in {decision.tool, "finish"}:
+                        self._state_add_memory(
+                            state,
+                            f"planner_override action_intent_textual_rank_sufficiency={decision.tool} -> {current_scope_recovery.tool}",
+                        )
+                        return current_scope_recovery
+                    return PlannerDecision(
+                        thought="why 题文本 fallback 后，sufficiency 仍明确要求继续补证；当前又缺少可复用锚点时，先重建当前动作片段而不是保留文本 rank。",
+                        tool="sample_sparse_frames",
+                        args={
+                            "start_time": None,
+                            "end_time": None,
+                            "sample_count": 4,
+                            "tag": f"{state.task_family}_segment",
+                        },
+                    )
                 return decision
             if isinstance(last_result, dict) and last_tool.get("tool") == "rank_choices_from_state":
                 if float(last_result.get("confidence") or 0.0) < 0.8:
                     recovered = self._recover_from_open_questions(state=state, hints=hints, used_tools=used_tools)
-                    if recovered is not None and recovered.tool != decision.tool:
+                    if recovered is not None and recovered.tool not in {decision.tool, "finish"}:
+                        preferred_candidate = self._prefer_action_intent_state_candidate_over_generic_recovery(
+                            state=state,
+                            hints=hints,
+                            used_tools=used_tools,
+                            recovered=recovered,
+                            memory_prefix="planner_guard=repeated_loop_prefers_state_candidate_over_generic_recovery",
+                        )
+                        if preferred_candidate is not None:
+                            return preferred_candidate
                         self._state_add_memory(state, f"planner_override repeated_loop={decision.tool} -> {recovered.tool}")
                         return recovered
+                    if self._is_action_intent_task(state) and self._should_continue_search_from_sufficiency(state):
+                        candidate_plan = self._best_state_candidate_plan(state=state, hints=hints, used_tools=used_tools)
+                        if candidate_plan is not None and candidate_plan.decision.tool not in {"finish", "rank_choices_from_state"}:
+                            self._state_add_memory(
+                                state,
+                                f"planner_guard=low_conf_rank_prefers_state_candidate={candidate_plan.decision.tool}",
+                            )
+                            return candidate_plan.decision
                     return decision
             elif decision.confidence < 0.8:
                 if self._is_recipe_following_activity_task(state) or self._is_nutrition_change_task(state):
                     recovered = self._recover_from_open_questions(state=state, hints=hints, used_tools=used_tools)
-                    if recovered is not None and recovered.tool != decision.tool:
+                    if recovered is not None and recovered.tool not in {decision.tool, "finish"}:
                         self._state_add_memory(state, f"planner_override low_conf_rank={decision.tool} -> {recovered.tool}")
                         return recovered
                     return decision
                 recovered = self._recover_from_open_questions(state=state, hints=hints, used_tools=used_tools)
-                if recovered is not None and recovered.tool != decision.tool:
+                if recovered is not None and recovered.tool not in {decision.tool, "finish"}:
+                    preferred_candidate = self._prefer_action_intent_state_candidate_over_generic_recovery(
+                        state=state,
+                        hints=hints,
+                        used_tools=used_tools,
+                        recovered=recovered,
+                        memory_prefix="planner_guard=low_conf_rank_tail_prefers_state_candidate_over_generic_recovery",
+                    )
+                    if preferred_candidate is not None:
+                        return preferred_candidate
                     self._state_add_memory(state, f"planner_override low_conf_rank={decision.tool} -> {recovered.tool}")
                     return recovered
+                if self._is_action_intent_task(state) and self._should_continue_search_from_sufficiency(state):
+                    candidate_plan = self._best_state_candidate_plan(state=state, hints=hints, used_tools=used_tools)
+                    if candidate_plan is not None and candidate_plan.decision.tool not in {"finish", "rank_choices_from_state"}:
+                        self._state_add_memory(
+                            state,
+                            f"planner_guard=low_conf_rank_tail_prefers_state_candidate={candidate_plan.decision.tool}",
+                        )
+                        return candidate_plan.decision
                 return decision
         return decision
 
@@ -11960,6 +11251,23 @@ class GraphAgentPlanner:
         return self._recover_from_open_questions(state=state, hints=hints, used_tools=used_tools)
 
     def _stabilize_decision(self, *, state: AgentState, hints: dict[str, Any], decision: PlannerDecision) -> PlannerDecision:
+        if self._search_budget_exhausted(state):
+            return self._decorate_finish_decision_with_metadata(
+                state=state,
+                decision=decision if decision.tool == "finish" else PlannerDecision(
+                    thought=decision.thought or "搜索预算已耗尽，停止继续稳定化恢复。",
+                    tool="finish",
+                    args={
+                        "prediction": getattr(state, "final_prediction", None),
+                        "answer": str(getattr(state, "final_answer", "") or ""),
+                        "confidence": float(getattr(state, "confidence", 0.0) or 0.0),
+                    },
+                    done=True,
+                    answer=str(getattr(state, "final_answer", "") or ""),
+                    prediction=getattr(state, "final_prediction", None),
+                    confidence=float(getattr(state, "confidence", 0.0) or 0.0),
+                ),
+            )
         used_tools = self._used_tools(state)
         if self._should_preserve_structured_spatial_decision(state=state, decision=decision):
             return decision
@@ -11987,41 +11295,236 @@ class GraphAgentPlanner:
                 )
                 return candidate_plan.decision
             return decision
+        if (
+            self._is_action_intent_task(state)
+            and decision.tool in {
+                "infer_action_intent",
+                "resolve_action_intent_pairwise",
+                "resolve_action_intent_future_use",
+            }
+            and self._should_continue_search_from_sufficiency(state)
+        ):
+            candidate_plan = self._best_state_candidate_plan(state=state, hints=hints, used_tools=used_tools)
+            if (
+                candidate_plan is not None
+                and candidate_plan.decision.tool not in {"finish", "rank_choices_from_state", decision.tool}
+            ):
+                self._state_add_memory(
+                    state,
+                    f"planner_override stabilize_action_intent_sufficiency={decision.tool} -> {candidate_plan.decision.tool}",
+                )
+                return candidate_plan.decision
+            recovered = self._recover_from_open_questions(state=state, hints=hints, used_tools=used_tools)
+            if recovered is not None and recovered.tool not in {decision.tool, "finish"}:
+                preferred_candidate = self._prefer_action_intent_state_candidate_over_generic_recovery(
+                    state=state,
+                    hints=hints,
+                    used_tools=used_tools,
+                    recovered=recovered,
+                    memory_prefix="planner_guard=stabilize_action_intent_prefers_state_candidate_over_generic_recovery",
+                )
+                if preferred_candidate is not None:
+                    return preferred_candidate
+                self._state_add_memory(
+                    state,
+                    f"planner_override stabilize_action_intent_sufficiency_recovery={decision.tool} -> {recovered.tool}",
+                )
+                return recovered
+            fallback_recovery = self._build_action_intent_specialized_recovery_decision(
+                state=state,
+                hints=hints,
+                thought="why 题在 stabilize 阶段仍被 structured sufficiency 判为缺证；不继续保留判断型工具，先回到 gap 驱动的原始补证路径。",
+            )
+            if fallback_recovery is not None and fallback_recovery.tool not in {decision.tool, "finish"}:
+                self._state_add_memory(
+                    state,
+                    f"planner_override stabilize_action_intent_sufficiency_fallback={decision.tool} -> {fallback_recovery.tool}",
+                )
+                return fallback_recovery
         if self._decision_hits_blocked_tool(state=state, decision=decision):
             recovered = self._recover_from_open_questions(state=state, hints=hints, used_tools=used_tools)
-            if recovered.tool != decision.tool:
+            if recovered.tool not in {decision.tool, "finish"}:
+                preferred_candidate = self._prefer_action_intent_state_candidate_over_generic_recovery(
+                    state=state,
+                    hints=hints,
+                    used_tools=used_tools,
+                    recovered=recovered,
+                    memory_prefix="planner_guard=blocked_tool_prefers_state_candidate_over_generic_recovery",
+                )
+                if preferred_candidate is not None:
+                    return preferred_candidate
                 self._state_add_memory(state, f"planner_override blocked_tool={decision.tool} -> {recovered.tool}")
                 return recovered
+            if self._is_action_intent_task(state) and self._should_continue_search_from_sufficiency(state):
+                fallback_recovery = self._build_action_intent_specialized_recovery_decision(
+                    state=state,
+                    hints=hints,
+                    thought="why 题当前动作已被 recent failure / ineffective-tool 判定为空转，且 structured sufficiency 仍明确缺证；当前没有更优恢复动作时，先回到当前题时间窗补关键帧，而不是继续保留原动作。",
+                )
+                if fallback_recovery is not None and fallback_recovery.tool not in {decision.tool, "finish"}:
+                    self._state_add_memory(
+                        state,
+                        f"planner_override blocked_tool_fallback={decision.tool} -> {fallback_recovery.tool}",
+                    )
+                    return fallback_recovery
         if self._decision_repeats_stalled_loop(state=state, decision=decision):
             recovered = self._recover_from_open_questions(state=state, hints=hints, used_tools=used_tools)
-            if recovered.tool != decision.tool:
+            if recovered.tool not in {decision.tool, "finish"}:
+                preferred_candidate = self._prefer_action_intent_state_candidate_over_generic_recovery(
+                    state=state,
+                    hints=hints,
+                    used_tools=used_tools,
+                    recovered=recovered,
+                    memory_prefix="planner_guard=repeated_loop_prefers_state_candidate_over_generic_recovery",
+                )
+                if preferred_candidate is not None:
+                    return preferred_candidate
                 self._state_add_memory(state, f"planner_override repeated_loop={decision.tool} -> {recovered.tool}")
                 return recovered
             candidate = self._select_state_driven_candidate(state=state, hints=hints, used_tools=used_tools)
             if candidate is not None and candidate.tool != decision.tool:
                 self._state_add_memory(state, f"planner_override state_candidate={decision.tool} -> {candidate.tool}")
                 return candidate
+            if self._is_action_intent_task(state) and self._should_continue_search_from_sufficiency(state):
+                fallback_recovery = self._build_action_intent_specialized_recovery_decision(
+                    state=state,
+                    hints=hints,
+                    thought="why 题当前动作已在 repeated loop 中空转，且 structured sufficiency 仍明确缺证；当前没有更优恢复动作时，先回到当前题时间窗补关键帧，而不是继续重复同一动作。",
+                )
+                if fallback_recovery is not None and fallback_recovery.tool not in {decision.tool, "finish"}:
+                    self._state_add_memory(
+                        state,
+                        f"planner_override repeated_loop_fallback={decision.tool} -> {fallback_recovery.tool}",
+                    )
+                    return fallback_recovery
+        if (
+            decision.tool == "finish"
+            and self._is_action_intent_task(state)
+            and self._should_continue_search_from_sufficiency(state)
+        ):
+            recovered = self._recover_from_open_questions(state=state, hints=hints, used_tools=used_tools)
+            if recovered is not None and recovered.tool not in {decision.tool, "finish"}:
+                preferred_candidate = self._prefer_action_intent_state_candidate_over_generic_recovery(
+                    state=state,
+                    hints=hints,
+                    used_tools=used_tools,
+                    recovered=recovered,
+                    memory_prefix="planner_guard=sufficiency_finish_prefers_state_candidate_over_generic_recovery",
+                )
+                if preferred_candidate is not None:
+                    return preferred_candidate
+                self._state_add_memory(state, f"planner_override sufficiency_finish={decision.tool} -> {recovered.tool}")
+                return recovered
+            candidate_plan = self._best_state_candidate_plan(state=state, hints=hints, used_tools=used_tools)
+            if candidate_plan is not None and candidate_plan.decision.tool != decision.tool:
+                self._state_add_memory(
+                    state,
+                    f"planner_override sufficiency_finish_candidate={decision.tool} -> {candidate_plan.decision.tool}",
+                )
+                return candidate_plan.decision
+            fallback_recovery = self._build_action_intent_specialized_recovery_decision(
+                state=state,
+                hints=hints,
+                thought="why 题 finish 在 stabilize 阶段仍被 structured sufficiency 判为缺证；当前恢复链没有产出更强动作时，至少先回到当前题时间窗补关键帧，而不是直接结束。",
+            )
+            if fallback_recovery is not None and fallback_recovery.tool not in {decision.tool, "finish"}:
+                self._state_add_memory(
+                    state,
+                    f"planner_override sufficiency_finish_fallback={decision.tool} -> {fallback_recovery.tool}",
+                )
+                return fallback_recovery
+        primary_gap = self._action_intent_primary_gap(state) if self._is_action_intent_task(state) else None
+        primary_gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
+        primary_gap_target_object = str(primary_gap.get("target_object") or "").strip() if isinstance(primary_gap, dict) else ""
+        primary_gap_target_fixture = str(primary_gap.get("target_fixture") or "").strip() if isinstance(primary_gap, dict) else ""
+        future_fixture_level_zero_context_gap = (
+            self._is_action_intent_task(state)
+            and decision.tool in {"query_spatial_context", "query_time", "retrieve_cached_artifacts"}
+            and primary_gap_type == "future_outcome"
+            and not primary_gap_target_object
+            and bool(primary_gap_target_fixture)
+            and self._action_intent_explicit_level_zero_budget_prefers_local_followup(
+                state=state,
+                gap_type=primary_gap_type,
+                target_object=primary_gap_target_object,
+                target_fixture=primary_gap_target_fixture,
+            )
+            and self._should_continue_search_from_sufficiency(state)
+        )
+        if (
+            self._is_action_intent_task(state)
+            and decision.tool in {"query_object", "query_spatial_context"}
+            and primary_gap_type in {"precondition", "immediate_outcome"}
+            and self._should_continue_search_from_sufficiency(state)
+        ) or future_fixture_level_zero_context_gap:
+            candidate_plan = self._best_state_candidate_plan(state=state, hints=hints, used_tools=used_tools)
+            if (
+                candidate_plan is not None
+                and candidate_plan.decision.tool not in {"finish", "rank_choices_from_state", decision.tool}
+            ):
+                self._state_add_memory(
+                    state,
+                    f"planner_override sufficiency_context_gap_candidate={decision.tool} -> {candidate_plan.decision.tool}",
+                )
+                return candidate_plan.decision
+            fallback_recovery = self._build_action_intent_specialized_recovery_decision(
+                state=state,
+                hints=hints,
+                thought="why 题当前主缺口已经明确是 precondition/post-action 证据；若 spatial/object revisit 没有更强候选接管，就先回到对应时间窗补原始证据，而不是保留当前长时域定位动作。",
+            )
+            if fallback_recovery is not None and fallback_recovery.tool not in {decision.tool, "finish"}:
+                self._state_add_memory(
+                    state,
+                    f"planner_override sufficiency_context_gap={decision.tool} -> {fallback_recovery.tool}",
+                )
+                return fallback_recovery
         candidate_plan = self._best_state_candidate_plan(state=state, hints=hints, used_tools=used_tools)
         if candidate_plan is not None:
             candidate = candidate_plan.decision
+            if (
+                self._is_action_intent_task(state)
+                and self._should_continue_search_from_sufficiency(state)
+                and candidate.tool == "finish"
+            ):
+                candidate = decision
             needed_evidence = self._current_evidence_needs(state)
             candidate_addresses_need = self._tool_addresses_needs(
                 tool=candidate.tool,
                 needed_evidence=needed_evidence,
                 verifier_conflicts=self._current_verifier_conflicts(state),
-                recommend_next_action=str(self._state_latest_verification(state).get("recommend_next_action") or ""),
+                recommend_next_action=self._current_recommended_next_action(state),
             )
             decision_addresses_need = self._tool_addresses_needs(
                 tool=decision.tool,
                 needed_evidence=needed_evidence,
                 verifier_conflicts=self._current_verifier_conflicts(state),
-                recommend_next_action=str(self._state_latest_verification(state).get("recommend_next_action") or ""),
+                recommend_next_action=self._current_recommended_next_action(state),
             )
-            if decision.tool == "finish" and needed_evidence and candidate.tool != decision.tool:
+            if (
+                decision.tool == "finish"
+                and (needed_evidence or self._should_continue_search_from_sufficiency(state))
+                and candidate.tool != decision.tool
+            ):
                 self._state_add_memory(state, f"planner_override finish_before_missing_evidence={decision.tool} -> {candidate.tool}")
                 return candidate
             if candidate_addresses_need and not decision_addresses_need and candidate.tool != decision.tool:
                 self._state_add_memory(state, f"planner_override unmet_need={decision.tool} -> {candidate.tool}")
+                return candidate
+            if (
+                self._is_action_intent_task(state)
+                and self._should_continue_search_from_sufficiency(state)
+                and candidate.tool != decision.tool
+                and candidate_addresses_need
+                and self._action_intent_prefers_targeted_candidate_over_generic_decision(
+                    state=state,
+                    decision_tool=decision.tool,
+                    candidate_tool=candidate.tool,
+                )
+            ):
+                self._state_add_memory(
+                    state,
+                    f"planner_override action_intent_targeted_gap_decision={decision.tool} -> {candidate.tool}",
+                )
                 return candidate
             if (
                 candidate.tool != decision.tool
@@ -12052,6 +11555,40 @@ class GraphAgentPlanner:
         if self._is_action_mechanism_task(state):
             return decision.tool in {"infer_action_mechanism", "finish"}
         if self._is_action_intent_task(state):
+            primary_gap = self._action_intent_primary_gap(state)
+            primary_gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
+            primary_gap_target_object = str(primary_gap.get("target_object") or "").strip() if isinstance(primary_gap, dict) else ""
+            primary_gap_target_fixture = str(primary_gap.get("target_fixture") or "").strip() if isinstance(primary_gap, dict) else ""
+            if (
+                decision.tool in {"query_object", "query_spatial_context"}
+                and primary_gap_type in {"precondition", "immediate_outcome"}
+                and self._should_continue_search_from_sufficiency(state)
+            ):
+                return False
+            if (
+                decision.tool == "query_spatial_context"
+                and primary_gap_type == "future_outcome"
+                and not primary_gap_target_object
+                and bool(primary_gap_target_fixture)
+                and self._action_intent_explicit_level_zero_budget_prefers_local_followup(
+                    state=state,
+                    gap_type=primary_gap_type,
+                    target_object=primary_gap_target_object,
+                    target_fixture=primary_gap_target_fixture,
+                )
+                and self._should_continue_search_from_sufficiency(state)
+            ):
+                return False
+            if (
+                decision.tool in {
+                    "finish",
+                    "infer_action_intent",
+                    "resolve_action_intent_pairwise",
+                    "resolve_action_intent_future_use",
+                }
+                and self._should_continue_search_from_sufficiency(state)
+            ):
+                return False
             return decision.tool in {
                 "infer_action_intent",
                 "resolve_action_intent_pairwise",
@@ -12081,13 +11618,57 @@ class GraphAgentPlanner:
             }
         return False
 
-    def _has_unresolved_evidence_gap(self, open_questions: list[str], *, task_family: str = "") -> bool:
+    def _has_unresolved_evidence_gap(
+        self,
+        state: AgentState,
+        open_questions: list[str],
+        *,
+        task_family: str = "",
+    ) -> bool:
         meaningful = [
             item
             for item in open_questions
             if item and (item != "need_disambiguating_evidence" or str(task_family).startswith("open_query"))
         ]
-        return bool(meaningful)
+        latest_verification = self._state_latest_verification(state)
+        verifier_missing = [
+            str(item)
+            for item in latest_verification.get("missing_evidence_types", [])
+            if isinstance(item, str) and item
+        ]
+        evidence_gaps = [
+            item
+            for item in latest_verification.get("evidence_gaps", [])
+            if isinstance(item, dict)
+            and (
+                str(item.get("gap_type") or "").strip()
+                or str(item.get("missing_observation") or "").strip()
+                or str(item.get("target_object") or "").strip()
+                or str(item.get("target_fixture") or "").strip()
+            )
+        ]
+        sufficiency_decision = latest_verification.get("sufficiency_decision")
+        recommended_next_step = ""
+        missing_gap_types: list[str] = []
+        if isinstance(sufficiency_decision, dict):
+            if bool(sufficiency_decision.get("sufficient")):
+                return False
+            finish_mode = str(sufficiency_decision.get("finish_mode") or "").strip()
+            if finish_mode == "finish_confident":
+                return False
+            recommended_next_step = str(sufficiency_decision.get("recommended_next_step") or "").strip()
+            missing_gap_types = [
+                str(item)
+                for item in sufficiency_decision.get("missing_gap_types", [])
+                if isinstance(item, str) and item
+            ]
+        return bool(
+            meaningful
+            or verifier_missing
+            or evidence_gaps
+            or recommended_next_step
+            or missing_gap_types
+        )
 
     def _decision_hits_blocked_tool(self, *, state: AgentState, decision: PlannerDecision) -> bool:
         if not decision.tool:
@@ -12147,11 +11728,38 @@ class GraphAgentPlanner:
         return True
 
     def _recover_from_open_questions(self, *, state: AgentState, hints: dict[str, Any], used_tools: list[str]) -> PlannerDecision:
+        if self._search_budget_exhausted(state):
+            return self._decorate_finish_decision_with_metadata(
+                state=state,
+                decision=PlannerDecision(
+                    thought="当前搜索预算已耗尽，停止继续补证，直接进入 best-guess 收口。",
+                    tool="finish",
+                    args={
+                        "prediction": getattr(state, "final_prediction", None),
+                        "answer": str(getattr(state, "final_answer", "") or ""),
+                        "confidence": float(getattr(state, "confidence", 0.0) or 0.0),
+                    },
+                    done=True,
+                    answer=str(getattr(state, "final_answer", "") or ""),
+                    prediction=getattr(state, "final_prediction", None),
+                    confidence=float(getattr(state, "confidence", 0.0) or 0.0),
+                ),
+            )
         combined_times = sorted([float(value) for value in hints.get("times") or []] + [float(value) for value in hints.get("input_times") or []])
         bbox = hints.get("bbox")
         ingredient_name = hints.get("ingredient_name")
         open_questions = list(getattr(state, "open_questions", []) or [])
         latest_verification = self._state_latest_verification(state)
+        sufficiency_decision = latest_verification.get("sufficiency_decision")
+        recommended_next_step = ""
+        missing_gap_types: set[str] = set()
+        if isinstance(sufficiency_decision, dict):
+            recommended_next_step = str(sufficiency_decision.get("recommended_next_step") or "").strip()
+            missing_gap_types = {
+                str(item)
+                for item in sufficiency_decision.get("missing_gap_types", [])
+                if isinstance(item, str) and item
+            }
         verifier_missing = {
             str(item)
             for item in latest_verification.get("missing_evidence_types", [])
@@ -12162,18 +11770,26 @@ class GraphAgentPlanner:
             for item in latest_verification.get("conflicts", [])
             if isinstance(item, str) and item
         }
+        has_action_intent_recovery_signal = bool(
+            open_questions
+            or latest_verification
+            or recommended_next_step
+            or missing_gap_types
+            or verifier_missing
+            or verifier_conflicts
+        )
+        current_evidence_needs = self._current_evidence_needs(state)
         recent_failures = [item for item in getattr(state, "tool_failures", []) if isinstance(item, dict)]
         failed_tools = {str(item.get("tool")) for item in recent_failures[-5:] if item.get("tool")}
         recent_ineffective = [item for item in getattr(state, "ineffective_tools", []) if isinstance(item, dict)]
         ineffective_tools = {str(item.get("tool")) for item in recent_ineffective[-5:] if item.get("tool")}
-        if (
-            self._is_action_intent_task(state)
-            and combined_times
-            and "need_alternative_evidence_path" in open_questions
-        ):
+        if self._is_action_intent_task(state) and has_action_intent_recovery_signal:
             latest_resolution = self._latest_action_intent_resolution_payload(state)
             latest_action_intent_tool = latest_resolution[0] if latest_resolution is not None else ""
             latest_action_intent_result = latest_resolution[1] if latest_resolution is not None else {}
+            structured_specialized_tool = self._action_intent_structured_specialized_recovery_tool(state)
+            primary_gap = self._action_intent_primary_gap(state)
+            explicit_downstream_object_target = self._action_intent_has_explicit_downstream_object_gap(state)
             if (
                 isinstance(latest_action_intent_result, dict)
                 and any(
@@ -12190,10 +11806,100 @@ class GraphAgentPlanner:
                 precondition = self._build_action_intent_precondition_sampling_decision(
                     state=state,
                     hints=hints,
-                    focus=str(
-                        latest_action_intent_result.get("needed_observation")
-                        or "state_change_prereq_missing_precondition"
-                    ),
+                    focus="verifier_blocked_missing_state_change_prereq",
+                )
+                if precondition is not None:
+                    return precondition
+            if isinstance(primary_gap, dict):
+                gap_type = str(primary_gap.get("gap_type") or "").strip()
+                primary_gap_target_object = str(primary_gap.get("target_object") or "").strip().lower()
+                primary_gap_target_fixture = str(primary_gap.get("target_fixture") or "").strip().lower()
+                question_object_hint = str(self._action_intent_question_object_hint(state) or "").strip().lower()
+                if explicit_downstream_object_target and self._action_intent_should_try_evidence_first_recovery(state):
+                    evidence_first = self._build_action_intent_evidence_first_recovery_decision(
+                        state=state,
+                        hints=hints,
+                        used_tools=used_tools,
+                        failed_tools=failed_tools,
+                        ineffective_tools=ineffective_tools,
+                    )
+                    if evidence_first is not None:
+                        return evidence_first
+                if explicit_downstream_object_target:
+                    gap_late_followup = self._build_action_intent_gap_late_followup_decision(
+                        state=state,
+                        hints=hints,
+                    )
+                    if gap_late_followup is not None:
+                        return gap_late_followup
+                if self._action_intent_future_outcome_gap_prefers_local_followup_recovery(state=state, primary_gap=primary_gap):
+                    local_followup = self._build_action_intent_gap_late_followup_decision(
+                        state=state,
+                        hints=hints,
+                    )
+                    if local_followup is not None:
+                        return local_followup
+                if latest_resolution is None:
+                    gap_only_recovery = self._recover_action_intent_via_primary_gap(
+                        state=state,
+                        hints=hints,
+                        result={},
+                        blocker_hint=self._action_intent_verifier_blocker_hint(state),
+                        primary_gap=primary_gap,
+                    )
+                    if gap_only_recovery is not None:
+                        return gap_only_recovery
+                else:
+                    latest_tool_name, latest_result = latest_resolution
+                    gap_type = str(primary_gap.get("gap_type") or "").strip()
+                    if gap_type in {
+                        "precondition",
+                        "immediate_outcome",
+                        "future_outcome",
+                        "relation_confirmation",
+                        "target_discovery",
+                    }:
+                        structured_gap_recovery = self._recover_action_intent_via_primary_gap(
+                            state=state,
+                            hints=hints,
+                            result=latest_result if isinstance(latest_result, dict) else {},
+                            blocker_hint=self._action_intent_verifier_blocker_hint(state) or latest_tool_name,
+                            primary_gap=primary_gap,
+                        )
+                        if structured_gap_recovery is not None:
+                            return structured_gap_recovery
+                targeted_action_intent_recovery = self._recover_action_intent_after_verifier_blocked_finish(
+                    state=state,
+                    hints=hints,
+                )
+                if targeted_action_intent_recovery is not None:
+                    return targeted_action_intent_recovery
+        if (
+            self._is_action_intent_task(state)
+            and combined_times
+            and (
+                "need_alternative_evidence_path" in open_questions
+                or recommended_next_step == "need_alternative_evidence_path"
+                or missing_gap_types & {"precondition", "immediate_outcome"}
+            )
+        ):
+            if (
+                isinstance(latest_action_intent_result, dict)
+                and any(
+                    isinstance(item, str)
+                    and item.startswith("action_intent_resolution_withheld_for_missing_state_change_prereq=1")
+                    for item in list(getattr(state, "working_memory", []))[-12:]
+                )
+                and self._action_intent_resolution_should_backfill_precondition(
+                    state=state,
+                    hints=hints,
+                    result=latest_action_intent_result,
+                )
+            ):
+                precondition = self._build_action_intent_precondition_sampling_decision(
+                    state=state,
+                    hints=hints,
+                    focus="verifier_blocked_missing_state_change_prereq",
                 )
                 if precondition is not None:
                     return precondition
@@ -12226,22 +11932,6 @@ class GraphAgentPlanner:
                 )
                 if long_horizon_query is not None:
                     return long_horizon_query
-            if self._action_intent_prefers_specialized_open_question_recovery(state):
-                if self._action_intent_pending_resolution_tool(state) == "resolve_action_intent_future_use":
-                    future_use = self._build_action_intent_future_use_resolution_decision(
-                        state=state,
-                        hints=hints,
-                        thought="why 状态变化题被阻断时，优先回到后续用途专用裁决，不使用单帧 recover 路径。",
-                    )
-                    if future_use is not None:
-                        return future_use
-                pairwise = self._build_action_intent_pairwise_resolution_decision(
-                    state=state,
-                    hints=hints,
-                    thought="why 状态变化题被阻断时，优先回到专用二选一状态变化裁决，不使用单帧 recover 路径。",
-                )
-                if pairwise is not None:
-                    return pairwise
             raw_reuse_or_resample = self._build_raw_reuse_or_resample_decision(
                 state=state,
                 used_tools=used_tools,
@@ -12258,8 +11948,21 @@ class GraphAgentPlanner:
             )
             if raw_reuse_or_resample is not None:
                 return raw_reuse_or_resample
-        if self._is_action_intent_task(state) and (
-            "need_disambiguating_evidence" in open_questions or "need_disambiguating_evidence" in verifier_missing
+            candidate_plan = self._best_state_candidate_plan(
+                state=state,
+                hints=hints,
+                used_tools=used_tools,
+            )
+            if candidate_plan is not None and candidate_plan.decision.tool not in {"finish", "rank_choices_from_state"}:
+                self._state_add_memory(
+                    state,
+                    f"planner_guard=open_question_prefers_state_candidate={candidate_plan.decision.tool}",
+                )
+                return candidate_plan.decision
+        if self._is_action_intent_task(state) and self._has_unresolved_evidence_gap(
+            state,
+            open_questions=open_questions,
+            task_family=state.task_family,
         ):
             latest_resolution = self._latest_action_intent_resolution_payload(state)
             latest_action_intent_result = latest_resolution[1] if latest_resolution is not None else {}
@@ -12279,10 +11982,7 @@ class GraphAgentPlanner:
                 precondition = self._build_action_intent_precondition_sampling_decision(
                     state=state,
                     hints=hints,
-                    focus=str(
-                        latest_action_intent_result.get("needed_observation")
-                        or "state_change_prereq_missing_precondition"
-                    ),
+                    focus="verifier_blocked_missing_state_change_prereq",
                 )
                 if precondition is not None:
                     return precondition
@@ -12483,7 +12183,7 @@ class GraphAgentPlanner:
                         "top_k": 4,
                     },
                 )
-        if "need_ocr_reading" in open_questions:
+        if "need_ocr_reading" in current_evidence_needs:
             if (
                 self._is_weight_task(state)
                 and ingredient_name
@@ -12528,7 +12228,7 @@ class GraphAgentPlanner:
                     tool="run_ocr_on_image",
                     args={"image_path": latest_frame},
                 )
-        if "need_region_grounding" in open_questions and bbox and state.retrieved_frames:
+        if "need_region_grounding" in current_evidence_needs and bbox and state.retrieved_frames:
             region_reuse_or_recrop = self._build_region_reuse_or_recrop_decision(
                 state=state,
                 used_tools=used_tools,
@@ -12543,7 +12243,7 @@ class GraphAgentPlanner:
             if region_reuse_or_recrop is not None:
                 return region_reuse_or_recrop
         if (
-            "need_location_evidence" in open_questions
+            "need_location_evidence" in current_evidence_needs
             and not self._is_viewpoint_task(state)
             and (
                 not self._is_weight_task(state)
@@ -12564,7 +12264,7 @@ class GraphAgentPlanner:
                 },
             )
         if (
-            "need_state_evidence" in open_questions
+            "need_state_evidence" in current_evidence_needs
             and "query_state" not in used_tools
             and "query_state" not in failed_tools
             and "query_state" not in ineffective_tools
@@ -12596,7 +12296,13 @@ class GraphAgentPlanner:
             )
             if raw_reuse_or_resample is not None:
                 return raw_reuse_or_resample
-        if ("need_time_localization" in open_questions or "need_initial_observation" in open_questions) and combined_times:
+        if (
+            (
+                "need_time_localization" in current_evidence_needs
+                or "need_initial_observation" in current_evidence_needs
+            )
+            and combined_times
+        ):
             raw_reuse_or_resample = self._build_raw_reuse_or_resample_decision(
                 state=state,
                 used_tools=used_tools,
@@ -12634,36 +12340,49 @@ class GraphAgentPlanner:
                     "image_paths": state.retrieved_frames[-6:],
                 },
             )
+        primary_gap = self._action_intent_primary_gap(state) if self._is_action_intent_task(state) else None
+        primary_gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
+        explicit_downstream_object_target = self._action_intent_has_explicit_downstream_object_gap(state)
         if self._is_action_intent_task(state) and self._action_intent_prefers_specialized_open_question_recovery(state):
             latest_intent = self._latest_successful_action_intent_result(state)
-            if (
-                self._action_intent_pending_resolution_tool(state) == "resolve_action_intent_future_use"
-                or self._action_intent_needs_future_use_evidence(state=state, result=latest_intent if latest_intent else None)
-            ):
-                future_use = self._build_action_intent_future_use_resolution_decision(
+            if explicit_downstream_object_target and self._action_intent_should_try_evidence_first_recovery(state):
+                evidence_first = self._build_action_intent_evidence_first_recovery_decision(
                     state=state,
                     hints=hints,
-                    thought="why 状态变化题在恢复阶段仍证据不足，优先回到后续用途专用裁决，不退回通用 query_time。",
+                    used_tools=used_tools,
+                    failed_tools=failed_tools,
+                    ineffective_tools=ineffective_tools,
                 )
-                if future_use is not None:
-                    return future_use
-            if (
-                self._action_intent_pending_resolution_tool(state) == "resolve_action_intent_pairwise"
-                or self._action_intent_pair_needs_outcome_resolution(state=state, result=latest_intent if latest_intent else None)
-            ):
-                pairwise = self._build_action_intent_pairwise_resolution_decision(
+                if evidence_first is not None:
+                    return evidence_first
+            if self._action_intent_future_outcome_gap_prefers_local_followup_recovery(state=state, primary_gap=primary_gap):
+                local_followup = self._build_action_intent_gap_late_followup_decision(
                     state=state,
                     hints=hints,
-                    thought="why 状态变化题在恢复阶段仍证据不足，优先回到状态变化专用二选一裁决，不退回通用 query_time。",
                 )
-                if pairwise is not None:
-                    return pairwise
+                if local_followup is not None:
+                    return local_followup
+            if isinstance(primary_gap, dict):
+                gap_recovery = self._recover_action_intent_via_primary_gap(
+                    state=state,
+                    hints=hints,
+                    result=latest_intent if latest_intent else {},
+                    blocker_hint=self._action_intent_verifier_blocker_hint(state),
+                    primary_gap=primary_gap,
+                )
+                if gap_recovery is not None and gap_recovery.tool not in {
+                    "resolve_action_intent_future_use",
+                    "resolve_action_intent_pairwise",
+                }:
+                    self._state_add_memory(
+                        state,
+                        f"planner_guard=open_question_prefers_primary_gap={gap_recovery.tool}",
+                    )
+                    return gap_recovery
         if (
             self._is_action_intent_task(state)
             and (
-                self._action_intent_text_fallback_ready(state)
-                or "need_alternative_evidence_path" in open_questions
-                or "need_disambiguating_evidence" in open_questions
+                self._action_intent_should_try_evidence_first_recovery(state)
             )
         ):
             evidence_first = self._build_action_intent_evidence_first_recovery_decision(
@@ -12705,17 +12424,23 @@ class GraphAgentPlanner:
         hints: dict[str, Any],
         used_tools: list[str],
     ) -> PlannerDecision | None:
-        ranked = self._rank_state_candidate_plans(state=state, hints=hints, used_tools=used_tools)
-        best = ranked[0] if ranked else None
-        if best is None:
+        selected, ranked = self._select_state_candidate_plan(
+            state=state,
+            hints=hints,
+            used_tools=used_tools,
+        )
+        if selected is None:
             return None
         self._record_candidate_plan_comparison(state=state, ranked=ranked)
         self._state_add_memory(
             state,
-            f"candidate_plan_selected tool={best.decision.tool} score={best.score} cost={best.cost} gain={best.gain} risk={best.risk}",
+            (
+                f"candidate_plan_selected tool={selected.decision.tool} "
+                f"score={selected.score} cost={selected.cost} gain={selected.gain} risk={selected.risk}"
+            ),
         )
-        self._state_add_hypothesis(state, f"candidate_plan_rationale={best.rationale}")
-        return best.decision
+        self._state_add_hypothesis(state, f"candidate_plan_rationale={selected.rationale}")
+        return selected.decision
 
     def _best_state_candidate_plan(
         self,
@@ -12724,8 +12449,138 @@ class GraphAgentPlanner:
         hints: dict[str, Any],
         used_tools: list[str],
     ) -> CandidatePlan | None:
+        selected, _ranked = self._select_state_candidate_plan(
+            state=state,
+            hints=hints,
+            used_tools=used_tools,
+        )
+        return selected
+
+    def _select_state_candidate_plan(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        used_tools: list[str],
+    ) -> tuple[CandidatePlan | None, list[CandidatePlan]]:
+        if self._search_budget_exhausted(state):
+            return None, []
         ranked = self._rank_state_candidate_plans(state=state, hints=hints, used_tools=used_tools)
-        return ranked[0] if ranked else None
+        best = ranked[0] if ranked else None
+        if best is None:
+            return None, ranked
+        selected = best
+        if self._is_action_intent_task(state):
+            needed_evidence = self._current_evidence_needs(state)
+            verifier_conflicts = self._current_verifier_conflicts(state)
+            recommend_next_action = self._current_recommended_next_action(state)
+            primary_gap = self._action_intent_primary_gap(state)
+            primary_gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
+            primary_gap_target_object = (
+                str(primary_gap.get("target_object") or "").strip().lower() if isinstance(primary_gap, dict) else ""
+            )
+            question_object_hint = str(self._action_intent_question_object_hint(state) or "").strip().lower()
+            explicit_downstream_object_target = (
+                bool(primary_gap_target_object) and primary_gap_target_object != question_object_hint
+            )
+            generic_reuse_tools = {
+                "retrieve_cached_artifacts",
+                "query_time",
+                "sample_sparse_frames",
+                "extract_frames_for_range",
+            }
+            targeted_gap_tools = {
+                "query_object",
+                "query_spatial_context",
+                "infer_action_intent",
+            }
+            exact_targeted_tools = {
+                "query_object",
+                "query_spatial_context",
+            }
+            broad_reconsideration_tools = generic_reuse_tools | {"infer_action_intent"}
+            direct_gap_tools_by_step = {
+                "need_precondition_context": {"sample_sparse_frames", "extract_frames_for_range"},
+                "need_post_action_evidence": {"sample_sparse_frames", "extract_frames_for_range", "sample_frames_around_peaks"},
+            }
+            direct_gap_tools_by_gap_type = {
+                "precondition": {"sample_sparse_frames", "extract_frames_for_range"},
+                "immediate_outcome": {"sample_sparse_frames", "extract_frames_for_range", "sample_frames_around_peaks"},
+            }
+            direct_gap_tools = set(direct_gap_tools_by_gap_type.get(primary_gap_type, set()))
+            if not direct_gap_tools:
+                direct_gap_tools |= direct_gap_tools_by_step.get(recommend_next_action, set())
+            explicit_level_zero_prefers_local_followup = (
+                self._action_intent_explicit_level_zero_budget_prefers_local_followup(
+                    state=state,
+                    gap_type=primary_gap_type,
+                    target_object=str(primary_gap.get("target_object") or "").strip() if isinstance(primary_gap, dict) else "",
+                    target_fixture=str(primary_gap.get("target_fixture") or "").strip() if isinstance(primary_gap, dict) else "",
+                )
+            )
+            if direct_gap_tools and best.decision.tool not in direct_gap_tools:
+                for candidate in ranked[1:]:
+                    if candidate.decision.tool not in direct_gap_tools:
+                        continue
+                    if (
+                        explicit_level_zero_prefers_local_followup
+                        and best.decision.tool in {"resolve_action_intent_pairwise", "resolve_action_intent_future_use"}
+                    ):
+                        continue
+                    if not self._tool_addresses_needs(
+                        tool=candidate.decision.tool,
+                        needed_evidence=needed_evidence,
+                        verifier_conflicts=verifier_conflicts,
+                        recommend_next_action=recommend_next_action,
+                    ):
+                        continue
+                    if candidate.score <= best.score + 1:
+                        selected = candidate
+                        self._state_add_memory(
+                            state,
+                            (
+                                "planner_guard=state_candidate_prefers_direct_gap_tool="
+                                f"{best.decision.tool}->{candidate.decision.tool}"
+                            ),
+                        )
+                        return selected, ranked
+            if best.decision.tool in broad_reconsideration_tools:
+                exact_targeted_candidates: list[CandidatePlan] = []
+                fallback_targeted_candidates: list[CandidatePlan] = []
+                for candidate in ranked[1:]:
+                    if candidate.decision.tool not in targeted_gap_tools:
+                        continue
+                    if (
+                        explicit_level_zero_prefers_local_followup
+                        and primary_gap_type == "future_outcome"
+                        and not str(primary_gap.get("target_object") or "").strip()
+                        and bool(str(primary_gap.get("target_fixture") or "").strip())
+                    ):
+                        continue
+                    if not self._tool_addresses_needs(
+                        tool=candidate.decision.tool,
+                        needed_evidence=needed_evidence,
+                        verifier_conflicts=verifier_conflicts,
+                        recommend_next_action=recommend_next_action,
+                    ):
+                        continue
+                    if candidate.score > best.score + 1:
+                        continue
+                    if candidate.decision.tool in exact_targeted_tools:
+                        exact_targeted_candidates.append(candidate)
+                    else:
+                        fallback_targeted_candidates.append(candidate)
+                preferred_targeted = (exact_targeted_candidates or fallback_targeted_candidates)
+                if preferred_targeted:
+                    selected = preferred_targeted[0]
+                    self._state_add_memory(
+                        state,
+                        (
+                            "planner_guard=state_candidate_prefers_targeted_gap_tool="
+                            f"{best.decision.tool}->{selected.decision.tool}"
+                        ),
+                    )
+        return selected, ranked
 
     def _rank_state_candidate_plans(
         self,
@@ -12734,10 +12589,54 @@ class GraphAgentPlanner:
         hints: dict[str, Any],
         used_tools: list[str],
     ) -> list[CandidatePlan]:
+        if self._search_budget_exhausted(state):
+            return []
         candidates = self._build_state_driven_candidates(state=state, hints=hints, used_tools=used_tools)
         if not candidates:
             return []
         return sorted(candidates, key=lambda item: (item.score, item.cost, item.risk, item.decision.tool))
+
+    def _action_intent_competition_pressure(self, state: AgentState) -> dict[str, Any]:
+        if not self._is_action_intent_task(state):
+            return {"is_close_call": False, "min_score_gap": None, "has_unresolved_evidence": False}
+        primary_gap = self._action_intent_primary_gap(state)
+        has_unresolved_evidence = isinstance(primary_gap, dict) and bool(
+            str(primary_gap.get("gap_type") or "").strip()
+            or str(primary_gap.get("missing_observation") or "").strip()
+            or str(primary_gap.get("target_object") or "").strip()
+            or str(primary_gap.get("target_fixture") or "").strip()
+        )
+        if not has_unresolved_evidence:
+            latest_verification = self._state_latest_verification(state)
+            evidence_gaps = [
+                item
+                for item in latest_verification.get("evidence_gaps", [])
+                if isinstance(item, dict)
+                and (
+                    str(item.get("gap_type") or "").strip()
+                    or str(item.get("missing_observation") or "").strip()
+                    or str(item.get("target_object") or "").strip()
+                    or str(item.get("target_fixture") or "").strip()
+                )
+            ]
+            has_unresolved_evidence = bool(evidence_gaps)
+        min_score_gap: float | None = None
+        is_close_call = False
+        if has_unresolved_evidence:
+            budget = getattr(state, "search_budget", {}) or {}
+            window_level = int(budget.get("window_level") or 0)
+            new_frames_observed = int(budget.get("new_frames_observed") or 0)
+            long_horizon_expansions = int(budget.get("long_horizon_expansions_used") or 0)
+            is_close_call = (
+                window_level <= 1
+                or new_frames_observed <= 6
+                or long_horizon_expansions == 0
+            )
+        return {
+            "is_close_call": is_close_call,
+            "min_score_gap": min_score_gap,
+            "has_unresolved_evidence": has_unresolved_evidence,
+        }
 
     def _record_candidate_plan_comparison(self, *, state: AgentState, ranked: list[CandidatePlan]) -> None:
         if not ranked:
@@ -12766,6 +12665,200 @@ class GraphAgentPlanner:
                 state,
                 f"candidate_plan_runner_up_rationale={runner_up.rationale}",
             )
+
+    def _add_action_intent_gap_candidates(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        used_tools: list[str],
+        add_candidate: Callable[[int, int, int, str, str, str, dict[str, Any]], None],
+    ) -> None:
+        if not self._is_action_intent_task(state):
+            return
+        primary_gap = self._action_intent_primary_gap(state)
+        if not isinstance(primary_gap, dict):
+            return
+        gap_type = str(primary_gap.get("gap_type") or "").strip()
+        if not gap_type:
+            return
+        target_object = str(primary_gap.get("target_object") or "").strip()
+        target_fixture = str(primary_gap.get("target_fixture") or "").strip()
+        target_hint_source = "gap"
+        time_relation = str(primary_gap.get("time_relation") or "").strip()
+        source = str(primary_gap.get("source") or "").strip()
+        combined_times = sorted(
+            [float(value) for value in hints.get("times") or []]
+            + [float(value) for value in hints.get("input_times") or []]
+        )
+        window_level = self._search_window_level(state)
+        gap_summary = f"gap={gap_type}"
+        if target_object:
+            gap_summary += f", object={target_object}"
+        if target_fixture:
+            gap_summary += f", fixture={target_fixture}"
+        if target_hint_source != "gap":
+            gap_summary += f", hint_source={target_hint_source}"
+        if time_relation:
+            gap_summary += f", time={time_relation}"
+        if source:
+            gap_summary += f", source={source}"
+
+        if gap_type == "precondition":
+            if combined_times:
+                pre_start = max(0.0, min(combined_times) - 3.0)
+                pre_end = min(combined_times) + 0.5
+                pre_count = 4
+                if window_level == 1:
+                    pre_start = max(0.0, min(combined_times) - 4.5)
+                    pre_end = min(combined_times) + 0.8
+                    pre_count = 5
+                elif window_level >= 2:
+                    pre_start = max(0.0, min(combined_times) - 6.0)
+                    pre_end = min(combined_times) + 1.0
+                    pre_count = 6
+                add_candidate(
+                    1,
+                    8,
+                    1,
+                    f"结构化 gap 明确指出动作前提仍缺失，优先回看动作前窗口而不是继续做泛化排序。{gap_summary}",
+                    "why 题当前主缺口是 precondition，优先补动作前窗口关键帧确认前提状态。",
+                    "sample_sparse_frames",
+                    {
+                        "start_time": pre_start,
+                        "end_time": pre_end,
+                        "sample_count": pre_count,
+                        "tag": f"{state.task_family}_precondition",
+                    },
+                )
+            return
+
+        if gap_type == "immediate_outcome":
+            probe_window = self._action_intent_transition_probe_window(state=state, hints=hints, result=None)
+            if probe_window is not None:
+                start_time, end_time, stride_s, max_frames = probe_window
+                add_candidate(
+                    0,
+                    10,
+                    0,
+                    f"结构化 gap 明确指出缺的是动作后直接结果，应优先补近窗 transition 证据。{gap_summary}",
+                    "why 题当前主缺口是 immediate_outcome，优先围绕动作尾部做更密的 transition 补证。",
+                    "extract_frames_for_range",
+                    {
+                        "start_time": start_time,
+                        "end_time": end_time,
+                        "stride_s": stride_s,
+                        "max_frames": max_frames,
+                        "tag": f"{state.task_family}_gap_transition",
+                    },
+                )
+            if combined_times:
+                followup_end = max(combined_times) + 4.0
+                followup_count = 5
+                if window_level == 1:
+                    followup_end = max(combined_times) + 5.5
+                    followup_count = 6
+                elif window_level >= 2:
+                    followup_end = max(combined_times) + 7.0
+                    followup_count = 7
+                add_candidate(
+                    1,
+                    8,
+                    1,
+                    f"若 transition probe 仍不够，继续补短窗口 followup 帧。{gap_summary}",
+                    "why 题当前主缺口是 immediate_outcome，补动作后短窗口 followup 帧。",
+                    "sample_sparse_frames",
+                    {
+                        "start_time": max(combined_times),
+                        "end_time": followup_end,
+                        "sample_count": followup_count,
+                        "tag": f"{state.task_family}_gap_followup",
+                    },
+                )
+            return
+
+        if gap_type in {"relation_confirmation", "target_discovery"} and (target_object or target_fixture):
+            relation_target = target_object or target_fixture
+            relation_kind = "object" if target_object else "fixture"
+            add_candidate(
+                0,
+                9,
+                0,
+                f"结构化 gap 或竞争候选已经给出关键判别目标，先定位 `{relation_target}` 的轨迹/出现位置最直接。{gap_summary}",
+                f"why 题当前主缺口是 {gap_type}，优先重新定位 `{relation_target}` 的关键轨迹或位置。"
+                + (" 该目标来自候选竞争摘要。" if target_hint_source == "comparison_blocker" else ""),
+                "query_object" if relation_kind == "object" else "query_spatial_context",
+                {"query": relation_target, "limit": 24} if relation_kind == "object" else {"object_name": relation_target, "time_s": combined_times[0] if combined_times else None, "limit": 8},
+            )
+            if combined_times and target_object:
+                add_candidate(
+                    1,
+                    7,
+                    1,
+                    f"关系/目标型 gap 在已有对象后通常还要结合锚点时刻的空间关系。{gap_summary}",
+                    f"why 题当前主缺口是 {gap_type}，补 `{target_object}` 在关键时刻附近的空间关系。",
+                    "query_spatial_context",
+                    {"object_name": target_object, "time_s": combined_times[0], "limit": 8},
+                )
+            return
+
+        if gap_type == "future_outcome":
+            if target_object:
+                add_candidate(
+                    0,
+                    10,
+                    0,
+                    f"结构化 gap 已指出更晚结果仍未确认，先沿 `{target_object}` 做长时域追证。{gap_summary}",
+                    f"why 题当前主缺口是 future_outcome，优先检索 `{target_object}` 的更晚轨迹。"
+                    + (" 该目标来自候选竞争摘要。" if target_hint_source == "comparison_blocker" else ""),
+                    "query_object",
+                    {"query": target_object, "limit": 24},
+                )
+                anchor_time = self._latest_action_intent_target_spatial_anchor_time(state)
+                if anchor_time is not None:
+                    add_candidate(
+                        1,
+                        9,
+                        0,
+                        f"若已存在更晚锚点，直接检查 `{target_object}` 与目标位置/装置的空间关系最省。{gap_summary}",
+                        f"why 题当前主缺口是 future_outcome，直接检查 `{target_object}` 更晚时刻的空间关系。",
+                        "query_spatial_context",
+                        {"object_name": target_object, "time_s": anchor_time, "limit": 8},
+                    )
+            elif target_fixture and combined_times:
+                add_candidate(
+                    1,
+                    8,
+                    0,
+                    f"结构化 gap 虽未点名对象，但竞争候选已暴露下游装置 `{target_fixture}`；先检查更晚时刻该装置附近的空间关系。{gap_summary}",
+                    f"why 题当前主缺口是 future_outcome，直接检查更晚时刻与 `{target_fixture}` 相关的空间关系。"
+                    + (" 该目标来自候选竞争摘要。" if target_hint_source == "comparison_blocker" else ""),
+                    "query_spatial_context",
+                    {"object_name": target_fixture, "time_s": max(combined_times), "limit": 8},
+                )
+            if combined_times:
+                late_followup_end = max(combined_times) + 8.0
+                late_followup_count = 5
+                if window_level == 1:
+                    late_followup_end = max(combined_times) + 10.0
+                    late_followup_count = 6
+                elif window_level >= 2:
+                    late_followup_end = max(combined_times) + 12.0
+                    late_followup_count = 7
+                add_candidate(
+                    2,
+                    7,
+                    1,
+                    f"future outcome 若图谱不足，可受控扩到更晚窗口补原始证据。{gap_summary}",
+                    "why 题当前主缺口是 future_outcome，补更晚窗口的 followup 关键帧。",
+                    "sample_sparse_frames",
+                    {
+                        "start_time": max(combined_times),
+                        "end_time": late_followup_end,
+                        "sample_count": late_followup_count,
+                        "tag": f"{state.task_family}_gap_late_followup",
+                    },
+                )
 
     def _add_open_query_family_candidates(
         self,
@@ -13142,11 +13235,36 @@ class GraphAgentPlanner:
             if isinstance(item, str) and item
         }
         recommend_next_action = str(latest_verification.get("recommend_next_action") or "")
+        sufficiency_decision = latest_verification.get("sufficiency_decision")
+        sufficiency_recommended_next_step = ""
+        sufficiency_missing_gap_types: set[str] = set()
+        if isinstance(sufficiency_decision, dict):
+            sufficiency_recommended_next_step = str(sufficiency_decision.get("recommended_next_step") or "").strip()
+            sufficiency_missing_gap_types = {
+                str(item)
+                for item in sufficiency_decision.get("missing_gap_types", [])
+                if isinstance(item, str) and item
+            }
+        combined_missing = verifier_missing | sufficiency_missing_gap_types
 
-        def add_candidate(cost: int, gain: int, risk: int, rationale: str, thought: str, tool: str, args: dict[str, Any]) -> None:
+        def add_candidate(
+            cost: int,
+            gain: int,
+            risk: int,
+            rationale: str,
+            thought: str,
+            tool: str,
+            args: dict[str, Any],
+            *,
+            allow_if_used: bool = False,
+        ) -> None:
             if tool in blocked_tools:
                 return
-            if tool in used_tools and tool not in {"query_time", "sample_sparse_frames", "extract_frames_for_range"}:
+            if (
+                tool in used_tools
+                and not allow_if_used
+                and tool not in {"query_time", "sample_sparse_frames", "extract_frames_for_range"}
+            ):
                 return
             adjusted_cost = cost
             adjusted_gain = gain
@@ -13155,7 +13273,7 @@ class GraphAgentPlanner:
             if self._is_weight_task(state):
                 if tool == "inspect_visual_evidence":
                     return
-                if tool == "query_location" and not explicit_location_need and "need_location_evidence" not in verifier_missing:
+                if tool == "query_location" and not explicit_location_need and "need_location_evidence" not in combined_missing:
                     return
                 if tool in {"query_ingredient_measurement", "query_ocr", "run_ocr_on_region", "run_ocr_on_image"}:
                     adjusted_cost = max(0, adjusted_cost - 1)
@@ -13171,14 +13289,57 @@ class GraphAgentPlanner:
                 return
             if self._tool_matches_verifier_need(
                 tool=tool,
-                verifier_missing=verifier_missing,
+                verifier_missing=combined_missing,
                 verifier_conflicts=verifier_conflicts,
-                recommend_next_action=recommend_next_action,
+            recommend_next_action=sufficiency_recommended_next_step or recommend_next_action,
             ):
                 adjusted_cost = max(0, adjusted_cost - 1)
                 adjusted_gain += 2
                 adjusted_risk = max(0, adjusted_risk - 1)
                 adjusted_rationale = f"{rationale} verifier 明确指出该路径应优先修补当前证据缺口。"
+            if self._is_action_intent_task(state):
+                primary_gap = self._action_intent_primary_gap(state)
+                gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
+                target_object = str(primary_gap.get("target_object") or "").strip() if isinstance(primary_gap, dict) else ""
+                prefer_local_followup = self._action_intent_explicit_level_zero_budget_prefers_local_followup(
+                    state=state,
+                    gap_type=gap_type,
+                    target_object=target_object,
+                    target_fixture=str(primary_gap.get("target_fixture") or "").strip() if isinstance(primary_gap, dict) else "",
+                )
+                if (
+                    tool in {"query_object", "query_spatial_context"}
+                    and prefer_local_followup
+                ):
+                    adjusted_cost += 2
+                    adjusted_gain = max(0, adjusted_gain - 2)
+                    adjusted_risk += 1
+                    adjusted_rationale = (
+                        f"{adjusted_rationale} 当前 search_budget 明确仍处于 Level 0，"
+                        "优先先补一轮局部 late followup 原始证据，再升级到长时域目标追证或重跑专用裁决。"
+                    )
+                elif (
+                    tool in {"sample_sparse_frames", "extract_frames_for_range"}
+                    and prefer_local_followup
+                ):
+                    adjusted_cost = max(0, adjusted_cost - 1)
+                    adjusted_gain += 2
+                    adjusted_risk = max(0, adjusted_risk - 1)
+                    adjusted_rationale = (
+                        f"{adjusted_rationale} 当前 search_budget 明确仍处于 Level 0，"
+                        "先补局部 late followup 原始证据比直接做长时域对象追证更符合分层搜索。"
+                    )
+                elif (
+                    tool in {"resolve_action_intent_pairwise", "resolve_action_intent_future_use"}
+                    and prefer_local_followup
+                ):
+                    adjusted_cost += 2
+                    adjusted_gain = max(0, adjusted_gain - 2)
+                    adjusted_risk += 1
+                    adjusted_rationale = (
+                        f"{adjusted_rationale} 当前 search_budget 明确仍处于 Level 0；"
+                        "专用裁决链保留为候选，但排序上先让位给局部 late followup 原始证据。"
+                    )
             candidates.append(
                 CandidatePlan(
                     decision=PlannerDecision(thought=thought, tool=tool, args=args),
@@ -13189,9 +13350,24 @@ class GraphAgentPlanner:
                 )
             )
 
+        self._add_action_intent_gap_candidates(
+            state=state,
+            hints=hints,
+            used_tools=used_tools,
+            add_candidate=add_candidate,
+        )
+
         if (
             self._is_action_intent_task(state)
-            and ("need_disambiguating_evidence" in open_questions or "need_disambiguating_evidence" in verifier_missing)
+            and (
+                "need_disambiguating_evidence" in open_questions
+                or "need_disambiguating_evidence" in verifier_missing
+                or self._has_unresolved_evidence_gap(
+                    state,
+                    open_questions=open_questions,
+                    task_family=state.task_family,
+                )
+            )
         ):
             targeted_recovery = self._recover_action_intent_after_verifier_blocked_finish(
                 state=state,
@@ -13226,15 +13402,25 @@ class GraphAgentPlanner:
                 generic_tag_hint = f"{state.task_family}_range"
             elif str(state.task_family).startswith("open_query"):
                 generic_tag_hint = str(state.task_family)
-            if verifier_missing & {
-                "need_initial_observation",
-                "need_time_localization",
-                "need_alternative_evidence_path",
-                "need_disambiguating_evidence",
-                "need_region_grounding",
-                "need_state_evidence",
-                "need_location_evidence",
-            }:
+            if (
+                combined_missing
+                & {
+                    "need_initial_observation",
+                    "need_time_localization",
+                    "need_alternative_evidence_path",
+                    "need_disambiguating_evidence",
+                    "need_region_grounding",
+                    "need_state_evidence",
+                    "need_location_evidence",
+                }
+            ) or (
+                self._is_action_intent_task(state)
+                and self._has_unresolved_evidence_gap(
+                    state,
+                    open_questions=open_questions,
+                    task_family=state.task_family,
+                )
+            ):
                 add_candidate(
                     0,
                     6,
@@ -13438,7 +13624,7 @@ class GraphAgentPlanner:
                 },
             )
 
-        if "need_ocr_reading" in open_questions:
+        if "need_ocr_reading" in open_questions or "need_ocr_reading" in combined_missing:
             if self._is_weight_task(state) and ingredient_name and combined_times:
                 add_candidate(
                     1,
@@ -13511,7 +13697,7 @@ class GraphAgentPlanner:
                         "limit": 12,
                     },
                 )
-        if "need_region_grounding" in open_questions and bbox and state.retrieved_frames:
+        if ("need_region_grounding" in open_questions or "need_region_grounding" in combined_missing) and bbox and state.retrieved_frames:
             add_candidate(
                 2,
                 4,
@@ -13540,7 +13726,7 @@ class GraphAgentPlanner:
                     "resolve_bbox_reference",
                     {"bbox": bbox, "reference_time": combined_times[0], "limit": 5},
                 )
-        if "need_state_evidence" in open_questions:
+        if "need_state_evidence" in open_questions or "need_state_evidence" in combined_missing:
             if getattr(state, "retrieved_node_ids", []):
                 add_candidate(
                     1,
@@ -13586,7 +13772,7 @@ class GraphAgentPlanner:
                         "image_paths": state.retrieved_frames[-6:],
                     },
                     )
-        if "need_location_evidence" in open_questions and (explicit_location_need or "need_location_evidence" in verifier_missing):
+        if ("need_location_evidence" in open_questions or "need_location_evidence" in combined_missing) and (explicit_location_need or "need_location_evidence" in combined_missing):
             if self._is_viewpoint_task(state):
                 if combined_times:
                     add_candidate(
@@ -13637,7 +13823,12 @@ class GraphAgentPlanner:
                     "query_spatial_context",
                     {"time_s": combined_times[0], "object_name": None, "limit": 12},
                 )
-        if "need_time_localization" in open_questions or "need_initial_observation" in open_questions:
+        if (
+            "need_time_localization" in open_questions
+            or "need_initial_observation" in open_questions
+            or "need_time_localization" in combined_missing
+            or "need_initial_observation" in combined_missing
+        ):
             if combined_times:
                 add_candidate(
                     1,
@@ -13662,7 +13853,18 @@ class GraphAgentPlanner:
                         "tag": f"{state.task_family}_state_frames",
                     },
                 )
-        if "need_disambiguating_evidence" in open_questions:
+        if (
+            "need_disambiguating_evidence" in open_questions
+            or "need_disambiguating_evidence" in combined_missing
+            or (
+                self._is_action_intent_task(state)
+                and self._has_unresolved_evidence_gap(
+                    state,
+                    open_questions=open_questions,
+                    task_family=state.task_family,
+                )
+            )
+        ):
             self._add_disambiguating_candidates(
                 state=state,
                 combined_times=combined_times,
@@ -13671,7 +13873,7 @@ class GraphAgentPlanner:
                 object_hint=object_hint,
                 add_candidate=add_candidate,
             )
-        if "need_alternative_evidence_path" in open_questions and state.retrieved_frames and not self._is_weight_task(state):
+        if ("need_alternative_evidence_path" in open_questions or "need_alternative_evidence_path" in combined_missing) and state.retrieved_frames and not self._is_weight_task(state):
             add_candidate(
                 5,
                 5,
@@ -13714,7 +13916,42 @@ class GraphAgentPlanner:
         recommend_next_action: str,
     ) -> bool:
         mapping = {
+            "precondition": {"retrieve_cached_artifacts", "sample_sparse_frames", "extract_frames_for_range", "infer_action_intent"},
+            "immediate_outcome": {
+                "retrieve_cached_artifacts",
+                "sample_sparse_frames",
+                "extract_frames_for_range",
+                "sample_frames_around_peaks",
+                "infer_action_intent",
+            },
+            "future_outcome": {
+                "query_object",
+                "query_spatial_context",
+                "infer_action_intent",
+            },
+            "relation_confirmation": {
+                "query_object",
+                "query_spatial_context",
+                "infer_action_intent",
+            },
+            "target_discovery": {
+                "query_object",
+                "query_spatial_context",
+                "infer_action_intent",
+            },
             "need_ocr_reading": {"query_ocr", "run_ocr_on_image", "run_ocr_on_region"},
+            "need_precondition_context": {
+                "retrieve_cached_artifacts",
+                "sample_sparse_frames",
+                "extract_frames_for_range",
+                "infer_action_intent",
+            },
+            "need_post_action_evidence": {
+                "sample_sparse_frames",
+                "extract_frames_for_range",
+                "sample_frames_around_peaks",
+                "infer_action_intent",
+            },
             "need_region_grounding": {"retrieve_cached_artifacts", "query_region", "render_bbox_overlay", "extract_region_with_context", "resolve_bbox_reference", "infer_object_drop_location", "infer_visual_mcq"},
             "need_state_evidence": {"retrieve_cached_artifacts", "query_state", "inspect_visual_evidence", "write_state_change"},
             "need_location_evidence": {"retrieve_cached_artifacts", "query_location", "query_spatial_context", "infer_viewpoint_choice", "infer_named_fixture_direction", "infer_gaze_target_with_context", "infer_object_drop_location"},
@@ -13722,12 +13959,10 @@ class GraphAgentPlanner:
             "need_initial_observation": {"retrieve_cached_artifacts", "query_time", "sample_sparse_frames", "extract_frames_for_range", "inspect_visual_evidence"},
             "need_alternative_evidence_path": {"retrieve_cached_artifacts", "inspect_visual_evidence", "query_time", "sample_sparse_frames", "query_spatial_context"},
             "need_disambiguating_evidence": {
-                "retrieve_cached_artifacts",
                 "expand_graph_context",
                 "query_region",
                 "query_event",
                 "query_ingredient_measurement",
-                "query_time",
                 "sample_sparse_frames",
                 "extract_frames_for_range",
                 "sample_frames_around_peaks",
@@ -13735,8 +13970,6 @@ class GraphAgentPlanner:
                 "detect_audio_peaks",
                 "rank_choices_from_state",
                 "infer_action_intent",
-                "resolve_action_intent_pairwise",
-                "resolve_action_intent_future_use",
                 "infer_ingredient_order_choice",
                 "infer_ingredient_retrieval_choice",
                 "infer_recipe_ingredient_membership_choice",
@@ -13754,6 +13987,18 @@ class GraphAgentPlanner:
             return True
         if recommend_next_action and tool == recommend_next_action:
             return True
+        if "need_disambiguating_evidence" in verifier_missing and tool in {
+            "infer_action_intent",
+            "query_object",
+            "query_spatial_context",
+        }:
+            return True
+        if (
+            "need_disambiguating_evidence" in verifier_missing
+            and not self._is_action_intent_specialized_tool(tool)
+            and tool in {"retrieve_cached_artifacts", "query_time"}
+        ):
+            return False
         if "multiple_candidate_answers" in verifier_conflicts and tool in {
             "retrieve_cached_artifacts",
             "inspect_visual_evidence",
@@ -13763,6 +14008,9 @@ class GraphAgentPlanner:
             "query_region",
             "run_ocr_on_image",
             "run_ocr_on_region",
+            "infer_action_intent",
+            "query_object",
+            "query_spatial_context",
         }:
             return True
         if "conflicting_ocr_readings" in verifier_conflicts and tool in {
@@ -13791,6 +14039,13 @@ class GraphAgentPlanner:
             return True
         return False
 
+    def _is_action_intent_specialized_tool(self, tool: str) -> bool:
+        return tool in {
+            "query_object",
+            "query_spatial_context",
+            "infer_action_intent",
+        }
+
     def _tool_addresses_needs(
         self,
         *,
@@ -13808,6 +14063,119 @@ class GraphAgentPlanner:
             recommend_next_action=recommend_next_action,
         )
 
+    def _prefer_action_intent_state_candidate_over_generic_recovery(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        used_tools: list[str],
+        recovered: PlannerDecision | None,
+        memory_prefix: str,
+    ) -> PlannerDecision | None:
+        if not self._is_action_intent_task(state):
+            return None
+        if not self._should_continue_search_from_sufficiency(state):
+            return None
+        if recovered is None:
+            return None
+        generic_recovery_tools = {
+            "retrieve_cached_artifacts",
+            "query_time",
+            "sample_sparse_frames",
+            "extract_frames_for_range",
+            "sample_frames_around_peaks",
+        }
+        exact_targeted_tools = {
+            "query_object",
+            "query_spatial_context",
+        }
+        if recovered.tool not in generic_recovery_tools:
+            return None
+        primary_gap = self._action_intent_primary_gap(state)
+        primary_gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
+        primary_gap_target_object = str(primary_gap.get("target_object") or "").strip() if isinstance(primary_gap, dict) else ""
+        primary_gap_target_fixture = str(primary_gap.get("target_fixture") or "").strip() if isinstance(primary_gap, dict) else ""
+        if (
+            recovered.tool in {"query_time", "retrieve_cached_artifacts"}
+            and primary_gap_type == "future_outcome"
+            and not primary_gap_target_object
+            and bool(primary_gap_target_fixture)
+            and self._action_intent_explicit_level_zero_budget_prefers_local_followup(
+                state=state,
+                gap_type=primary_gap_type,
+                target_object=primary_gap_target_object,
+                target_fixture=primary_gap_target_fixture,
+            )
+        ):
+            local_followup = self._build_action_intent_specialized_recovery_decision(
+                state=state,
+                hints=hints,
+                thought="why 题当前已明确是 future outcome 的 fixture-only close call，且仍处于 Level 0；先补局部 late followup 原始证据，不保留过泛的 query_time。",
+            )
+            if local_followup is None:
+                local_followup = self._build_action_intent_local_followup_recovery_decision(
+                    state=state,
+                    hints=hints,
+                    thought="why 题当前已明确是 future outcome 的 fixture-only close call，且仍处于 Level 0；先补局部 late followup 原始证据，不保留过泛的 query_time。",
+                )
+            if local_followup is not None and local_followup.tool != recovered.tool:
+                self._state_add_memory(
+                    state,
+                    f"{memory_prefix}={recovered.tool}->{local_followup.tool}",
+                )
+                return local_followup
+        candidate_plan = self._best_state_candidate_plan(
+            state=state,
+            hints=hints,
+            used_tools=used_tools,
+        )
+        if candidate_plan is None:
+            return None
+        candidate_tool = candidate_plan.decision.tool
+        if candidate_tool not in exact_targeted_tools:
+            return None
+        if (
+            primary_gap_type in {"precondition", "immediate_outcome"}
+            and recovered.tool in {"sample_sparse_frames", "extract_frames_for_range", "sample_frames_around_peaks"}
+        ):
+            return None
+        if (
+            candidate_tool == "query_spatial_context"
+            and primary_gap_type == "future_outcome"
+            and not primary_gap_target_object
+            and bool(primary_gap_target_fixture)
+            and recovered.tool in {"sample_sparse_frames", "extract_frames_for_range", "sample_frames_around_peaks"}
+            and self._action_intent_explicit_level_zero_budget_prefers_local_followup(
+                state=state,
+                gap_type=primary_gap_type,
+                target_object=primary_gap_target_object,
+                target_fixture=primary_gap_target_fixture,
+            )
+        ):
+            return None
+        self._state_add_memory(
+            state,
+            f"{memory_prefix}={recovered.tool}->{candidate_tool}",
+        )
+        return candidate_plan.decision
+
+    def _current_recommended_next_action(self, state: AgentState) -> str:
+        latest_verification = self._state_latest_verification(state)
+        sufficiency_decision = latest_verification.get("sufficiency_decision")
+        if isinstance(sufficiency_decision, dict):
+            recommended_next_step = str(sufficiency_decision.get("recommended_next_step") or "").strip()
+            if recommended_next_step:
+                return recommended_next_step
+        return str(latest_verification.get("recommend_next_action") or "")
+
+    def _structured_need_aliases(self, need: str) -> set[str]:
+        aliases = {str(need).strip()} if str(need).strip() else set()
+        if need == "need_post_action_evidence":
+            aliases.add("immediate_outcome")
+        elif need == "need_precondition_context":
+            aliases.add("precondition")
+        return aliases
+
     def _current_evidence_needs(self, state: AgentState) -> set[str]:
         open_questions = {
             str(item)
@@ -13822,7 +14190,34 @@ class GraphAgentPlanner:
             for item in latest_verification.get("missing_evidence_types", [])
             if isinstance(item, str) and item
         }
-        return open_questions | verifier_missing
+        structured_gap_types = {
+            str(item.get("gap_type") or "").strip()
+            for item in self._state_latest_evidence_gaps(state)
+            if isinstance(item, dict) and str(item.get("gap_type") or "").strip()
+        }
+        sufficiency_decision = latest_verification.get("sufficiency_decision")
+        recommended_next_step = ""
+        missing_gap_types: set[str] = set()
+        if isinstance(sufficiency_decision, dict):
+            recommended_next_step = str(sufficiency_decision.get("recommended_next_step") or "").strip()
+            missing_gap_types = {
+                str(item)
+                for item in sufficiency_decision.get("missing_gap_types", [])
+                if isinstance(item, str) and item
+            }
+        aggregated = open_questions | verifier_missing | structured_gap_types | missing_gap_types
+        long_horizon_structured_needs = {"future_outcome", "relation_confirmation", "target_discovery"}
+        suppress_generic_post_action_step = (
+            recommended_next_step == "need_post_action_evidence"
+            and bool(aggregated & long_horizon_structured_needs)
+        )
+        if recommended_next_step:
+            if not suppress_generic_post_action_step:
+                aggregated.add(recommended_next_step)
+                aggregated |= self._structured_need_aliases(recommended_next_step)
+        for item in tuple(aggregated):
+            aggregated |= self._structured_need_aliases(item)
+        return aggregated
 
     def _current_verifier_conflicts(self, state: AgentState) -> set[str]:
         latest_verification = self._state_latest_verification(state)
@@ -13871,9 +14266,18 @@ class GraphAgentPlanner:
         if not str(state.task_family).startswith("open_query"):
             return False
         latest_verification = self._state_latest_verification(state)
-        if bool(latest_verification.get("sufficient")):
+        decision = latest_verification.get("sufficiency_decision")
+        if bool(latest_verification.get("sufficient")) and not (
+            isinstance(decision, dict) and decision.get("sufficient") is False
+        ):
             return False
-        if "need_disambiguating_evidence" not in open_questions and "need_initial_observation" not in open_questions:
+        current_needs = self._current_evidence_needs(state)
+        if (
+            "need_disambiguating_evidence" not in open_questions
+            and "need_initial_observation" not in open_questions
+            and "need_disambiguating_evidence" not in current_needs
+            and "need_initial_observation" not in current_needs
+        ):
             return False
         raw_grounding_tools = {
             "sample_sparse_frames",
@@ -13963,10 +14367,44 @@ class GraphAgentPlanner:
         if not self._is_action_intent_task(state):
             return ""
         latest_verification = self._state_latest_verification(state)
+        evidence_gaps = latest_verification.get("evidence_gaps")
+        if isinstance(evidence_gaps, list):
+            for item in evidence_gaps:
+                if not isinstance(item, dict):
+                    continue
+                gap_type = str(item.get("gap_type") or "")
+                if gap_type == "immediate_outcome":
+                    return "post_action_evidence"
+                if gap_type == "future_outcome":
+                    return "future_gap_family"
+                if gap_type in {"relation_confirmation", "target_discovery"}:
+                    return "future_gap_family"
+                if gap_type == "precondition":
+                    return "precondition_context"
+        primary_gap = self._action_intent_primary_gap(state)
+        if isinstance(primary_gap, dict):
+            gap_type = str(primary_gap.get("gap_type") or "")
+            if gap_type == "immediate_outcome":
+                return "post_action_evidence"
+            if gap_type == "future_outcome":
+                return "future_gap_family"
+            if gap_type in {"relation_confirmation", "target_discovery"}:
+                return "future_gap_family"
+            if gap_type == "precondition":
+                return "precondition_context"
+        decision = latest_verification.get("sufficiency_decision")
+        if isinstance(decision, dict):
+            recommended_next_step = str(decision.get("recommended_next_step") or "").strip()
+            if recommended_next_step == "need_precondition_context":
+                return "precondition_context"
+            if recommended_next_step == "need_post_action_evidence":
+                return "post_action_evidence"
+            if recommended_next_step in {"need_location_evidence", "need_disambiguating_evidence"}:
+                return "future_gap_family"
         summary = str(latest_verification.get("summary") or "")
         match = re.search(r"why_blocker=([a-z_]+)", summary)
         if match:
-            return str(match.group(1) or "")
+            return self._normalize_action_intent_blocker_hint(str(match.group(1) or ""))
         missing = {
             str(item)
             for item in latest_verification.get("missing_evidence_types", [])
@@ -13976,7 +14414,470 @@ class GraphAgentPlanner:
             return "precondition_context"
         if "need_post_action_evidence" in missing:
             return "post_action_evidence"
+        if "need_location_evidence" in missing or "need_disambiguating_evidence" in missing:
+            return "future_gap_family"
         return ""
+
+    def _normalize_action_intent_blocker_hint(self, blocker_hint: str) -> str:
+        hint = str(blocker_hint or "").strip()
+        if hint == "future_use_close_call":
+            return "future_gap_family"
+        if hint == "pairwise_close_call":
+            return "post_action_evidence"
+        return hint
+
+    def _action_intent_current_primary_gap_type(self, state: AgentState) -> str:
+        primary_gap = self._action_intent_primary_gap(state)
+        if not isinstance(primary_gap, dict):
+            return ""
+        return str(primary_gap.get("gap_type") or "").strip()
+
+    def _action_intent_blocker_is_future_gap_family(self, *, state: AgentState, blocker_hint: str) -> bool:
+        blocker_hint = self._normalize_action_intent_blocker_hint(blocker_hint)
+        if blocker_hint == "future_gap_family":
+            return True
+        return self._action_intent_current_primary_gap_type(state) in {
+            "future_outcome",
+            "relation_confirmation",
+            "target_discovery",
+        }
+
+    def _action_intent_blocker_is_post_action_family(self, *, state: AgentState, blocker_hint: str) -> bool:
+        blocker_hint = self._normalize_action_intent_blocker_hint(blocker_hint)
+        if blocker_hint == "post_action_evidence":
+            return True
+        if self._action_intent_blocker_is_future_gap_family(state=state, blocker_hint=blocker_hint):
+            return True
+        return self._action_intent_current_primary_gap_type(state) == "immediate_outcome"
+
+    def _action_intent_needs_current_scope_raw_evidence(self, state: AgentState) -> bool:
+        if not self._is_action_intent_task(state):
+            return False
+        primary_gap = self._action_intent_primary_gap(state)
+        if isinstance(primary_gap, dict):
+            return str(primary_gap.get("gap_type") or "").strip() in {"precondition", "immediate_outcome"}
+        recommended_next_action = self._current_recommended_next_action(state)
+        return recommended_next_action in {"need_precondition_context", "need_post_action_evidence"}
+
+    def _action_intent_prefers_targeted_candidate_over_generic_decision(
+        self,
+        *,
+        state: AgentState,
+        decision_tool: str,
+        candidate_tool: str,
+    ) -> bool:
+        if not self._is_action_intent_task(state):
+            return False
+        primary_gap = self._action_intent_primary_gap(state)
+        primary_gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
+        if primary_gap_type in {"precondition", "immediate_outcome"}:
+            return False
+        generic_reuse_tools = {
+            "retrieve_cached_artifacts",
+            "query_time",
+            "sample_sparse_frames",
+            "extract_frames_for_range",
+            "sample_frames_around_peaks",
+        }
+        targeted_gap_tools = {
+            "query_object",
+            "query_spatial_context",
+            "resolve_action_intent_pairwise",
+            "resolve_action_intent_future_use",
+        }
+        return decision_tool in generic_reuse_tools and candidate_tool in targeted_gap_tools
+
+    def _state_latest_evidence_gaps(self, state: AgentState) -> list[dict[str, Any]]:
+        latest = self._state_latest_verification(state)
+        gaps = latest.get("evidence_gaps")
+        if not isinstance(gaps, list):
+            return []
+        return [item for item in gaps if isinstance(item, dict)]
+
+    def _state_latest_action_intent_hypotheses(self, state: AgentState) -> list[dict[str, Any]]:
+        return []
+
+    def _latest_sufficiency_finish_mode(self, state: AgentState) -> str:
+        latest = self._state_latest_verification(state)
+        decision = latest.get("sufficiency_decision")
+        if not isinstance(decision, dict):
+            return ""
+        return str(decision.get("finish_mode") or "")
+
+    def _should_continue_search_from_sufficiency(self, state: AgentState) -> bool:
+        if not self._is_action_intent_task(state):
+            return False
+        if self._search_budget_exhausted(state):
+            return False
+        latest = self._state_latest_verification(state)
+        decision = latest.get("sufficiency_decision")
+        if bool(latest.get("sufficient")) and not (
+            isinstance(decision, dict) and decision.get("sufficient") is False
+        ):
+            return False
+        finish_mode = self._latest_sufficiency_finish_mode(state)
+        if finish_mode == "needs_more_evidence":
+            return True
+        if not isinstance(decision, dict):
+            return False
+        missing_gap_types = [
+            str(item).strip()
+            for item in decision.get("missing_gap_types", [])
+            if isinstance(item, str) and str(item).strip()
+        ]
+        if missing_gap_types:
+            return True
+        recommended_next_step = str(decision.get("recommended_next_step") or "").strip()
+        if recommended_next_step:
+            return True
+        has_structured_gap = bool(self._state_latest_evidence_gaps(state))
+        if has_structured_gap:
+            return True
+        if finish_mode == "resolve_conflict":
+            return True
+        if finish_mode in {
+            "finish_confident",
+            "finish_budget_exhausted_best_guess",
+            "finish_insufficient_evidence",
+        }:
+            return False
+        return False
+
+    def _search_budget(self, state: AgentState) -> dict[str, Any]:
+        payload = getattr(state, "search_budget", None)
+        return payload if isinstance(payload, dict) else {}
+
+    def _search_budget_exhausted(self, state: AgentState) -> bool:
+        checker = getattr(state, "is_search_budget_exhausted", None)
+        if callable(checker):
+            try:
+                return bool(checker())
+            except Exception:  # noqa: BLE001
+                return False
+        return False
+
+    def _search_window_level(self, state: AgentState) -> int:
+        budget = self._search_budget(state)
+        try:
+            return max(0, min(2, int(budget.get("window_level") or 0)))
+        except Exception:  # noqa: BLE001
+            return 0
+
+    def _action_intent_should_defer_long_horizon_gap_query_until_window_expands(
+        self,
+        *,
+        state: AgentState,
+        gap_type: str,
+        target_object: str,
+        target_fixture: str = "",
+    ) -> bool:
+        if not self._is_action_intent_task(state):
+            return False
+        budget = self._search_budget(state)
+        if not budget:
+            return False
+        if "window_level" not in budget:
+            return False
+        if not any(
+            key in budget
+            for key in (
+                "tool_steps_used",
+                "new_frames_observed",
+                "long_horizon_expansions_used",
+                "max_tool_steps",
+                "max_new_frames",
+                "max_long_horizon_expansions",
+                "budget_exhausted",
+            )
+        ):
+            return False
+        if gap_type not in {"future_outcome", "relation_confirmation", "target_discovery"}:
+            return False
+        if not target_object and not target_fixture:
+            return False
+        if self._search_window_level(state) > 0:
+            return False
+        try:
+            new_frames_observed = int(budget.get("new_frames_observed") or 0)
+        except Exception:  # noqa: BLE001
+            new_frames_observed = 0
+        try:
+            long_horizon_expansions_used = int(budget.get("long_horizon_expansions_used") or 0)
+        except Exception:  # noqa: BLE001
+            long_horizon_expansions_used = 0
+        if (
+            self._action_intent_followup_attempt_count(state) > 0
+            or self._action_intent_has_transition_followup_frames(state)
+            or self._action_intent_has_peak_guided_followup_frames(state)
+            or self._latest_action_intent_timeline_review(state)
+        ):
+            return False
+        if new_frames_observed >= 4 and long_horizon_expansions_used > 0:
+            return False
+        if target_object and self._latest_action_intent_long_horizon_nodes(state, object_hint=target_object):
+            return False
+        if target_fixture and self._latest_action_intent_long_horizon_spatial_context(state, fixture_hint=target_fixture):
+            return False
+        return long_horizon_expansions_used == 0
+
+    def _action_intent_explicit_level_zero_budget_prefers_local_followup(
+        self,
+        *,
+        state: AgentState,
+        gap_type: str,
+        target_object: str,
+        target_fixture: str = "",
+    ) -> bool:
+        return self._action_intent_should_defer_long_horizon_gap_query_until_window_expands(
+            state=state,
+            gap_type=gap_type,
+            target_object=target_object,
+            target_fixture=target_fixture,
+        )
+
+    def _action_intent_primary_gap(self, state: AgentState) -> dict[str, Any] | None:
+        if not self._is_action_intent_task(state):
+            return None
+        latest = self._state_latest_verification(state)
+        decision = latest.get("sufficiency_decision")
+        recommended_next_step = ""
+        if isinstance(decision, dict):
+            recommended_next_step = str(decision.get("recommended_next_step") or "").strip()
+        gaps = self._state_latest_evidence_gaps(state)
+        if gaps:
+            priority_rank = {"high": 0, "medium": 1, "low": 2}
+            preferred_gap_type = self._action_intent_select_primary_gap_type(
+                missing_gap_types=[
+                    str(item.get("gap_type") or "").strip()
+                    for item in gaps
+                    if isinstance(item, dict) and str(item.get("gap_type") or "").strip()
+                ],
+                recommended_next_step=recommended_next_step,
+            )
+            ranked = sorted(
+                gaps,
+                key=lambda item: (
+                    priority_rank.get(str(item.get("priority") or "").lower(), 3),
+                    0 if str(item.get("gap_type") or "").strip() == preferred_gap_type and preferred_gap_type else 1,
+                    str(item.get("gap_type") or ""),
+                ),
+            )
+            return self._sanitize_action_intent_primary_gap(state=state, gap=ranked[0]) if ranked else None
+        if not isinstance(decision, dict):
+            return None
+        missing_gap_types = [
+            str(item).strip()
+            for item in decision.get("missing_gap_types", [])
+            if isinstance(item, str) and str(item).strip()
+        ]
+        if not missing_gap_types:
+            return None
+        gap_type = self._action_intent_select_primary_gap_type(
+            missing_gap_types=missing_gap_types,
+            recommended_next_step=recommended_next_step,
+        )
+        if not gap_type:
+            return None
+        return self._sanitize_action_intent_primary_gap(
+            state=state,
+            gap={
+                "gap_type": gap_type,
+                "priority": "high",
+                "missing_observation": "",
+                "target_object": "",
+                "target_fixture": "",
+                "time_relation": "derived_from_sufficiency",
+                "source": "sufficiency_missing_gap_types",
+            },
+        )
+
+    def _sanitize_action_intent_primary_gap(self, *, state: AgentState, gap: dict[str, Any]) -> dict[str, Any]:
+        sanitized = dict(gap)
+        source = str(sanitized.get("source") or "").strip()
+        gap_type = str(sanitized.get("gap_type") or "").strip()
+        target_object = str(sanitized.get("target_object") or "").strip()
+        target_fixture = str(sanitized.get("target_fixture") or "").strip()
+        suppressed_target = False
+        if self._action_intent_primary_gap_source_is_answer_conditioned(source):
+            if not self._action_intent_primary_gap_target_object_is_observation_grounded(state=state, target_object=target_object):
+                suppressed_target = suppressed_target or bool(target_object)
+                sanitized["target_object"] = ""
+            if not self._action_intent_primary_gap_target_fixture_is_observation_grounded(
+                state=state,
+                target_fixture=target_fixture,
+            ):
+                suppressed_target = suppressed_target or bool(target_fixture)
+                sanitized["target_fixture"] = ""
+            sanitized["source"] = "verification_gap"
+        if suppressed_target:
+            sanitized["suppressed_answer_conditioned_target"] = True
+        return sanitized
+
+    def _action_intent_primary_gap_source_is_answer_conditioned(self, source: str) -> bool:
+        return str(source or "").strip() in {
+            "future_use_close_call",
+            "pairwise_close_call",
+        }
+
+    def _action_intent_primary_gap_target_object_is_observation_grounded(
+        self,
+        *,
+        state: AgentState,
+        target_object: str,
+    ) -> bool:
+        target = str(target_object or "").strip().lower()
+        if not target:
+            return False
+        question_object = str(self._action_intent_question_object_hint(state) or "").strip().lower()
+        if target == question_object:
+            return True
+        if self._latest_action_intent_long_horizon_nodes(state, object_hint=target):
+            return True
+        evidence_sources = list(getattr(state, "evidence_bundle", []) or []) + list(getattr(state, "working_memory", []) or [])
+        marker = f"object_name={target}"
+        return any(isinstance(item, str) and marker in item.lower() for item in evidence_sources)
+
+    def _action_intent_primary_gap_target_fixture_is_observation_grounded(
+        self,
+        *,
+        state: AgentState,
+        target_fixture: str,
+    ) -> bool:
+        target = str(target_fixture or "").strip().lower()
+        if not target:
+            return False
+        if self._latest_action_intent_long_horizon_spatial_context(state, fixture_hint=target):
+            return True
+        if self._latest_action_intent_target_spatial_anchor_time(state) is not None:
+            latest_spatial = self._latest_action_intent_long_horizon_spatial_context(state, fixture_hint=target)
+            if latest_spatial:
+                return True
+        evidence_sources = list(getattr(state, "evidence_bundle", []) or []) + list(getattr(state, "working_memory", []) or [])
+        return any(isinstance(item, str) and target in item.lower() for item in evidence_sources)
+
+    def _action_intent_future_outcome_gap_prefers_local_followup_recovery(
+        self,
+        *,
+        state: AgentState,
+        primary_gap: dict[str, Any] | None,
+    ) -> bool:
+        if not isinstance(primary_gap, dict):
+            return False
+        if str(primary_gap.get("gap_type") or "").strip() != "future_outcome":
+            return False
+        target_object = str(primary_gap.get("target_object") or "").strip().lower()
+        target_fixture = str(primary_gap.get("target_fixture") or "").strip()
+        question_object = str(self._action_intent_question_object_hint(state) or "").strip().lower()
+        if target_object and target_object == question_object:
+            return False
+        if bool(primary_gap.get("suppressed_answer_conditioned_target")):
+            return True
+        if target_object and not self._latest_action_intent_long_horizon_nodes(state, object_hint=target_object):
+            return True
+        if target_object and target_object != question_object:
+            return self._action_intent_explicit_level_zero_budget_prefers_local_followup(
+                state=state,
+                gap_type="future_outcome",
+                target_object=target_object,
+                target_fixture=target_fixture,
+            )
+        if not target_object and target_fixture:
+            return False
+        return self._action_intent_explicit_level_zero_budget_prefers_local_followup(
+            state=state,
+            gap_type="future_outcome",
+            target_object=target_object,
+            target_fixture=target_fixture,
+        )
+
+    def _action_intent_observation_hint_from_explicit_gap(
+        self,
+        *,
+        state: AgentState,
+        gap_types: set[str] | None = None,
+    ) -> tuple[str, str]:
+        if not self._is_action_intent_task(state):
+            return "", ""
+        allowed_gap_types = gap_types or {"future_outcome", "relation_confirmation", "target_discovery"}
+        question_object = str(self._action_intent_question_object_hint(state) or "").strip().lower()
+        for gap in self._state_latest_evidence_gaps(state):
+            if not isinstance(gap, dict):
+                continue
+            gap_type = str(gap.get("gap_type") or "").strip()
+            if gap_type not in allowed_gap_types:
+                continue
+            source = str(gap.get("source") or "").strip()
+            if source not in {"verification_gap", "resolution_followup_gap", "verifier", "precondition_gap"}:
+                continue
+            target_object = str(gap.get("target_object") or "").strip()
+            target_fixture = str(gap.get("target_fixture") or "").strip()
+            if target_object and target_object.lower() != question_object:
+                return target_object, "object"
+            if target_fixture:
+                return target_fixture, "fixture"
+        return "", ""
+
+    def _action_intent_has_explicit_downstream_object_gap(self, state: AgentState) -> bool:
+        if not self._is_action_intent_task(state):
+            return False
+        primary_gap = self._action_intent_primary_gap(state)
+        primary_gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
+        primary_gap_target_object = (
+            str(primary_gap.get("target_object") or "").strip().lower() if isinstance(primary_gap, dict) else ""
+        )
+        question_object = str(self._action_intent_question_object_hint(state) or "").strip().lower()
+        if (
+            primary_gap_type in {"future_outcome", "relation_confirmation", "target_discovery"}
+            and primary_gap_target_object
+            and primary_gap_target_object != question_object
+        ):
+            return True
+        explicit_gap_hint, explicit_gap_hint_kind = self._action_intent_observation_hint_from_explicit_gap(state=state)
+        return explicit_gap_hint_kind == "object" and explicit_gap_hint.lower() != question_object
+
+    def _action_intent_select_primary_gap_type(
+        self,
+        *,
+        missing_gap_types: list[str],
+        recommended_next_step: str,
+    ) -> str:
+        candidates = {
+            str(item).strip()
+            for item in missing_gap_types
+            if isinstance(item, str) and str(item).strip()
+        }
+        if not candidates:
+            return ""
+        preferred_by_step = {
+            "need_precondition_context": ("precondition",),
+            "need_post_action_evidence": ("immediate_outcome", "future_outcome"),
+            "need_location_evidence": ("target_discovery", "relation_confirmation", "future_outcome"),
+            "need_disambiguating_evidence": ("relation_confirmation", "target_discovery", "future_outcome", "immediate_outcome"),
+        }
+        for candidate in preferred_by_step.get(recommended_next_step, ()):
+            if candidate in candidates:
+                return candidate
+        for candidate in (
+            "precondition",
+            "immediate_outcome",
+            "future_outcome",
+            "relation_confirmation",
+            "target_discovery",
+        ):
+            if candidate in candidates:
+                return candidate
+        return ""
+
+    def _state_latest_blocking_hypotheses(self, state: AgentState) -> list[str]:
+        latest = self._state_latest_verification(state)
+        decision = latest.get("sufficiency_decision")
+        if not isinstance(decision, dict):
+            return []
+        return [
+            str(item).strip()
+            for item in decision.get("blocking_hypotheses", [])
+            if isinstance(item, str) and str(item).strip()
+        ]
 
     def _used_tools(self, state: AgentState) -> list[str]:
         return [entry.get("tool") for entry in getattr(state, "tool_trace", []) if isinstance(entry, dict)]
@@ -14009,6 +14910,8 @@ class GraphAgentPlanner:
             return False
         if payload.get("best_index") is None:
             return False
+        if self._should_continue_search_from_sufficiency(state):
+            return False
         if any(
             bool(payload.get(key))
             for key in (
@@ -14018,9 +14921,6 @@ class GraphAgentPlanner:
             )
         ):
             return False
-        needed_observation = str(payload.get("needed_observation") or "").strip()
-        if needed_observation:
-            return False
         recent_memory = list(getattr(state, "working_memory", []) or [])[-16:]
         if any(
             isinstance(item, str)
@@ -14028,7 +14928,6 @@ class GraphAgentPlanner:
                 item.startswith("action_intent_pending_resolution=")
                 or item.startswith("action_intent_resolution_withheld_for_")
                 or item.startswith("action_intent_unresolved_rerank_withheld")
-                or item.startswith("action_intent_needed_observation=")
             )
             for item in recent_memory
         ):
@@ -14045,6 +14944,13 @@ class GraphAgentPlanner:
             return False
         if payload.get("best_index") is None:
             return False
+        if self._should_continue_search_from_sufficiency(state):
+            return False
+        if self._action_intent_result_is_close_call_for_recovery(
+            state=state,
+            payload=payload,
+        ):
+            return False
         if any(
             bool(payload.get(key))
             for key in (
@@ -14054,8 +14960,16 @@ class GraphAgentPlanner:
             )
         ):
             return False
-        needed_observation = str(payload.get("needed_observation") or "").strip()
-        if needed_observation:
+        recent_memory = list(getattr(state, "working_memory", []) or [])[-16:]
+        if any(
+            isinstance(item, str)
+            and (
+                item.startswith("action_intent_pending_resolution=")
+                or item.startswith("action_intent_resolution_withheld_for_")
+                or item.startswith("action_intent_unresolved_rerank_withheld")
+            )
+            for item in recent_memory
+        ):
             return False
         return True
 
@@ -14069,6 +14983,8 @@ class GraphAgentPlanner:
             return False
         if payload.get("best_index") is None:
             return False
+        if self._should_continue_search_from_sufficiency(state):
+            return False
         if any(
             bool(payload.get(key))
             for key in (
@@ -14078,8 +14994,16 @@ class GraphAgentPlanner:
             )
         ):
             return False
-        needed_observation = str(payload.get("needed_observation") or "").strip()
-        if needed_observation:
+        recent_memory = list(getattr(state, "working_memory", []) or [])[-16:]
+        if any(
+            isinstance(item, str)
+            and (
+                item.startswith("action_intent_pending_resolution=")
+                or item.startswith("action_intent_resolution_withheld_for_")
+                or item.startswith("action_intent_unresolved_rerank_withheld")
+            )
+            for item in recent_memory
+        ):
             return False
         return True
 
@@ -14103,28 +15027,10 @@ class GraphAgentPlanner:
         return None
 
     def _action_intent_competing_candidate_index(self, payload: dict[str, Any], state: AgentState) -> int | None:
-        second_best = self._coerce_choice_index(payload.get("second_best_index"), state.choices)
-        if second_best is not None:
-            return second_best
-        losing = self._coerce_choice_index(payload.get("losing_index"), state.choices)
-        if losing is not None:
-            return losing
-        candidate_scores: list[tuple[int, float]] = []
-        for item in payload.get("candidate_evidence") or []:
-            if not isinstance(item, dict):
-                continue
-            index = self._coerce_choice_index(item.get("index"), state.choices)
-            if index is None:
-                continue
-            try:
-                score = float(item.get("score") or 0.0)
-            except Exception:  # noqa: BLE001
-                score = 0.0
-            candidate_scores.append((index, score))
-        if len(candidate_scores) < 2:
+        ranked = self._action_intent_observation_ranked_candidate_indices(state=state, payload=payload)
+        if len(ranked) < 2:
             return None
-        ranked = sorted(candidate_scores, key=lambda pair: (-pair[1], pair[0]))
-        return ranked[1][0]
+        return ranked[1]
 
     def _action_intent_future_use_score_gap(self, payload: dict[str, Any]) -> float:
         scores: list[float] = []
@@ -14147,50 +15053,76 @@ class GraphAgentPlanner:
         best_index: int,
         competitor_index: int,
     ) -> bool:
-        question = str(getattr(state, "question", "") or "")
-        choices = [str(choice) for choice in getattr(state, "choices", [])]
-        pair = [best_index, competitor_index]
-        if action_intent_needs_future_use_resolution(question=question, choices=choices, indices=pair):
-            return True
-        if action_intent_needs_pairwise_resolution(question=question, choices=choices, indices=pair):
-            return True
-        categories = selected_choice_categories(choices, pair)
-        best_categories = set(categories.get(best_index) or set())
-        competitor_categories = set(categories.get(competitor_index) or set())
-        return best_categories != competitor_categories and bool(best_categories | competitor_categories)
+        if best_index == competitor_index:
+            return False
+        primary_gap = self._action_intent_primary_gap(state)
+        if isinstance(primary_gap, dict):
+            gap_type = str(primary_gap.get("gap_type") or "").strip()
+            if gap_type in {
+                "immediate_outcome",
+                "state_transition_unconfirmed",
+                "workspace_change_unconfirmed",
+                "future_outcome",
+                "relation_confirmation",
+                "target_discovery",
+            }:
+                return True
+        blocker_hint = self._action_intent_verifier_blocker_hint(state)
+        return blocker_hint in {"post_action_evidence", "future_gap_family"}
 
     def _action_intent_result_is_close_call_for_recovery(
         self,
         *,
         state: AgentState,
-        tool_name: str,
         payload: dict[str, Any],
     ) -> bool:
         if bool(payload.get("need_more_evidence")):
             return True
-        best_index = self._coerce_choice_index(payload.get("best_index"), state.choices)
-        competitor_index = self._action_intent_competing_candidate_index(payload, state)
-        if best_index is None or competitor_index is None or best_index == competitor_index:
-            return False
-        if not self._action_intent_competing_pair_still_needs_disambiguation(
-            state=state,
-            best_index=best_index,
-            competitor_index=competitor_index,
-        ):
-            return False
         try:
             confidence = float(payload.get("confidence") or 0.0)
         except Exception:  # noqa: BLE001
             confidence = 0.0
-        if tool_name == "resolve_action_intent_pairwise":
-            direct_effect = str(payload.get("direct_effect") or "").strip()
-            downstream_action = str(payload.get("downstream_action") or "").strip()
-            return confidence < 0.84 or not direct_effect or not downstream_action
-        if tool_name == "resolve_action_intent_future_use":
-            decisive = str(payload.get("decisive_observation") or "").strip()
-            score_gap = self._action_intent_future_use_score_gap(payload)
-            return confidence < 0.84 or not decisive or score_gap < 0.18
+        primary_gap = self._action_intent_primary_gap(state)
+        gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
         support_text = self._action_intent_result_support_text(payload)
+        decisive = str(payload.get("decisive_observation") or "").strip()
+        direct_effect = str(payload.get("direct_effect") or "").strip()
+        downstream_action = str(payload.get("downstream_action") or "").strip()
+        blocker_hint = self._normalize_action_intent_blocker_hint(
+            self._action_intent_verifier_blocker_hint(state),
+        )
+        future_gap_family = gap_type in {
+            "future_outcome",
+            "relation_confirmation",
+            "target_discovery",
+        } or blocker_hint == "future_gap_family"
+        post_action_gap_family = gap_type in {
+            "immediate_outcome",
+            "state_transition_unconfirmed",
+            "workspace_change_unconfirmed",
+        } or blocker_hint == "post_action_evidence"
+        if future_gap_family:
+            if (
+                self._action_intent_result_has_direct_post_action_evidence(payload)
+                and not self._action_intent_resolution_needs_more_evidence(
+                    tool_name="",
+                    result=payload,
+                )
+                and not self._action_intent_result_points_to_later_outcome_uncertainty(payload)
+            ):
+                return False
+            return (
+                confidence < 0.84
+                or not decisive
+                or self._action_intent_result_points_to_later_outcome_uncertainty(payload)
+            )
+        if post_action_gap_family:
+            return (
+                confidence < 0.84
+                or not direct_effect
+                or not downstream_action
+                or self._action_intent_result_has_immediate_post_action_uncertainty(payload)
+            )
         direct_result_markers = (
             "immediately",
             "right after",
@@ -14213,7 +15145,10 @@ class GraphAgentPlanner:
             "放回",
             "放到秤上",
         )
-        return confidence < 0.9 or not any(marker in support_text for marker in direct_result_markers)
+        return self._action_intent_blocker_is_post_action_family(
+            state=state,
+            blocker_hint=blocker_hint,
+        ) and (confidence < 0.9 or not any(marker in support_text for marker in direct_result_markers))
 
     def _coerce_choice_index(self, value: Any, choices: list[Any]) -> int | None:
         try:
@@ -14235,56 +15170,278 @@ class GraphAgentPlanner:
             return None
         tool_name, payload = latest
         blocker_hint = self._action_intent_verifier_blocker_hint(state)
-        is_close_call = self._action_intent_result_is_close_call_for_recovery(
+        primary_gap = self._action_intent_primary_gap(state)
+        primary_gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
+        primary_gap_target_object = (
+            str(primary_gap.get("target_object") or "").strip().lower() if isinstance(primary_gap, dict) else ""
+        )
+        has_structured_gap = isinstance(primary_gap, dict) and bool(str(primary_gap.get("gap_type") or "").strip())
+        question_object_hint = str(self._action_intent_question_object_hint(state) or "").strip().lower()
+        explicit_downstream_object_target = (
+            primary_gap_type in {"future_outcome", "relation_confirmation", "target_discovery"}
+            and bool(primary_gap_target_object)
+            and primary_gap_target_object != question_object_hint
+        )
+        prefers_future_profile = self._action_intent_recovery_prefers_future_profile(
             state=state,
-            tool_name=tool_name,
+            blocker_hint=blocker_hint,
+            primary_gap=primary_gap,
             payload=payload,
         )
-        requires_blocker_driven_recovery = blocker_hint in {
-            "precondition_context",
-            "post_action_evidence",
-            "future_use_close_call",
-            "pairwise_close_call",
-        }
-        if not is_close_call and not requires_blocker_driven_recovery:
+        late_taken_outcome_support = self._action_intent_payload_supports_late_taken_outcome(payload)
+        if (
+            prefers_future_profile
+            and self._action_intent_result_has_direct_post_action_evidence(payload)
+            and not self._action_intent_resolution_needs_more_evidence(tool_name="", result=payload)
+        ):
             return None
-        needed_observation_relation_revisit = self._build_action_intent_needed_observation_relation_revisit_decision(
+        if (
+            prefers_future_profile
+            and self._action_intent_has_any_query_object_nodes(state)
+            and late_taken_outcome_support
+        ):
+            extra_followup = self._build_action_intent_extra_followup_sampling_decision(
+                state=state,
+                hints=hints,
+                focus="verifier_blocked_close_call_recovery",
+                window_s=self._action_intent_close_call_followup_window(state, profile="future_use"),
+            )
+            if extra_followup is not None:
+                return extra_followup
+        if (
+            prefers_future_profile
+            and any(
+                isinstance(item, str)
+                and item.startswith("action_intent_resolution_withheld_for_weak_cooking_inspection_evidence=1")
+                for item in list(getattr(state, "working_memory", []))[-12:]
+            )
+            and not self._action_intent_has_peak_guided_followup_frames(state)
+        ):
+            peak_followup = self._build_action_intent_peak_guided_followup_decision(
+                state=state,
+                hints=hints,
+                last_tool={"tool": tool_name, "args": {}},
+                last_result=payload,
+                focus="weak_cooking_inspection_peak_probe",
+            )
+            if peak_followup is not None:
+                return peak_followup
+        future_use_followup_exhausted_without_structured_gap = (
+            prefers_future_profile
+            and not has_structured_gap
+            and self._action_intent_followup_attempt_count(state) >= 2
+            and not self._action_intent_result_has_direct_post_action_evidence(payload)
+            and self._action_intent_result_points_to_later_outcome_uncertainty(payload)
+            and not self._action_intent_future_use_needs_more_post_action_coverage(state=state, hints=hints, result=payload)
+            and not self._latest_action_intent_long_horizon_nodes(state)
+        )
+        if future_use_followup_exhausted_without_structured_gap:
+            forced_transition_recovery = self._build_action_intent_resolution_transition_recovery_decision(
+                state=state,
+                hints=hints,
+                tool_name=tool_name,
+                result=payload,
+            )
+            if forced_transition_recovery is not None and not late_taken_outcome_support:
+                self._state_add_memory(
+                    state,
+                    f"planner_override verifier_blocked_finish=finish -> {forced_transition_recovery.tool}",
+                )
+                return forced_transition_recovery
+        if (
+            prefers_future_profile
+            and not has_structured_gap
+            and self._action_intent_followup_attempt_count(state) >= 2
+            and not self._action_intent_result_has_direct_post_action_evidence(payload)
+            and self._action_intent_result_points_to_later_outcome_uncertainty(payload)
+            and not self._latest_action_intent_long_horizon_nodes(state)
+        ):
+            forced_transition_recovery = self._build_action_intent_resolution_transition_recovery_decision(
+                state=state,
+                hints=hints,
+                tool_name=tool_name,
+                result=payload,
+            )
+            if forced_transition_recovery is not None:
+                self._state_add_memory(
+                    state,
+                    f"planner_override verifier_blocked_finish=finish -> {forced_transition_recovery.tool}",
+                )
+                return forced_transition_recovery
+        if prefers_future_profile and not has_structured_gap:
+            reveal_subtype = self._action_intent_reveal_conflict_subtype(state=state, result=payload)
+            forced_transition_recovery = self._build_action_intent_resolution_transition_recovery_decision(
+                state=state,
+                hints=hints,
+                tool_name=tool_name,
+                result=payload,
+            )
+            if forced_transition_recovery is not None and (
+                blocker_hint == "post_action_evidence"
+                or self._action_intent_result_has_immediate_post_action_uncertainty(payload)
+            ) and not (
+                reveal_subtype == "revealed_target_retrieval"
+                and self._latest_action_intent_long_horizon_nodes(state)
+            ) and not late_taken_outcome_support:
+                self._state_add_memory(
+                    state,
+                    f"planner_override verifier_blocked_finish=finish -> {forced_transition_recovery.tool}",
+                )
+                return forced_transition_recovery
+        if (
+            prefers_future_profile
+            and self._latest_action_intent_long_horizon_nodes(state)
+            and late_taken_outcome_support
+        ):
+            extra_followup = self._build_action_intent_extra_followup_sampling_decision(
+                state=state,
+                hints=hints,
+                focus="verifier_blocked_close_call_recovery",
+                window_s=self._action_intent_close_call_followup_window(state, profile="future_use"),
+            )
+            if extra_followup is not None:
+                return extra_followup
+        is_close_call = self._action_intent_result_is_close_call_for_recovery(
+            state=state,
+            payload=payload,
+        )
+        requires_blocker_driven_recovery = blocker_hint == "precondition_context" or self._action_intent_blocker_is_post_action_family(
+            state=state,
+            blocker_hint=blocker_hint,
+        )
+        if not is_close_call and not requires_blocker_driven_recovery and not has_structured_gap:
+            return None
+        gap_routed_decision = self._recover_action_intent_via_primary_gap(
             state=state,
             hints=hints,
             result=payload,
-            thought="why 题被 verifier 拦下后，当前真正缺的已经收敛到某个关系型判别证据；优先直接追动作物体与目标之间是否真的形成了 `on/into/over/returned` 这类关系，而不是先退回泛化补帧。",
+            blocker_hint=blocker_hint,
+            primary_gap=primary_gap,
         )
-        if needed_observation_relation_revisit is not None:
-            return needed_observation_relation_revisit
-        needed_observation_target_revisit = self._build_action_intent_needed_observation_target_revisit_decision(
-            state=state,
-            hints=hints,
-            result=payload,
-            thought="why 题被 verifier 拦下后，当前真正缺的已经收敛到某个判别目标/位置上的后续证据；优先直接追 `needed_observation` 点名的目标，而不是先退回泛化补帧。",
-        )
-        if needed_observation_target_revisit is not None:
-            return needed_observation_target_revisit
-        finalize_access_or_space_revisit = self._build_action_intent_finalize_withheld_generic_access_or_space_revisit_decision(
-            state=state,
-            hints=hints,
-            thought="why 题被 verifier 拦下后，当前已知 generic reveal/access 不是结论；优先直接追 finalizer 指出的真实 downstream target，而不是先退回泛化补帧。",
-        )
-        if finalize_access_or_space_revisit is not None:
-            return finalize_access_or_space_revisit
-        finalize_relocation_or_storage_revisit = self._build_action_intent_finalize_withheld_generic_relocation_or_storage_revisit_decision(
-            state=state,
-            hints=hints,
-            thought="why 题被 verifier 拦下后，当前已知 generic relocation / put-away 不是结论；优先直接追 finalizer 指出的真实后续目标，而不是先退回泛化补帧。",
-        )
-        if finalize_relocation_or_storage_revisit is not None:
-            return finalize_relocation_or_storage_revisit
-        finalize_hand_free_revisit = self._build_action_intent_finalize_withheld_generic_hand_free_revisit_decision(
-            state=state,
-            hints=hints,
-            thought="why 题被 verifier 拦下后，当前已知 generic hand-free 不是结论；优先直接追 finalizer 指出的真实 downstream object / same-object use，而不是先退回泛化补帧。",
-        )
-        if finalize_hand_free_revisit is not None:
-            return finalize_hand_free_revisit
+        if gap_routed_decision is not None:
+            gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
+            self._state_add_memory(
+                state,
+                f"planner_guard=verifier_blocked_prefers_primary_gap={gap_type or 'unknown'}->{gap_routed_decision.tool}",
+            )
+            self._state_add_memory(
+                state,
+                f"planner_override verifier_blocked_finish=finish -> {gap_routed_decision.tool}",
+            )
+            return gap_routed_decision
+        if (
+            prefers_future_profile
+            and isinstance(primary_gap, dict)
+            and str(primary_gap.get("gap_type") or "").strip()
+            in {"immediate_outcome", "state_transition_unconfirmed", "workspace_change_unconfirmed"}
+        ):
+            transition_recovery = self._build_action_intent_resolution_transition_recovery_decision(
+                state=state,
+                hints=hints,
+                tool_name=tool_name,
+                result=payload,
+            )
+            if transition_recovery is not None:
+                if any(
+                    isinstance(item, str)
+                    and item.startswith("action_intent_resolution_withheld_for_weak_cooking_inspection_evidence=1")
+                    for item in list(getattr(state, "working_memory", []))[-12:]
+                ):
+                    peak_followup = self._build_action_intent_peak_guided_followup_decision(
+                        state=state,
+                        hints=hints,
+                        last_tool={"tool": tool_name, "args": {}},
+                        last_result=payload,
+                        focus="weak_cooking_inspection_peak_probe",
+                    )
+                    if peak_followup is not None:
+                        return peak_followup
+                self._state_add_memory(
+                    state,
+                    f"planner_override verifier_blocked_finish=finish -> {transition_recovery.tool}",
+                )
+                return transition_recovery
+        if (
+            prefers_future_profile
+            and self._action_intent_result_has_immediate_post_action_uncertainty(payload)
+        ):
+            transition_recovery = self._build_action_intent_resolution_transition_recovery_decision(
+                state=state,
+                hints=hints,
+                tool_name=tool_name,
+                result=payload,
+            )
+            if transition_recovery is not None:
+                if any(
+                    isinstance(item, str)
+                    and item.startswith("action_intent_resolution_withheld_for_weak_cooking_inspection_evidence=1")
+                    for item in list(getattr(state, "working_memory", []))[-12:]
+                ):
+                    peak_followup = self._build_action_intent_peak_guided_followup_decision(
+                        state=state,
+                        hints=hints,
+                        last_tool={"tool": tool_name, "args": {}},
+                        last_result=payload,
+                        focus="weak_cooking_inspection_peak_probe",
+                    )
+                    if peak_followup is not None:
+                        return peak_followup
+                self._state_add_memory(
+                    state,
+                    f"planner_override verifier_blocked_finish=finish -> {transition_recovery.tool}",
+                )
+                return transition_recovery
+        if self._action_intent_future_outcome_gap_prefers_local_followup_recovery(state=state, primary_gap=primary_gap):
+            if self._action_intent_disable_legacy_specialized_recovery(state) or explicit_downstream_object_target:
+                return None
+            local_followup = self._build_action_intent_local_followup_recovery_decision(
+                state=state,
+                hints=hints,
+                thought="why 题当前 future-outcome gap 还没有形成可直接追踪的更晚真实目标；先补当前动作尾部与近后续原始证据，再决定是否恢复 specialized 裁决。",
+            )
+            if local_followup is not None:
+                self._state_add_memory(
+                    state,
+                    "planner_guard=verifier_blocked_future_outcome_prefers_local_followup_before_specialized_resume=1",
+                )
+                return local_followup
+        if self._action_intent_disable_legacy_specialized_recovery(state):
+            if primary_gap_type == "precondition":
+                return self._build_action_intent_precondition_sampling_decision(
+                    state=state,
+                    hints=hints,
+                    focus="verifier_blocked_precondition_context",
+                )
+            post_action_like_gap = primary_gap_type in {
+                "immediate_outcome",
+                "future_outcome",
+                "relation_confirmation",
+                "target_discovery",
+            }
+            if post_action_like_gap or self._action_intent_blocker_is_post_action_family(
+                state=state,
+                blocker_hint=blocker_hint,
+            ):
+                transition_probe = self._build_action_intent_transition_probe_decision(
+                    state=state,
+                    hints=hints,
+                    result=payload,
+                    thought="why 题当前证据不足，先继续补最直接的动作后结果帧，而不是走历史专项恢复链。",
+                )
+                if transition_probe is not None:
+                    return transition_probe
+                followup = self._build_action_intent_followup_sampling_decision(state=state, hints=hints)
+                if followup is not None:
+                    return followup
+                extra_followup = self._build_action_intent_extra_followup_sampling_decision(
+                    state=state,
+                    hints=hints,
+                    focus="sufficiency_gap_followup",
+                    window_s=8.0,
+                )
+                if extra_followup is not None:
+                    return extra_followup
+            return None
         if (
             any(
                 isinstance(item, str)
@@ -14300,60 +15457,10 @@ class GraphAgentPlanner:
             precondition = self._build_action_intent_precondition_sampling_decision(
                 state=state,
                 hints=hints,
-                focus=str(payload.get("needed_observation") or "verifier_blocked_missing_state_change_prereq"),
+                focus="verifier_blocked_missing_state_change_prereq",
             )
             if precondition is not None:
                 return precondition
-        if tool_name == "infer_action_intent" and blocker_hint in {"post_action_evidence", "future_use_close_call", "pairwise_close_call"}:
-            finalize_mixed_horizon_later_target_revisit = (
-                self._build_action_intent_finalize_withheld_mixed_horizon_later_target_revisit_decision(
-                    state=state,
-                    hints=hints,
-                    thought="why 题被 verifier/finalizer 拦下，因为 `check/open` 这类近窗解释还没压过更晚结果；直接追 mixed-horizon 竞争里更晚结果对应的真实目标，而不是继续围着动作物体或局部状态泛化补帧。",
-                )
-            )
-            if finalize_mixed_horizon_later_target_revisit is not None:
-                return finalize_mixed_horizon_later_target_revisit
-            infer_mixed_horizon_later_target_revisit = (
-                self._build_action_intent_verifier_blocked_mixed_horizon_later_target_revisit_decision(
-                    state=state,
-                    hints=hints,
-                    result=payload,
-                    blocker_hint=blocker_hint,
-                )
-            )
-            if infer_mixed_horizon_later_target_revisit is not None:
-                return infer_mixed_horizon_later_target_revisit
-            infer_hand_free_target_revisit = (
-                self._build_action_intent_verifier_blocked_hand_free_target_revisit_decision(
-                    state=state,
-                    hints=hints,
-                    result=payload,
-                    blocker_hint=blocker_hint,
-                )
-            )
-            if infer_hand_free_target_revisit is not None:
-                return infer_hand_free_target_revisit
-            infer_measurement_target_revisit = (
-                self._build_action_intent_verifier_blocked_measurement_target_revisit_decision(
-                    state=state,
-                    hints=hints,
-                    result=payload,
-                    blocker_hint=blocker_hint,
-                )
-            )
-            if infer_measurement_target_revisit is not None:
-                return infer_measurement_target_revisit
-            infer_phone_record_target_revisit = (
-                self._build_action_intent_verifier_blocked_phone_record_target_revisit_decision(
-                    state=state,
-                    hints=hints,
-                    result=payload,
-                    blocker_hint=blocker_hint,
-                )
-            )
-            if infer_phone_record_target_revisit is not None:
-                return infer_phone_record_target_revisit
         forced_transition_probe = self._build_action_intent_verifier_blocked_forced_transition_probe_decision(
             state=state,
             hints=hints,
@@ -14362,14 +15469,6 @@ class GraphAgentPlanner:
         )
         if forced_transition_probe is not None:
             return forced_transition_probe
-        same_object_active_use_revisit = self._build_action_intent_verifier_blocked_same_object_active_use_revisit_decision(
-            state=state,
-            hints=hints,
-            result=payload,
-            blocker_hint=blocker_hint,
-        )
-        if same_object_active_use_revisit is not None:
-            return same_object_active_use_revisit
         if tool_name == "infer_action_intent":
             if (
                 blocker_hint == "precondition_context"
@@ -14383,7 +15482,10 @@ class GraphAgentPlanner:
                 )
                 if precondition is not None:
                     return precondition
-            if blocker_hint in {"post_action_evidence", "future_use_close_call"}:
+            if self._action_intent_blocker_is_post_action_family(
+                state=state,
+                blocker_hint=blocker_hint,
+            ):
                 finalize_long_horizon_revisit = self._build_action_intent_finalize_withheld_long_horizon_revisit_decision(
                     state=state,
                     hints=hints,
@@ -14391,6 +15493,14 @@ class GraphAgentPlanner:
                 )
                 if finalize_long_horizon_revisit is not None:
                     return finalize_long_horizon_revisit
+                targeted_transition_recovery = self._build_action_intent_resolution_transition_recovery_decision(
+                    state=state,
+                    hints=hints,
+                    tool_name="resolve_action_intent_future_use",
+                    result=payload,
+                )
+                if targeted_transition_recovery is not None:
+                    return targeted_transition_recovery
                 initial_transition_probe = self._build_action_intent_transition_probe_decision(
                     state=state,
                     hints=hints,
@@ -14411,23 +15521,21 @@ class GraphAgentPlanner:
                 )
                 if transition_probe is not None:
                     return transition_probe
-                future_use = self._build_action_intent_future_use_resolution_decision(
-                    state=state,
-                    hints=hints,
-                    result=payload,
-                    thought="why 题被 verifier 判为缺少动作后证据后，回到后续用途专用裁决，用更新后的结果帧重新判断真实目的。",
-                )
-                if future_use is not None:
-                    return future_use
                 extra_followup = self._build_action_intent_extra_followup_sampling_decision(
                     state=state,
                     hints=hints,
                     focus="verifier_blocked_post_action_evidence",
-                    window_s=8.5,
+                    window_s=self._action_intent_close_call_followup_window(state, profile="post_action"),
                 )
                 if extra_followup is not None:
                     return extra_followup
-            if blocker_hint == "pairwise_close_call":
+            if (
+                not has_structured_gap
+                and self._action_intent_blocker_is_future_gap_family(
+                    state=state,
+                    blocker_hint=blocker_hint,
+                )
+            ):
                 finalize_long_horizon_revisit = self._build_action_intent_finalize_withheld_long_horizon_revisit_decision(
                     state=state,
                     hints=hints,
@@ -14455,14 +15563,6 @@ class GraphAgentPlanner:
                 )
                 if transition_probe is not None:
                     return transition_probe
-                pairwise = self._build_action_intent_pairwise_resolution_decision(
-                    state=state,
-                    hints=hints,
-                    result=payload,
-                    thought="why 题被 verifier 判为 pairwise close call；回到 top-2 专用裁决，不允许泛化结果提前收口。",
-                )
-                if pairwise is not None:
-                    return pairwise
             transition_probe = self._build_action_intent_transition_probe_decision(
                 state=state,
                 hints=hints,
@@ -14471,31 +15571,28 @@ class GraphAgentPlanner:
             )
             if transition_probe is not None:
                 return transition_probe
-            if self._action_intent_needs_future_use_evidence(state=state, result=payload):
-                future_use = self._build_action_intent_future_use_resolution_decision(
-                    state=state,
-                    hints=hints,
-                    result=payload,
-                    thought="why 题被 verifier 拦下后，直接转入后续用途专用裁决，不让五选一结果提前收口。",
-                )
-                if future_use is not None:
-                    return future_use
-            if self._action_intent_pair_needs_outcome_resolution(state=state, result=payload):
-                pairwise = self._build_action_intent_pairwise_resolution_decision(
-                    state=state,
-                    hints=hints,
-                    result=payload,
-                    thought="why 题被 verifier 拦下后，直接转入 top-2 专用裁决，不继续停留在泛化 best guess。",
-                )
-                if pairwise is not None:
-                    return pairwise
             extra_followup = self._build_action_intent_extra_followup_sampling_decision(
                 state=state,
                 hints=hints,
                 focus="verifier_blocked_close_call_recovery",
-                window_s=8.0 if self._action_intent_needs_future_use_evidence(state=state, result=payload) else 6.0,
+                window_s=self._action_intent_close_call_followup_window(
+                    state,
+                    profile=(
+                        "future_use"
+                        if (
+                            self._action_intent_needs_future_use_evidence(state=state, result=payload)
+                            or self._action_intent_blocker_is_future_gap_family(
+                                state=state,
+                                blocker_hint=blocker_hint,
+                            )
+                            or self._action_intent_result_points_to_later_outcome_uncertainty(payload)
+                        )
+                        else "pairwise"
+                    ),
+                ),
             )
-            return extra_followup
+            if extra_followup is not None:
+                return extra_followup
         finalize_mixed_horizon_later_target_revisit = self._build_action_intent_finalize_withheld_mixed_horizon_later_target_revisit_decision(
             state=state,
             hints=hints,
@@ -14510,6 +15607,46 @@ class GraphAgentPlanner:
         )
         if finalize_long_horizon_revisit is not None:
             return finalize_long_horizon_revisit
+        if (
+            prefers_future_profile
+            and not has_structured_gap
+            and self._action_intent_followup_attempt_count(state) >= 2
+            and not self._action_intent_result_has_direct_post_action_evidence(payload)
+            and not self._action_intent_future_use_needs_more_post_action_coverage(state=state, hints=hints, result=payload)
+        ):
+            forced_transition_recovery = self._build_action_intent_resolution_transition_recovery_decision(
+                state=state,
+                hints=hints,
+                tool_name=tool_name,
+                result=payload,
+            )
+            if forced_transition_recovery is not None:
+                self._state_add_memory(
+                    state,
+                    f"planner_override verifier_blocked_finish=finish -> {forced_transition_recovery.tool}",
+                )
+                return forced_transition_recovery
+        extra_followup = self._build_action_intent_extra_followup_sampling_decision(
+            state=state,
+            hints=hints,
+            focus="verifier_blocked_close_call_recovery",
+            window_s=self._action_intent_close_call_followup_window(
+                state,
+                profile=(
+                    "future_use"
+                    if (
+                        self._action_intent_blocker_is_future_gap_family(
+                            state=state,
+                            blocker_hint=blocker_hint,
+                        )
+                        or self._action_intent_result_points_to_later_outcome_uncertainty(payload)
+                    )
+                    else "pairwise"
+                ),
+            ),
+        )
+        if extra_followup is not None:
+            return extra_followup
         transition_probe = self._build_action_intent_transition_probe_decision(
             state=state,
             hints=hints,
@@ -14518,29 +15655,545 @@ class GraphAgentPlanner:
         )
         if transition_probe is not None:
             return transition_probe
+        if isinstance(primary_gap, dict):
+            gap_fallback = self._recover_action_intent_via_primary_gap(
+                state=state,
+                hints=hints,
+                result=payload,
+                blocker_hint=blocker_hint,
+                primary_gap=primary_gap,
+            )
+            if gap_fallback is not None:
+                self._state_add_memory(
+                    state,
+                    f"planner_guard=verifier_blocked_finish_gap_fallback={gap_fallback.tool}",
+                )
+                return gap_fallback
+        combined_times = sorted(
+            [float(value) for value in hints.get("times") or []]
+            + [float(value) for value in hints.get("input_times") or []]
+        )
+        if combined_times:
+            return PlannerDecision(
+                thought="why 题在 verifier_blocked 收尾阶段仍缺证，且更具体恢复动作都未命中；回到当前动作时间窗继续补原始关键帧。",
+                tool="sample_sparse_frames",
+                args={
+                    "start_time": max(0.0, min(combined_times) - 1.5),
+                    "end_time": max(combined_times) + 4.5,
+                    "sample_count": 4,
+                    "tag": f"{state.task_family}_verifier_blocked_recover",
+                },
+            )
+        return None
+
+    def _recover_action_intent_via_primary_gap(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        result: dict[str, Any],
+        blocker_hint: str,
+        primary_gap: dict[str, Any] | None,
+    ) -> PlannerDecision | None:
+        if not isinstance(primary_gap, dict):
+            return None
+        gap_type = str(primary_gap.get("gap_type") or "")
+        def finalize(decision: PlannerDecision | None) -> PlannerDecision | None:
+            self._record_action_intent_primary_gap_recovery_trace(
+                state=state,
+                gap_type=gap_type,
+                decision=decision,
+            )
+            return decision
+        if gap_type == "precondition":
+            missing_state_change_prereq = any(
+                isinstance(item, str)
+                and item.startswith("action_intent_resolution_withheld_for_missing_state_change_prereq=1")
+                for item in list(getattr(state, "working_memory", []))[-12:]
+            )
+            return finalize(self._build_action_intent_precondition_sampling_decision(
+                state=state,
+                hints=hints,
+                focus="verifier_blocked_missing_state_change_prereq" if missing_state_change_prereq else "primary_gap_precondition",
+            ))
+        if gap_type == "immediate_outcome":
+            return finalize(self._recover_action_intent_immediate_outcome_gap(
+                state=state,
+                hints=hints,
+                result=result,
+                blocker_hint=blocker_hint or "post_action_evidence",
+            ))
+        if gap_type == "relation_confirmation":
+            target_object = str(primary_gap.get("target_object") or "").strip()
+            target_fixture = str(primary_gap.get("target_fixture") or "").strip()
+            if target_object:
+                if self._action_intent_should_defer_long_horizon_gap_query_until_window_expands(
+                    state=state,
+                    gap_type=gap_type,
+                    target_object=target_object,
+                    target_fixture=target_fixture,
+                ):
+                    combined_times = sorted(
+                        [float(value) for value in hints.get("times") or []]
+                        + [float(value) for value in hints.get("input_times") or []]
+                    )
+                    if combined_times:
+                        return finalize(PlannerDecision(
+                            thought=(
+                                f"why 题当前主缺口是关系确认，但当前仍处于最小扩窗层级，"
+                                f"且还没有 `{target_object}` 的更晚锚点；先补一次受控 late followup 原始证据，"
+                                "再决定是否升级到长时域目标追证。"
+                            ),
+                            tool="sample_sparse_frames",
+                            args={
+                                "start_time": max(combined_times),
+                                "end_time": max(combined_times) + self._action_intent_close_call_followup_window(
+                                    state,
+                                    profile="pairwise",
+                                ),
+                                "sample_count": 5,
+                                "tag": f"{state.task_family}_gap_late_followup",
+                            },
+                        ))
+                return finalize(PlannerDecision(
+                    thought=f"why 题当前主缺口是关系确认；gap 已明确给出目标对象 `{target_object}`，先重新定位它的关键轨迹，为后续关系确认建立锚点。",
+                    tool="query_object",
+                    args={"query": target_object, "limit": 24},
+                ))
+            if target_fixture:
+                if self._action_intent_should_defer_long_horizon_gap_query_until_window_expands(
+                    state=state,
+                    gap_type=gap_type,
+                    target_object=target_object,
+                    target_fixture=target_fixture,
+                ):
+                    combined_times = sorted(
+                        [float(value) for value in hints.get("times") or []]
+                        + [float(value) for value in hints.get("input_times") or []]
+                    )
+                    if combined_times:
+                        return finalize(PlannerDecision(
+                            thought=(
+                                f"why 题当前主缺口是关系确认，但当前仍处于最小扩窗层级，"
+                                f"且围绕 `{target_fixture}` 的更晚空间锚点还没建立；先补一次受控 late followup 原始证据，"
+                                "再决定是否升级到长时域空间关系追证。"
+                            ),
+                            tool="sample_sparse_frames",
+                            args={
+                                "start_time": max(combined_times),
+                                "end_time": max(combined_times) + self._action_intent_close_call_followup_window(
+                                    state,
+                                    profile="pairwise",
+                                ),
+                                "sample_count": 5,
+                                "tag": f"{state.task_family}_gap_late_followup",
+                            },
+                        ))
+                query_time = self._latest_action_intent_target_spatial_anchor_time(state)
+                if query_time is None:
+                    nodes = self._latest_action_intent_long_horizon_nodes(state)
+                    selected = self._action_intent_select_long_horizon_node(state=state, hints=hints, nodes=nodes) if nodes else None
+                    if selected is not None:
+                        _node, start_time, end_time = selected
+                        query_time = start_time if abs(end_time - start_time) < 0.25 else (start_time + min(end_time, start_time + 1.2)) / 2
+                if query_time is None:
+                    query_time = max(
+                        [float(value) for value in hints.get("times") or []] + [float(value) for value in hints.get("input_times") or []]
+                    ) if (hints.get("times") or hints.get("input_times")) else None
+                return finalize(PlannerDecision(
+                    thought=f"why 题当前主缺口是关系确认；gap 已明确给出目标装置/位置 `{target_fixture}`，先检查关键时刻该位置附近的空间关系。",
+                    tool="query_spatial_context",
+                    args={"object_name": target_fixture, "time_s": query_time, "limit": 8},
+                ))
+            combined_times = sorted(
+                [float(value) for value in hints.get("times") or []]
+                + [float(value) for value in hints.get("input_times") or []]
+            )
+            if combined_times:
+                return finalize(PlannerDecision(
+                    thought=(
+                        "why 题当前主缺口是关系确认，但观测状态里还没有可追踪的目标对象或位置；"
+                        "先继续补更晚原始证据窗口，再根据新观测决定后续关系确认。"
+                    ),
+                    tool="sample_sparse_frames",
+                    args={
+                        "start_time": max(combined_times),
+                        "end_time": max(combined_times) + self._action_intent_close_call_followup_window(
+                            state,
+                            profile="pairwise",
+                        ),
+                        "sample_count": 5,
+                        "tag": f"{state.task_family}_gap_late_followup",
+                    },
+                ))
+            return None
+        if gap_type == "target_discovery":
+            target_object = str(primary_gap.get("target_object") or "").strip()
+            target_fixture = str(primary_gap.get("target_fixture") or "").strip()
+            if target_object:
+                if self._action_intent_should_defer_long_horizon_gap_query_until_window_expands(
+                    state=state,
+                    gap_type=gap_type,
+                    target_object=target_object,
+                    target_fixture=target_fixture,
+                ):
+                    combined_times = sorted(
+                        [float(value) for value in hints.get("times") or []]
+                        + [float(value) for value in hints.get("input_times") or []]
+                    )
+                    if combined_times:
+                        return finalize(PlannerDecision(
+                            thought=(
+                                f"why 题当前主缺口是目标发现，但当前仍处于最小扩窗层级，"
+                                f"且还没有 `{target_object}` 的更晚锚点；先补一次受控 late followup 原始证据，"
+                                "再决定是否升级到长时域目标追证。"
+                            ),
+                            tool="sample_sparse_frames",
+                            args={
+                                "start_time": max(combined_times),
+                                "end_time": max(combined_times) + self._action_intent_close_call_followup_window(
+                                    state,
+                                    profile="future_use",
+                                ),
+                                "sample_count": 5,
+                                "tag": f"{state.task_family}_gap_late_followup",
+                            },
+                        ))
+                return finalize(PlannerDecision(
+                    thought=f"why 题当前主缺口是目标发现；先重新定位 `{target_object}` 的关键轨迹，再决定后续空间关系检索。",
+                    tool="query_object",
+                    args={"query": target_object, "limit": 24},
+                ))
+            if target_fixture:
+                if self._action_intent_should_defer_long_horizon_gap_query_until_window_expands(
+                    state=state,
+                    gap_type=gap_type,
+                    target_object=target_object,
+                    target_fixture=target_fixture,
+                ):
+                    combined_times = sorted(
+                        [float(value) for value in hints.get("times") or []]
+                        + [float(value) for value in hints.get("input_times") or []]
+                    )
+                    if combined_times:
+                        return finalize(PlannerDecision(
+                            thought=(
+                                f"why 题当前主缺口是目标发现，但当前仍处于最小扩窗层级，"
+                                f"且围绕 `{target_fixture}` 的更晚空间锚点还没建立；先补一次受控 late followup 原始证据，"
+                                "再决定是否升级到长时域空间关系追证。"
+                            ),
+                            tool="sample_sparse_frames",
+                            args={
+                                "start_time": max(combined_times),
+                                "end_time": max(combined_times) + self._action_intent_close_call_followup_window(
+                                    state,
+                                    profile="future_use",
+                                ),
+                                "sample_count": 5,
+                                "tag": f"{state.task_family}_gap_late_followup",
+                            },
+                        ))
+                query_time = self._latest_action_intent_target_spatial_anchor_time(state)
+                if query_time is None:
+                    nodes = self._latest_action_intent_long_horizon_nodes(state)
+                    selected = self._action_intent_select_long_horizon_node(state=state, hints=hints, nodes=nodes) if nodes else None
+                    if selected is not None:
+                        _node, start_time, end_time = selected
+                        query_time = start_time if abs(end_time - start_time) < 0.25 else (start_time + min(end_time, start_time + 1.2)) / 2
+                if query_time is None:
+                    query_time = max(
+                        [float(value) for value in hints.get("times") or []] + [float(value) for value in hints.get("input_times") or []]
+                    ) if (hints.get("times") or hints.get("input_times")) else None
+                return finalize(PlannerDecision(
+                    thought=f"why 题当前主缺口是目标发现；gap 已明确给出目标装置/位置 `{target_fixture}`，先检查关键时刻该位置附近的空间关系，再决定是否需要进一步目标追踪。",
+                    tool="query_spatial_context",
+                    args={"object_name": target_fixture, "time_s": query_time, "limit": 8},
+                ))
+            combined_times = sorted(
+                [float(value) for value in hints.get("times") or []]
+                + [float(value) for value in hints.get("input_times") or []]
+            )
+            if combined_times:
+                return finalize(PlannerDecision(
+                    thought=(
+                        "why 题当前主缺口是目标发现，但观测状态里还没有可追踪的目标对象或位置；"
+                        "先继续补更晚原始证据窗口，再根据新观测决定后续目标检索。"
+                    ),
+                    tool="sample_sparse_frames",
+                    args={
+                        "start_time": max(combined_times),
+                        "end_time": max(combined_times) + self._action_intent_close_call_followup_window(
+                            state,
+                            profile="future_use",
+                        ),
+                        "sample_count": 5,
+                        "tag": f"{state.task_family}_gap_late_followup",
+                    },
+                ))
+            return None
+        if gap_type != "future_outcome":
+            return None
+        target_object = str(primary_gap.get("target_object") or "").strip()
+        target_fixture = str(primary_gap.get("target_fixture") or "").strip()
+        gap_source = str(primary_gap.get("source") or "").strip()
+        close_call_sourced_gap = gap_source in {"verification_gap", "resolution_followup_gap", "verifier"}
+        question_object_hint = str(self._action_intent_question_object_hint(state) or "").strip().lower()
+        same_object_target = bool(target_object) and bool(question_object_hint) and target_object.strip().lower() == question_object_hint
+        explicit_downstream_object_target = bool(target_object) and str(target_object).strip().lower() != question_object_hint
+        combined_times = sorted(
+            [float(value) for value in hints.get("times") or []]
+            + [float(value) for value in hints.get("input_times") or []]
+        )
+        if same_object_target and not target_fixture and combined_times:
+            return finalize(PlannerDecision(
+                thought=(
+                    f"why 题当前主缺口是 future outcome，但缺口仍只锚定到当前动作对象 `{target_object}` 本身；"
+                    "先补一次受控 late followup 原始证据，确认后续是否真的出现该对象的直接使用/状态变化，而不是重复回到 specialized 裁决。"
+                ),
+                tool="sample_sparse_frames",
+                args={
+                    "start_time": max(combined_times),
+                    "end_time": max(combined_times) + self._action_intent_close_call_followup_window(
+                        state,
+                        profile="future_use",
+                    ),
+                    "sample_count": 5,
+                    "tag": f"{state.task_family}_gap_late_followup",
+                },
+            ))
+        if target_object:
+            if self._action_intent_should_defer_long_horizon_gap_query_until_window_expands(
+                state=state,
+                gap_type=gap_type,
+                target_object=target_object,
+                target_fixture=target_fixture,
+            ):
+                if combined_times:
+                    return finalize(PlannerDecision(
+                        thought=(
+                            f"why 题当前主缺口是 future outcome，但当前仍处于最小扩窗层级，"
+                            f"且还没有 `{target_object}` 的更晚锚点；先补一次受控 late followup 原始证据，"
+                            "确认是否真的需要升级到长时域目标追证。"
+                        ),
+                        tool="sample_sparse_frames",
+                        args={
+                            "start_time": max(combined_times),
+                            "end_time": max(combined_times) + self._action_intent_close_call_followup_window(
+                                state,
+                                profile="future_use",
+                            ),
+                            "sample_count": 5,
+                            "tag": f"{state.task_family}_gap_late_followup",
+                        },
+                    ))
+            nodes = self._latest_action_intent_long_horizon_nodes(state, object_hint=target_object)
+            if nodes:
+                anchor_time = self._latest_action_intent_target_spatial_anchor_time(state)
+                if anchor_time is not None:
+                    return finalize(PlannerDecision(
+                        thought=f"why 题当前主缺口是 future outcome；已存在更晚的 `{target_object}` 轨迹，先直接检查其更晚时段与目标位置/装置的关系。",
+                        tool="query_spatial_context",
+                        args={"object_name": target_object, "time_s": anchor_time, "limit": 8},
+                    ))
+            if close_call_sourced_gap and explicit_downstream_object_target and self._search_window_level(state) == 0:
+                return finalize(PlannerDecision(
+                    thought=(
+                        f"why 题当前主缺口是 future outcome，`{target_object}` 仍缺少更晚真实锚点；"
+                        "先补一次受控 late followup 原始证据，再决定是否需要继续对象追踪或回到 specialized 裁决。"
+                    ),
+                    tool="sample_sparse_frames",
+                    args={
+                        "start_time": max(
+                            [float(value) for value in hints.get('times') or []]
+                            + [float(value) for value in hints.get('input_times') or []]
+                        ),
+                        "end_time": max(
+                            [float(value) for value in hints.get('times') or []]
+                            + [float(value) for value in hints.get('input_times') or []]
+                        ) + self._action_intent_close_call_followup_window(
+                            state,
+                            profile="future_use",
+                        ),
+                        "sample_count": 5,
+                        "tag": f"{state.task_family}_gap_late_followup",
+                    },
+                ))
+            return finalize(PlannerDecision(
+                thought=f"why 题当前主缺口是 future outcome；结构化竞争摘要已明确下游对象 `{target_object}`，先重新定位它的更晚轨迹，再判断最终用途/落点。",
+                tool="query_object",
+                args={"query": target_object, "limit": 24},
+            ))
+        if target_fixture:
+            combined_times = sorted(
+                [float(value) for value in hints.get("times") or []]
+                + [float(value) for value in hints.get("input_times") or []]
+            )
+            has_post_action_input_anchor = bool(hints.get("input_times")) and bool(hints.get("times")) and max(
+                float(value) for value in hints.get("input_times") or []
+            ) > max(float(value) for value in hints.get("times") or [])
+            query_time = self._latest_action_intent_target_spatial_anchor_time(state)
+            if close_call_sourced_gap and query_time is None and has_post_action_input_anchor and combined_times:
+                self._state_add_hypothesis(
+                    state,
+                    "primary_gap_recovery_trace=future_outcome->query_spatial_context",
+                )
+                return finalize(PlannerDecision(
+                    thought=(
+                        f"why 题当前主缺口是 future outcome，且只知道候选位置 `{target_fixture}`；"
+                        "当前虽然规范下一步应是空间确认，但后动作窗口还没看够，先补一次受控 late followup 原始证据。"
+                    ),
+                    tool="sample_sparse_frames",
+                    args={
+                        "start_time": max(combined_times),
+                        "end_time": max(combined_times) + self._action_intent_close_call_followup_window(
+                            state,
+                            profile="future_use",
+                        ),
+                        "sample_count": 5,
+                        "tag": f"{state.task_family}_gap_late_followup",
+                    },
+                ))
+            if self._action_intent_should_defer_long_horizon_gap_query_until_window_expands(
+                state=state,
+                gap_type=gap_type,
+                target_object=target_object,
+                target_fixture=target_fixture,
+            ):
+                if combined_times:
+                    return finalize(PlannerDecision(
+                        thought=(
+                            f"why 题当前主缺口是 future outcome，但当前仍处于最小扩窗层级，"
+                            f"且围绕 `{target_fixture}` 的更晚空间锚点还没建立；先补一次受控 late followup 原始证据，"
+                            "再决定是否升级到长时域空间关系追证。"
+                        ),
+                        tool="sample_sparse_frames",
+                        args={
+                            "start_time": max(combined_times),
+                            "end_time": max(combined_times) + self._action_intent_close_call_followup_window(
+                                state,
+                                profile="future_use",
+                            ),
+                            "sample_count": 5,
+                            "tag": f"{state.task_family}_gap_late_followup",
+                        },
+                    ))
+            if query_time is None:
+                query_time = self._action_intent_latest_long_horizon_anchor_time_from_nodes(state=state, hints=hints)
+            if query_time is None:
+                query_time = max(
+                    [float(value) for value in hints.get("times") or []] + [float(value) for value in hints.get("input_times") or []]
+                ) if (hints.get("times") or hints.get("input_times")) else None
+            return finalize(PlannerDecision(
+                thought=f"why 题当前主缺口是 future outcome；当前虽然还没定位到下游对象，但 gap 已明确指向装置/位置 `{target_fixture}`，先直接检查更晚时刻该位置附近的空间关系。",
+                tool="query_spatial_context",
+                args={"object_name": target_fixture, "time_s": query_time, "limit": 8},
+            ))
+        later_target_revisit = self._build_action_intent_finalize_withheld_mixed_horizon_later_target_revisit_decision(
+            state=state,
+            hints=hints,
+            thought="why 题当前主缺口是更晚结果/用途证据；优先沿更晚候选目标继续追真实落点，而不是停留在近窗解释。",
+        )
+        if later_target_revisit is not None:
+            return finalize(later_target_revisit)
+        return finalize(self._build_action_intent_finalize_withheld_long_horizon_revisit_decision(
+            state=state,
+            hints=hints,
+            thought="why 题当前主缺口是 future outcome；继续沿长时域目标节点追更晚用途/最终落点，旧的 specialized recovery 仅作为兜底。",
+        ))
+
+    def _record_action_intent_primary_gap_recovery_trace(
+        self,
+        *,
+        state: AgentState,
+        gap_type: str,
+        decision: PlannerDecision | None,
+    ) -> None:
+        normalized_gap_type = str(gap_type or "").strip()
+        if normalized_gap_type not in {
+            "precondition",
+            "immediate_outcome",
+            "future_outcome",
+            "relation_confirmation",
+            "target_discovery",
+        }:
+            return
+        if decision is None or not str(decision.tool or "").strip():
+            return
+        self._state_add_hypothesis(
+            state,
+            f"primary_gap_recovery_trace={normalized_gap_type}->{decision.tool}",
+        )
+
+    def _recover_action_intent_immediate_outcome_gap(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        result: dict[str, Any] | None,
+        blocker_hint: str,
+    ) -> PlannerDecision | None:
+        normalized_hint = blocker_hint or "post_action_evidence"
+        forced_transition_probe = self._build_action_intent_verifier_blocked_forced_transition_probe_decision(
+            state=state,
+            hints=hints,
+            result=result,
+            blocker_hint=normalized_hint,
+        )
+        if forced_transition_probe is not None:
+            return forced_transition_probe
+        if self._latest_action_intent_followup_end_time(state) is not None:
+            extra_followup = self._build_action_intent_extra_followup_sampling_decision(
+                state=state,
+                hints=hints,
+                focus="primary_gap_immediate_outcome",
+                window_s=self._action_intent_close_call_followup_window(state, profile="post_action"),
+            )
+            if extra_followup is not None:
+                return extra_followup
+        transition_probe = self._build_action_intent_transition_probe_decision(
+            state=state,
+            hints=hints,
+            result=result,
+            thought="why 题当前主缺口是动作后的即时结果证据；先围绕动作尾部补更密的关键帧，确认是否真的出现决定性直接结果，再考虑更晚用途。",
+        )
+        if transition_probe is not None:
+            return transition_probe
+        followup = self._build_action_intent_followup_sampling_decision(state=state, hints=hints)
+        if followup is not None:
+            return followup
         extra_followup = self._build_action_intent_extra_followup_sampling_decision(
             state=state,
             hints=hints,
-            focus=str(payload.get("needed_observation") or "verifier_blocked_close_call_recovery"),
-            window_s=8.0 if tool_name == "resolve_action_intent_future_use" else 6.0,
+            focus="primary_gap_immediate_outcome",
+            window_s=self._action_intent_close_call_followup_window(state, profile="post_action"),
         )
         if extra_followup is not None:
             return extra_followup
-        if tool_name == "resolve_action_intent_future_use":
-            return self._build_action_intent_future_use_resolution_decision(
-                state=state,
-                hints=hints,
-                result=payload,
-                thought="why 题被 verifier 拦下后，回到后续用途专用裁决并用更新后的证据重判。",
+        combined_times = sorted(
+            [float(value) for value in hints.get("times") or []]
+            + [float(value) for value in hints.get("input_times") or []]
+        )
+        if combined_times:
+            return PlannerDecision(
+                thought="why 题当前主缺口是动作后的即时结果证据；现有近窗补证路径都未命中时，先继续保守扩展动作后短窗口原始证据，而不是回到 specialized 裁决。",
+                tool="sample_sparse_frames",
+                args={
+                    "start_time": max(combined_times),
+                    "end_time": max(combined_times) + self._action_intent_close_call_followup_window(state, profile="post_action"),
+                    "sample_count": 5,
+                    "tag": f"{state.task_family}_gap_followup",
+                },
             )
-        if tool_name == "resolve_action_intent_pairwise":
-            return self._build_action_intent_pairwise_resolution_decision(
-                state=state,
-                hints=hints,
-                result=payload,
-                thought="why 题被 verifier 拦下后，回到 top-2 专用裁决并用更新后的证据重判。",
-            )
-        return None
+        return PlannerDecision(
+            thought="why 题当前主缺口是动作后的即时结果证据；现有近窗补证路径都未命中时，先重新抽当前动作后的短窗口关键帧，而不是回到 specialized 裁决。",
+            tool="sample_sparse_frames",
+            args={
+                "start_time": None,
+                "end_time": None,
+                "sample_count": 4,
+                "tag": f"{state.task_family}_segment",
+            },
+        )
 
     def _action_intent_verifier_blocked_prefers_forced_transition_probe(
         self,
@@ -14553,7 +16206,7 @@ class GraphAgentPlanner:
             return False
         if self._action_intent_has_transition_followup_frames(state):
             return False
-        if blocker_hint not in {"post_action_evidence", "future_use_close_call", "pairwise_close_call"}:
+        if not self._action_intent_blocker_is_post_action_family(state=state, blocker_hint=blocker_hint):
             return False
         if any(
             isinstance(item, str)
@@ -14561,11 +16214,10 @@ class GraphAgentPlanner:
             for item in list(getattr(state, "working_memory", []))[-12:]
         ):
             return True
-        needed_profile = self._action_intent_needed_observation_profile(state=state, result=result)
-        if needed_profile["prefer_state_change_only"]:
-            return True
-        support_text = self._action_intent_result_support_text(result)
-        combined_text = f"{support_text} {str(result.get('needed_observation') or '').lower()}".strip()
+        support_text = " ".join(
+            str((result or {}).get(key) or "")
+            for key in ("reason", "decisive_observation", "direct_effect", "downstream_action")
+        ).strip().lower()
         transition_first_markers = (
             "missing_direct_effect",
             "direct physical effect",
@@ -14585,7 +16237,7 @@ class GraphAgentPlanner:
             "归零",
             "显示",
         )
-        return any(marker in combined_text for marker in transition_first_markers)
+        return any(marker in support_text for marker in transition_first_markers)
 
     def _build_action_intent_verifier_blocked_forced_transition_probe_decision(
         self,
@@ -14626,7 +16278,7 @@ class GraphAgentPlanner:
     ) -> str:
         if not self._is_action_intent_task(state) or not isinstance(result, dict):
             return ""
-        if blocker_hint not in {"post_action_evidence", "future_use_close_call", "pairwise_close_call"}:
+        if not self._action_intent_blocker_is_post_action_family(state=state, blocker_hint=blocker_hint):
             return ""
         choices = [str(choice) for choice in getattr(state, "choices", [])]
         if not choices:
@@ -15235,6 +16887,131 @@ class GraphAgentPlanner:
         combined_times = sorted([float(value) for value in hints.get("times") or []] + [float(value) for value in hints.get("input_times") or []])
         bbox = hints.get("bbox")
         ingredient_name = hints.get("ingredient_name")
+        latest_resolution = self._latest_action_intent_resolution_payload(state)
+        latest_resolution_tool = latest_resolution[0] if latest_resolution is not None else ""
+
+        if (
+            self._is_action_intent_task(state)
+            and decision.tool in {
+                "finish",
+                "rank_choices_from_state",
+                "infer_action_intent",
+                "resolve_action_intent_pairwise",
+                "resolve_action_intent_future_use",
+            }
+            and self._should_continue_search_from_sufficiency(state)
+        ):
+            candidate_plan = self._best_state_candidate_plan(state=state, hints=hints, used_tools=used_tools)
+            if (
+                candidate_plan is not None
+                and self._should_continue_search_from_sufficiency(state)
+                and candidate_plan.decision.tool == "finish"
+            ):
+                candidate_plan = None
+            if candidate_plan is not None and candidate_plan.decision.tool != decision.tool:
+                self._state_add_memory(
+                    state,
+                    f"planner_override enforce_action_intent_sufficiency={decision.tool} -> {candidate_plan.decision.tool}",
+                )
+                return candidate_plan.decision
+            fallback_recovery = self._build_action_intent_specialized_recovery_decision(
+                state=state,
+                hints=hints,
+                thought="why 题在 enforce 阶段仍被 structured sufficiency 判为缺证；优先回到当前题时间窗补关键帧或继续追对象/空间证据，而不是直接放行判断型工具。",
+            )
+            if fallback_recovery is not None and fallback_recovery.tool not in {decision.tool, "finish"}:
+                preferred_candidate = self._prefer_action_intent_state_candidate_over_generic_recovery(
+                    state=state,
+                    hints=hints,
+                    used_tools=used_tools,
+                    recovered=fallback_recovery,
+                    memory_prefix="planner_guard=enforce_sufficiency_prefers_state_candidate_over_generic_recovery",
+                )
+                if preferred_candidate is not None:
+                    return preferred_candidate
+                self._state_add_memory(
+                    state,
+                    f"planner_override enforce_action_intent_sufficiency_fallback={decision.tool} -> {fallback_recovery.tool}",
+                )
+                return fallback_recovery
+            safe_fallback = self._safe_fallback_decision(state=state, hints=hints)
+            if safe_fallback.tool != decision.tool:
+                self._state_add_memory(
+                    state,
+                    f"planner_override enforce_action_intent_sufficiency_safe_fallback={decision.tool} -> {safe_fallback.tool}",
+                )
+                return safe_fallback
+
+        primary_gap = self._action_intent_primary_gap(state) if self._is_action_intent_task(state) else None
+        primary_gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
+        primary_gap_target_object = str(primary_gap.get("target_object") or "").strip() if isinstance(primary_gap, dict) else ""
+        primary_gap_target_fixture = str(primary_gap.get("target_fixture") or "").strip() if isinstance(primary_gap, dict) else ""
+        future_fixture_level_zero_context_gap = (
+            self._is_action_intent_task(state)
+            and decision.tool == "query_spatial_context"
+            and primary_gap_type == "future_outcome"
+            and not primary_gap_target_object
+            and bool(primary_gap_target_fixture)
+            and self._action_intent_explicit_level_zero_budget_prefers_local_followup(
+                state=state,
+                gap_type=primary_gap_type,
+                target_object=primary_gap_target_object,
+                target_fixture=primary_gap_target_fixture,
+            )
+            and self._should_continue_search_from_sufficiency(state)
+        )
+        action_intent_context_candidate_reroute = (
+            self._is_action_intent_task(state)
+            and decision.tool in {"query_object", "query_spatial_context", "query_time"}
+            and self._should_continue_search_from_sufficiency(state)
+            and (
+                self._action_intent_needs_current_scope_raw_evidence(state)
+                or future_fixture_level_zero_context_gap
+                or primary_gap_type in {"future_outcome", "relation_confirmation", "target_discovery"}
+            )
+        )
+        if (
+            action_intent_context_candidate_reroute
+        ):
+            candidate_plan = self._best_state_candidate_plan(state=state, hints=hints, used_tools=used_tools)
+            if (
+                candidate_plan is not None
+                and candidate_plan.decision.tool not in {"finish", "rank_choices_from_state", decision.tool}
+            ):
+                self._state_add_memory(
+                    state,
+                    f"planner_override enforce_action_intent_context_gap={decision.tool} -> {candidate_plan.decision.tool}",
+                )
+                return candidate_plan.decision
+        if (
+            self._is_action_intent_task(state)
+            and decision.tool in {"query_object", "query_spatial_context", "query_time"}
+            and (
+                self._action_intent_needs_current_scope_raw_evidence(state)
+                or future_fixture_level_zero_context_gap
+            )
+            and self._should_continue_search_from_sufficiency(state)
+        ):
+            fallback_recovery = self._build_action_intent_specialized_recovery_decision(
+                state=state,
+                hints=hints,
+                thought="why 题在 enforce 阶段已明确当前主缺口是 precondition/post-action 原始证据；若 object/spatial revisit 没有更强 targeted candidate 接管，就先回到对应时间窗补原始证据，而不是放行当前长时域定位动作。",
+            )
+            if fallback_recovery is not None and fallback_recovery.tool not in {decision.tool, "finish"}:
+                preferred_candidate = self._prefer_action_intent_state_candidate_over_generic_recovery(
+                    state=state,
+                    hints=hints,
+                    used_tools=used_tools,
+                    recovered=fallback_recovery,
+                    memory_prefix="planner_guard=enforce_context_gap_prefers_state_candidate_over_generic_recovery",
+                )
+                if preferred_candidate is not None:
+                    return preferred_candidate
+                self._state_add_memory(
+                    state,
+                    f"planner_override enforce_action_intent_context_gap_fallback={decision.tool} -> {fallback_recovery.tool}",
+                )
+                return fallback_recovery
 
         structured_requirement = self._enforce_structured_finish_requirement(
             state=state,
