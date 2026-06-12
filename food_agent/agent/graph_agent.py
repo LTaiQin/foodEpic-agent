@@ -1544,103 +1544,28 @@ class GraphAgent:
         raw_result: dict[str, Any],
         state: AgentState,
     ) -> bool:
-        index = self._coerce_choice_index(raw_result.get("best_index"), state.choices)
-        if index is None:
-            return False
-        choices = [str(choice) for choice in getattr(state, "choices", [])]
-        best_choice = choices[index].lower()
-        categories = selected_choice_categories(choices, [index])
-        best_categories = set(categories.get(index) or set())
         text = self._action_intent_resolution_observation_text(raw_result)
         if not text:
             return False
         if self._action_intent_text_has_negative_evidence(text):
             return True
-        if self._action_intent_choice_is_final_placement_candidate(best_choice):
-            if self._action_intent_choice_has_explicit_final_placement_evidence(best_choice, text):
-                return False
-            if "not final placement" in text or "暂时放在" in text:
-                return False
-            if self._action_intent_choice_is_temporary_relocation_not_storage(
-                choice=best_choice,
-                support=text,
-                contradiction=text,
-                action_object="",
-                global_context="",
-            ):
-                return False
-        if self._action_intent_choice_has_explicit_workspace_or_downstream_chain(
-            question=str(getattr(state, "question", "") or "").lower(),
-            choice=best_choice,
-            text=text,
-            action_object=self._action_intent_question_object(str(getattr(state, "question", "") or "").lower()),
-            global_context=self._action_intent_scoped_global_context(state).lower(),
-        ):
-            return False
-        if any(
-            token in text
-            for token in (
-                "whether",
-                "still unclear",
-                "unclear",
-                "not visible",
-                "not shown",
-                "cannot tell",
-                "can't tell",
-                "可能",
-                "是否",
-                "不明确",
-            )
-        ):
+        has_uncertainty = self._action_intent_support_has_mixed_horizon_uncertainty(text)
+        has_nonexclusive_anchor = self._action_intent_support_has_nonexclusive_label_anchor(text) or self._action_intent_support_has_nonexclusive_nearby_anchor(text)
+        has_exclusive_immediate = self._action_intent_support_has_exclusive_immediate_micro_outcome_evidence(text)
+        has_exact_later = (
+            self._action_intent_support_has_explicit_final_location_evidence(text)
+            or self._action_intent_support_has_explicit_followup_outcome_evidence(text)
+            or self._action_intent_support_has_exact_downstream_chain(text)
+        )
+        if has_nonexclusive_anchor and has_exact_later:
             return True
-        if any(
-            token in text
-            for token in (
-                "not yet visible whether",
-                "it is not yet visible whether",
-                "later destination is still unresolved",
-                "later outcome is still unresolved",
-                "exact next use is still uncertain",
-                "final location remains unclear",
-                "goes back into the fridge",
-                "put back in the fridge",
-                "used on the scale",
-                "moving over the plate",
-                "tipped toward the sink",
-                "later destination",
-                "later outcome",
-                "最终位置",
-                "之后是否",
-                "尚未显示是否",
-                "仍不清楚是否",
-                "放回冰箱",
-                "用于称量",
-                "移到盘子上方",
-                "朝水槽倾倒",
-            )
-        ):
+        if has_uncertainty:
             return True
-        best_is_immediate = self._action_intent_choice_is_immediate_micro_outcome_candidate(best_choice, best_categories)
-        later_outcome_categories = {
-            "final_place_return",
-            "measure_weigh",
-            "transfer_contents",
-            "serve_consume",
-            "clean_dry",
-            "food_prep",
-            "discard",
-        }
-        if not (
-            best_is_immediate
-            or bool(best_categories & later_outcome_categories)
-            or self._action_intent_resolution_has_long_horizon_gap(state)
-        ):
+        if has_exact_later or has_exclusive_immediate:
             return False
-        if best_categories & later_outcome_categories:
-            return not self._action_intent_choice_has_explicit_later_outcome_evidence(best_choice, best_categories, text)
-        if best_is_immediate:
-            return not self._action_intent_choice_has_explicit_immediate_micro_outcome_evidence(best_choice, text)
-        return not self._action_intent_choice_has_explicit_later_outcome_evidence(best_choice, best_categories, text)
+        if self._action_intent_resolution_has_long_horizon_gap(state) and has_nonexclusive_anchor:
+            return True
+        return False
 
     def _action_intent_resolution_should_withhold_mixed_horizon_later_target_overclaim(
         self,
@@ -1655,15 +1580,15 @@ class GraphAgent:
         ):
             if not allow_weak_immediate_inspection:
                 return False
-        index = self._coerce_choice_index(raw_result.get("best_index"), state.choices)
-        if index is None:
+        combined_text = self._action_intent_resolution_observation_text(raw_result)
+        if not combined_text:
             return False
-        choices = [str(choice) for choice in getattr(state, "choices", [])]
-        categories_by_index = selected_choice_categories(choices, [index])
-        best_choice = choices[index].lower()
-        best_categories = set(categories_by_index.get(index) or set())
-        best_is_immediate = self._action_intent_choice_is_immediate_micro_outcome_candidate(best_choice, best_categories)
-        if not best_is_immediate:
+        has_immediate_anchor = (
+            self._action_intent_support_has_nonexclusive_label_anchor(combined_text)
+            or self._action_intent_support_has_nonexclusive_nearby_anchor(combined_text)
+            or self._action_intent_support_has_exclusive_immediate_micro_outcome_evidence(combined_text)
+        )
+        if not has_immediate_anchor:
             if not (
                 allow_weak_immediate_inspection
                 and self._action_intent_resolution_should_withhold_weak_cooking_inspection_claim(
@@ -1672,10 +1597,7 @@ class GraphAgent:
                 )
             ):
                 return False
-        if not best_is_immediate and not allow_weak_immediate_inspection:
-            return False
-        combined_text = self._action_intent_resolution_observation_text(raw_result)
-        if not combined_text:
+        if not has_immediate_anchor and not allow_weak_immediate_inspection:
             return False
         if self._action_intent_resolution_has_long_horizon_gap(state):
             return True
@@ -1700,58 +1622,45 @@ class GraphAgent:
             )
         )
 
-    def _action_intent_resolution_should_withhold_nonexclusive_concrete_late_anchor_claim(
-        self,
-        *,
-        raw_result: dict[str, Any],
-        state: AgentState,
-    ) -> bool:
-        text = self._action_intent_observation_support_text(raw_result).lower()
-        if not text:
-            return False
-        if not text or self._action_intent_text_has_negative_evidence(text):
-            return False
-        explicit_exclusive_terms = (
-            "reads the label",
-            "reading the label",
-            "read the label",
-            "inspects the label",
-            "looks at the label",
-            "checks the label",
-            "read the printed text",
-            "placed on the scale",
-            "put on the scale",
-            "used on the scale",
-            "used to weigh",
-            "weighed",
-            "put back",
-            "returned to",
-            "stored",
-            "inside the fridge",
-            "into the fridge",
-            "under running water",
-            "turns on the tap",
-            "opened the fridge",
-            "closed the fridge",
-            "poured into",
-            "wiped",
-            "dried",
-            "读标签",
-            "查看标签",
-            "放到秤上",
-            "放上秤",
-            "称量",
-            "放回",
-            "回到冰箱",
-            "打开冰箱",
-            "关上冰箱",
+    def _action_intent_support_has_mixed_horizon_uncertainty(self, text: str) -> bool:
+        text_lc = str(text or "").lower()
+        return any(
+            token in text_lc
+            for token in (
+                "whether",
+                "still unclear",
+                "unclear",
+                "not visible",
+                "not shown",
+                "cannot tell",
+                "can't tell",
+                "not yet visible whether",
+                "it is not yet visible whether",
+                "later destination is still unresolved",
+                "later outcome is still unresolved",
+                "exact next use is still uncertain",
+                "final location remains unclear",
+                "later destination",
+                "later outcome",
+                "可能",
+                "是否",
+                "不明确",
+                "尚未显示是否",
+                "仍不清楚是否",
+                "最终位置",
+            )
         )
-        if any(term in text for term in explicit_exclusive_terms):
-            return False
+
+    def _action_intent_support_has_nonexclusive_label_anchor(self, text: str) -> bool:
+        text_lc = str(text or "").lower()
         label_visibility_terms = (
             "label is visible",
             "label faces the camera",
             "label faces outward",
+            "label facing outward",
+            "front faces outward",
+            "front briefly faces outward",
+            "front side faces outward",
             "front side becomes visible",
             "front side is visible",
             "printed side becomes visible",
@@ -1771,42 +1680,130 @@ class GraphAgent:
             "读标签",
             "查看标签",
         )
-        nearby_placement_terms = (
-            "set beside",
-            "placed beside",
-            "left beside",
-            "left nearby",
-            "set nearby",
-            "placed nearby",
-            "within reach",
-            "set aside",
-            "simply set aside",
-            "near the scale area",
-            "near the counter",
-            "near the counter surface",
-            "near the sink",
-            "near the fridge area",
-            "beside the scale",
-            "beside the counter",
-            "adjacent to the weighing station",
-            "left on the side",
-            "still near",
-            "放在旁边",
-            "放在附近",
-            "顺手放在旁边",
-            "放到一边",
-            "附近",
+        return any(term in text_lc for term in label_visibility_terms) and not any(
+            term in text_lc for term in label_reading_terms
         )
-        label_visible_without_reading = any(term in text for term in label_visibility_terms) and not any(
-            term in text for term in label_reading_terms
+
+    def _action_intent_support_has_nonexclusive_nearby_anchor(self, text: str) -> bool:
+        text_lc = str(text or "").lower()
+        return any(
+            term in text_lc
+            for term in (
+                "set beside",
+                "placed beside",
+                "left beside",
+                "left nearby",
+                "set nearby",
+                "placed nearby",
+                "within reach",
+                "set aside",
+                "simply set aside",
+                "near the scale area",
+                "near the counter",
+                "near the counter surface",
+                "near the sink",
+                "near the fridge area",
+                "beside the scale",
+                "beside the counter",
+                "adjacent to the weighing station",
+                "left on the side",
+                "still near",
+                "放在旁边",
+                "放在附近",
+                "顺手放在旁边",
+                "放到一边",
+                "附近",
+            )
         )
-        if label_visible_without_reading:
+
+    def _action_intent_support_has_exclusive_immediate_micro_outcome_evidence(self, text: str) -> bool:
+        text_lc = str(text or "").lower()
+        if any(
+            token in text_lc
+            for token in (
+                "reads the label",
+                "reading the label",
+                "checks the label",
+                "checked the label",
+                "looks at the label",
+                "examines the label",
+                "reads the date",
+                "checks the date",
+                "printed information is examined",
+                "looking at the printed information",
+                "查看标签",
+                "读取标签",
+                "看标签",
+                "检查日期",
+                "读取日期",
+            )
+        ):
             return True
-        if not any(term in text for term in nearby_placement_terms):
+        if any(
+            token in text_lc
+            for token in (
+                "opened",
+                "opens",
+                "opening the jar",
+                "open the cup immediately",
+                "open the bottle immediately",
+                "uncap the cup immediately",
+                "uncap the bottle immediately",
+                "uncap/open the cup immediately",
+                "uncap/open the bottle immediately",
+                "uncap/open the",
+                "free to uncap/open",
+                "other hand is free to uncap",
+                "other hand is free to open",
+                "free to open the",
+                "free to uncap the",
+                "lid removed",
+                "cap removed",
+                "unscrewed",
+                "uncapped",
+                "打开了",
+                "拧开了",
+                "盖子打开",
+            )
+        ):
+            return True
+        return any(
+            token in text_lc
+            for token in (
+                "display turns on",
+                "screen lights",
+                "powered on",
+                "turned on",
+                "turns it on",
+                "turns on the scale",
+                "reaches to the scale and turns it on",
+                "immediately afterwards the hand reaches to the scale and turns it on",
+                "亮起",
+                "开机",
+                "显示屏亮",
+            )
+        )
+
+    def _action_intent_resolution_should_withhold_nonexclusive_concrete_late_anchor_claim(
+        self,
+        *,
+        raw_result: dict[str, Any],
+        state: AgentState,
+    ) -> bool:
+        text = self._action_intent_observation_support_text(raw_result).lower()
+        if not text:
             return False
-        if self._action_intent_support_has_explicit_final_location_evidence(text):
+        if not text or self._action_intent_text_has_negative_evidence(text):
             return False
-        if self._action_intent_support_has_exact_followup_outcome_evidence(text):
+        if (
+            self._action_intent_support_has_exclusive_immediate_micro_outcome_evidence(text)
+            or self._action_intent_support_has_explicit_final_location_evidence(text)
+            or self._action_intent_support_has_explicit_followup_outcome_evidence(text)
+        ):
+            return False
+        if self._action_intent_support_has_nonexclusive_label_anchor(text):
+            return True
+        if not self._action_intent_support_has_nonexclusive_nearby_anchor(text):
             return False
         return True
 
@@ -2409,6 +2406,9 @@ class GraphAgent:
                 "returned to the fridge",
                 "returned to the shelf",
                 "put back in the fridge",
+                "placed back into the fridge",
+                "back into the fridge compartment",
+                "placed into the fridge compartment",
                 "hung back on the hook",
                 "returned to the drawer",
                 "returned to the cupboard",

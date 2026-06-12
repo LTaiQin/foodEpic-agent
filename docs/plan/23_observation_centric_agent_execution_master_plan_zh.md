@@ -4713,6 +4713,41 @@ Phase 0 审计后的最小真实缺口已经明确：
   - 改为只保护：
     - 不要重新掉回 fixture/target semantic routing
     - 恢复动作仍可由当前 observation gap 解释
+- [x] 本轮又迁移了 2 条 still answer-conditioned 的 mixed-horizon late-target / weak-label-inspection 旧契约测试：
+  - `mixed_horizon_later_target_overclaim_ignores_choice_categories`
+  - `finalizer_withholds_explicit_fridge_return_over_weak_label_inspection`
+- [x] 新契约：
+  - 不再允许：
+    - `choice text / choice category`
+      单独决定 mixed-horizon later-target overclaim 是否成立
+    - `best answer=check label`
+      这种候选排序结论覆盖 observation-side 的明确 fridge return
+  - 只保护：
+    - 只要 observation text 同时出现
+      - 非排他即时锚点
+      - later destination unresolved
+      mixed-horizon later-target helper 就必须稳定保守 withheld
+    - 一旦 observation text 明确闭合
+      - `placed back into the fridge`
+      - `back into the fridge compartment`
+      这类 exact final-location evidence
+      finalizer 必须停止接受弱 `label/front visible` 解释
+- [x] 本轮新增 observation-side helper 覆盖：
+  - 非排他即时锚点新增兼容：
+    - `label facing outward`
+    - `front faces outward`
+    - `front briefly faces outward`
+    - `front side faces outward`
+  - exact final-location 新增兼容：
+    - `placed back into the fridge`
+    - `back into the fridge compartment`
+    - `placed into the fridge compartment`
+- [x] 对应本轮定向回归：
+  - `pytest -q tests/test_graph_agent.py -k 'mixed_horizon_overclaim or mixed_horizon_later_target_overclaim or nonexclusive_concrete_late_anchor or scale_nearby_claim_without_weighing_chain or mixed_horizon_open_vs_weigh or mixed_horizon_label_vs_put_back or mixed_horizon_open_vs_empty or mixed_horizon_open_vs_serve or explicit_fridge_return_over_weak_label_inspection'`
+  - 结果：`14 passed, 1149 deselected`
+- [x] 对应本轮合并回归：
+  - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+  - 结果：`710 passed, 453 deselected`
 
 ---
 
