@@ -3568,6 +3568,51 @@ Phase 0 审计后的最小真实缺口已经明确：
   - 本轮专项回归：
     - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
     - `679 passed, 456 deselected`
+- [x] 本轮继续切掉 `latest specialized resolution tool name -> heuristic fallback branch family` 的 live 分流：
+  - 旧行为：
+    - `planner._heuristic_fallback(...)`
+      里仍保留两整段分支：
+      - `last_tool == resolve_action_intent_pairwise`
+      - `last_tool == resolve_action_intent_future_use`
+    - 即使两段处理的都是“latest resolution payload after why specialized resolution”，
+      仍然会因为 tool identity 不同而走不同恢复链：
+      - 不同 precondition focus
+      - 不同 continue-search memory prefix
+      - 不同 finish thought
+      - 不同 weak-generic / workspace close-call followup focus
+    - 这意味着：
+      - heuristic fallback 中 latest specialized tool name
+      仍然是一个 live branch selector
+  - 当前变化：
+    - 已新增通用 helper：
+      - `planner._action_intent_resolution_observation_focus(...)`
+    - 上述两整段 runtime 分支已合并为一条统一的
+      `resolution payload` 恢复路径
+    - 当前分支选择不再由
+      - `pairwise`
+      - `future_use`
+      这两个 tool identity 决定，
+      而是只看：
+      - `primary_gap`
+      - `blocker_hint`
+      - payload 是否更像 later-outcome uncertainty
+      - payload 是否已有 direct post-action evidence
+      - followup budget / long-horizon coverage
+    - runtime memory / guard 也同步去 specialized family 化：
+      - `resolution_payload_prefers_state_candidate`
+      - `resolution_payload_continue_search`
+      取代旧的 `pairwise_* / future_use_*`
+  - 本轮迁移/新增测试：
+    - `test_planner_resolution_payload_continue_search_prefers_state_candidate_over_generic_recovery`
+    - `test_planner_resolution_payload_continue_search_prefers_state_candidate_when_open_question_recovery_has_no_action`
+    - `test_planner_resolution_payload_continue_search_uses_current_scope_fallback_when_no_generic_or_state_candidate_exists`
+    - `test_planner_action_intent_heuristic_state_candidate_selection_is_not_driven_by_specialized_tool_name`
+  - 本轮定向回归：
+    - `pytest -q tests/test_graph_agent.py -k 'resolution_payload_continue_search or heuristic_state_candidate_selection_is_not_driven_by_specialized_tool_name or resolution_not_ready_recovery_prefers_state_candidate_before_specialized_current_scope_fallback or open_question_recovery_fixture_only_structured_gap_prefers_local_followup or verifier_blocked_infer_transition_recovery_does_not_inject_future_use_tool_name or open_question_missing_direct_outcome_marker_requires_observation_payload_before_transition_recovery'`
+    - `9 passed, 1127 deselected`
+  - 本轮专项回归：
+    - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+    - `680 passed, 456 deselected`
 
 ---
 

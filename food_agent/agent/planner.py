@@ -3824,6 +3824,44 @@ class GraphAgentPlanner:
             return "future_use_outcome_resolution"
         return "future_use_resolution"
 
+    def _action_intent_resolution_observation_focus(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        result: dict[str, Any] | None = None,
+        phase: str,
+        prefers_future_profile: bool,
+    ) -> str:
+        primary_gap = self._action_intent_primary_gap(state) if self._is_action_intent_task(state) else None
+        gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
+        missing_state_change_prereq = any(
+            isinstance(item, str)
+            and item.startswith("action_intent_resolution_withheld_for_missing_state_change_prereq=1")
+            for item in list(getattr(state, "working_memory", []))[-12:]
+        )
+        if phase == "precondition":
+            if missing_state_change_prereq:
+                return "verifier_blocked_missing_state_change_prereq"
+            if self._action_intent_resolution_should_backfill_precondition(
+                state=state,
+                hints=hints,
+                result=result or {},
+            ):
+                return "resolution_precondition_context"
+            return "precondition_before_additional_followup"
+        if gap_type == "immediate_outcome":
+            return "immediate_outcome_resolution"
+        if gap_type == "state_transition_unconfirmed":
+            return "state_transition_resolution"
+        if gap_type == "relation_confirmation":
+            return "relation_confirmation_resolution"
+        if gap_type == "workspace_change_unconfirmed":
+            return "workspace_change_resolution"
+        if gap_type == "future_outcome":
+            return "future_outcome_resolution"
+        return "future_outcome_resolution" if prefers_future_profile else "post_action_resolution"
+
     def _action_intent_pairwise_candidate_indices(
         self,
         *,
@@ -9791,157 +9829,20 @@ class GraphAgentPlanner:
                     "context_notes": context_notes,
                 },
             )
-        if isinstance(last_result, dict) and last_tool.get("tool") == "resolve_action_intent_pairwise" and last_result.get("best_index") is not None:
-            if self._action_intent_resolution_should_backfill_precondition(
+        if (
+            isinstance(last_result, dict)
+            and last_tool.get("tool") in {"resolve_action_intent_pairwise", "resolve_action_intent_future_use"}
+            and last_result.get("best_index") is not None
+        ):
+            latest_resolution_tool = str(last_tool.get("tool") or "")
+            primary_gap = self._action_intent_primary_gap(state)
+            blocker_hint = self._action_intent_verifier_blocker_hint(state)
+            prefers_future_profile = self._action_intent_recovery_prefers_future_profile(
                 state=state,
-                hints=hints,
-                result=last_result,
-            ):
-                precondition = self._build_action_intent_precondition_sampling_decision(
-                    state=state,
-                    hints=hints,
-                    focus=self._action_intent_pairwise_observation_focus(
-                        state=state,
-                        hints=hints,
-                        result=last_result,
-                        phase="precondition",
-                    ),
-                )
-                if precondition is not None:
-                    return precondition
-            if any(
-                isinstance(item, str)
-                and item.startswith("action_intent_resolution_withheld_for_missing_state_change_prereq=1")
-                for item in list(getattr(state, "working_memory", []))[-12:]
-            ) and self._action_intent_followup_attempt_count(state) < self._action_intent_extra_followup_budget(state):
-                extra_followup = self._build_action_intent_extra_followup_sampling_decision(
-                    state=state,
-                    hints=hints,
-                    focus="state_change_prereq_missing_need_more_followup",
-                    window_s=6.0,
-                )
-                if extra_followup is not None:
-                    return extra_followup
-            transition_probe = self._build_action_intent_resolution_transition_recovery_decision(
-                state=state,
-                hints=hints,
-                tool_name="resolve_action_intent_pairwise",
-                result=last_result,
+                blocker_hint=blocker_hint,
+                primary_gap=primary_gap,
+                payload=last_result,
             )
-            if transition_probe is not None:
-                return transition_probe
-            peak_guided = self._build_action_intent_peak_guided_followup_decision(
-                state=state,
-                hints=hints,
-                last_tool=last_tool,
-                last_result=last_result,
-                focus=self._action_intent_pairwise_observation_focus(
-                    state=state,
-                    hints=hints,
-                    result=last_result,
-                    phase="followup",
-                ),
-            )
-            if peak_guided is not None:
-                return peak_guided
-            if (
-                self._action_intent_resolution_needs_more_evidence(
-                    tool_name="resolve_action_intent_pairwise",
-                    result=last_result,
-                )
-                and self._action_intent_followup_attempt_count(state) < self._action_intent_extra_followup_budget(state)
-            ):
-                extra_followup = self._build_action_intent_extra_followup_sampling_decision(
-                    state=state,
-                    hints=hints,
-                    focus=self._action_intent_pairwise_observation_focus(
-                        state=state,
-                        hints=hints,
-                        result=last_result,
-                        phase="followup",
-                    ),
-                )
-                if extra_followup is not None:
-                    return extra_followup
-            if self._action_intent_result_is_weak_generic_claim(state=state, result=last_result):
-                if self._action_intent_followup_attempt_count(state) < self._action_intent_extra_followup_budget(state):
-                    extra_followup = self._build_action_intent_extra_followup_sampling_decision(
-                        state=state,
-                        hints=hints,
-                        focus="weak_generic_pairwise_claim_needs_direct_outcome",
-                        window_s=6.0,
-                    )
-                    if extra_followup is not None:
-                        return extra_followup
-            if self._action_intent_result_is_workspace_or_final_placement_close_call(state=state, result=last_result):
-                if self._action_intent_followup_attempt_count(state) < self._action_intent_extra_followup_budget(state):
-                    extra_followup = self._build_action_intent_extra_followup_sampling_decision(
-                        state=state,
-                        hints=hints,
-                        focus="workspace_or_final_placement_pairwise_claim_needs_direct_outcome",
-                        window_s=8.8,
-                    )
-                    if extra_followup is not None:
-                        return extra_followup
-            if not self._action_intent_resolution_payload_is_ready_to_finish(state=state, payload=last_result):
-                return self._build_action_intent_resolution_not_ready_recovery(
-                    state=state,
-                    hints=hints,
-                    used_tools=used_tools,
-                    specialized_recovery_thought="why 题二选一裁决仍明确承认证据不够，不能直接结束；先恢复当前题时间窗关键帧或专用判断，再继续追决定性结果证据。",
-                    state_candidate_guard="pairwise_resolution_prefers_state_candidate",
-                    generic_resample_thought="why 题二选一裁决仍明确承认证据不够，当前又没有可直接复用的时间锚点；退回当前题动作片段重抽，而不是直接结束。",
-                )
-            if self._should_continue_search_from_sufficiency(state):
-                recovered = self._recover_from_open_questions(state=state, hints=hints, used_tools=used_tools)
-                if recovered is not None and recovered.tool not in {"finish", "rank_choices_from_state"}:
-                    preferred_candidate = self._prefer_action_intent_state_candidate_over_generic_recovery(
-                        state=state,
-                        hints=hints,
-                        used_tools=used_tools,
-                        recovered=recovered,
-                        memory_prefix="planner_guard=verifier_blocked_finish_prefers_state_candidate_over_generic_recovery",
-                    )
-                    if preferred_candidate is not None:
-                        return preferred_candidate
-                    self._state_add_memory(
-                        state,
-                        f"planner_override pairwise_resolution_continue_search={recovered.tool}",
-                    )
-                    return recovered
-                candidate_plan = self._best_state_candidate_plan(state=state, hints=hints, used_tools=used_tools)
-                if candidate_plan is not None and candidate_plan.decision.tool not in {"finish", "rank_choices_from_state"}:
-                    self._state_add_memory(
-                        state,
-                        f"planner_guard=pairwise_resolution_continue_search_prefers_state_candidate={candidate_plan.decision.tool}",
-                    )
-                    return candidate_plan.decision
-                current_scope_recovery = self._build_action_intent_specialized_recovery_decision(
-                    state=state,
-                    hints=hints,
-                    thought="why 题二选一裁决虽然已有一轮结果，但 structured sufficiency 仍明确要求继续补证；当前又没有 generic recovery 或 targeted candidate 接管时，先回到当前题时间窗补关键帧，而不是直接 finish。",
-                )
-                if current_scope_recovery is not None and current_scope_recovery.tool not in {"finish", "rank_choices_from_state"}:
-                    self._state_add_memory(
-                        state,
-                        f"planner_override pairwise_resolution_continue_search_current_scope={current_scope_recovery.tool}",
-                    )
-                    return current_scope_recovery
-            best_index = int(last_result["best_index"])
-            return PlannerDecision(
-                thought="why 题二选一裁决已完成，直接结束。",
-                tool="finish",
-                args={
-                    "prediction": best_index,
-                    "answer": str(last_result.get("answer") or state.choices[best_index]),
-                    "confidence": float(last_result.get("confidence") or 0.0),
-                },
-                done=True,
-                answer=str(last_result.get("answer") or state.choices[best_index]),
-                prediction=best_index,
-                confidence=float(last_result.get("confidence") or 0.0),
-            )
-        if isinstance(last_result, dict) and last_tool.get("tool") == "resolve_action_intent_future_use" and last_result.get("best_index") is not None:
             if any(
                 isinstance(item, str)
                 and item.startswith("action_intent_resolution_withheld_for_weak_surface_wiping_evidence=1")
@@ -9963,33 +9864,29 @@ class GraphAgentPlanner:
                 precondition = self._build_action_intent_precondition_sampling_decision(
                     state=state,
                     hints=hints,
-                    focus=self._action_intent_future_use_observation_focus(
+                    focus=self._action_intent_resolution_observation_focus(
                         state=state,
                         hints=hints,
                         result=last_result,
                         phase="precondition",
+                        prefers_future_profile=prefers_future_profile,
                     ),
                 )
                 if precondition is not None:
                     return precondition
-            if self._action_intent_result_has_direct_post_action_evidence(last_result) and not self._action_intent_resolution_needs_more_evidence(
-                tool_name="resolve_action_intent_future_use",
-                result=last_result,
-            ):
-                best_index = int(last_result["best_index"])
-                return PlannerDecision(
-                    thought="why 题后续用途专用裁决已经给出决定性动作后证据，直接结束。",
-                    tool="finish",
-                    args={
-                        "prediction": best_index,
-                        "answer": str(last_result.get("answer") or state.choices[best_index]),
-                        "confidence": float(last_result.get("confidence") or 0.0),
-                    },
-                    done=True,
-                    answer=str(last_result.get("answer") or state.choices[best_index]),
-                    prediction=best_index,
-                    confidence=float(last_result.get("confidence") or 0.0),
+            if any(
+                isinstance(item, str)
+                and item.startswith("action_intent_resolution_withheld_for_missing_state_change_prereq=1")
+                for item in list(getattr(state, "working_memory", []))[-12:]
+            ) and self._action_intent_followup_attempt_count(state) < self._action_intent_extra_followup_budget(state):
+                extra_followup = self._build_action_intent_extra_followup_sampling_decision(
+                    state=state,
+                    hints=hints,
+                    focus="state_change_prereq_missing_need_more_followup",
+                    window_s=6.0,
                 )
+                if extra_followup is not None:
+                    return extra_followup
             if any(
                 isinstance(item, str)
                 and item.startswith("action_intent_resolution_withheld_for_weak_cooking_inspection_evidence=1")
@@ -10004,8 +9901,27 @@ class GraphAgentPlanner:
                 )
                 if peak_guided is not None:
                     return peak_guided
+            if self._action_intent_result_has_direct_post_action_evidence(last_result) and not self._action_intent_resolution_needs_more_evidence(
+                tool_name=latest_resolution_tool,
+                result=last_result,
+            ):
+                best_index = int(last_result["best_index"])
+                return PlannerDecision(
+                    thought="why 题当前 resolution payload 已给出决定性动作后证据，直接结束。",
+                    tool="finish",
+                    args={
+                        "prediction": best_index,
+                        "answer": str(last_result.get("answer") or state.choices[best_index]),
+                        "confidence": float(last_result.get("confidence") or 0.0),
+                    },
+                    done=True,
+                    answer=str(last_result.get("answer") or state.choices[best_index]),
+                    prediction=best_index,
+                    confidence=float(last_result.get("confidence") or 0.0),
+                )
             if (
-                self._action_intent_followup_attempt_count(state) >= 2
+                prefers_future_profile
+                and self._action_intent_followup_attempt_count(state) >= 2
                 and self._latest_action_intent_long_horizon_nodes(state)
                 and not self._action_intent_result_has_direct_post_action_evidence(last_result)
             ):
@@ -10020,7 +9936,7 @@ class GraphAgentPlanner:
             transition_probe = self._build_action_intent_resolution_transition_recovery_decision(
                 state=state,
                 hints=hints,
-                tool_name="resolve_action_intent_future_use",
+                tool_name=latest_resolution_tool,
                 result=last_result,
             )
             if transition_probe is not None:
@@ -10030,18 +9946,19 @@ class GraphAgentPlanner:
                 hints=hints,
                 last_tool=last_tool,
                 last_result=last_result,
-                focus=self._action_intent_future_use_observation_focus(
+                focus=self._action_intent_resolution_observation_focus(
                     state=state,
                     hints=hints,
                     result=last_result,
                     phase="followup",
+                    prefers_future_profile=prefers_future_profile,
                 ),
             )
             if peak_guided is not None:
                 return peak_guided
             if (
                 self._action_intent_resolution_needs_more_evidence(
-                    tool_name="resolve_action_intent_future_use",
+                    tool_name=latest_resolution_tool,
                     result=last_result,
                 )
                 and self._action_intent_followup_attempt_count(state) < self._action_intent_extra_followup_budget(state)
@@ -10049,11 +9966,12 @@ class GraphAgentPlanner:
                 extra_followup = self._build_action_intent_extra_followup_sampling_decision(
                     state=state,
                     hints=hints,
-                    focus=self._action_intent_future_use_observation_focus(
+                    focus=self._action_intent_resolution_observation_focus(
                         state=state,
                         hints=hints,
                         result=last_result,
                         phase="followup",
+                        prefers_future_profile=prefers_future_profile,
                     ),
                 )
                 if extra_followup is not None:
@@ -10063,8 +9981,8 @@ class GraphAgentPlanner:
                     extra_followup = self._build_action_intent_extra_followup_sampling_decision(
                         state=state,
                         hints=hints,
-                        focus="weak_generic_future_use_claim_needs_direct_outcome",
-                        window_s=8.0,
+                        focus="weak_generic_resolution_claim_needs_direct_outcome",
+                        window_s=8.0 if prefers_future_profile else 6.0,
                     )
                     if extra_followup is not None:
                         return extra_followup
@@ -10073,7 +9991,7 @@ class GraphAgentPlanner:
                     extra_followup = self._build_action_intent_extra_followup_sampling_decision(
                         state=state,
                         hints=hints,
-                        focus="workspace_or_final_placement_future_use_claim_needs_direct_outcome",
+                        focus="workspace_or_final_placement_resolution_claim_needs_direct_outcome",
                         window_s=8.8,
                     )
                     if extra_followup is not None:
@@ -10083,9 +10001,9 @@ class GraphAgentPlanner:
                     state=state,
                     hints=hints,
                     used_tools=used_tools,
-                    specialized_recovery_thought="why 题后续用途裁决仍明确承认证据不够，不能直接结束；先恢复当前题时间窗关键帧或专用判断，再继续追决定性动作后证据。",
-                    state_candidate_guard="future_use_resolution_prefers_state_candidate",
-                    generic_resample_thought="why 题后续用途裁决仍明确承认证据不够，当前又没有可直接复用的时间锚点；退回当前题动作片段重抽，而不是直接结束。",
+                    specialized_recovery_thought="why 题当前 resolution payload 仍明确承认证据不够，不能直接结束；先恢复当前题时间窗关键帧或专用判断，再继续追决定性结果证据。",
+                    state_candidate_guard="resolution_payload_prefers_state_candidate",
+                    generic_resample_thought="why 题当前 resolution payload 仍明确承认证据不够，当前又没有可直接复用的时间锚点；退回当前题动作片段重抽，而不是直接结束。",
                 )
             if self._should_continue_search_from_sufficiency(state):
                 recovered = self._recover_from_open_questions(state=state, hints=hints, used_tools=used_tools)
@@ -10095,36 +10013,36 @@ class GraphAgentPlanner:
                         hints=hints,
                         used_tools=used_tools,
                         recovered=recovered,
-                        memory_prefix="planner_guard=future_use_resolution_prefers_state_candidate_over_generic_recovery",
+                        memory_prefix="planner_guard=resolution_payload_prefers_state_candidate_over_generic_recovery",
                     )
                     if preferred_candidate is not None:
                         return preferred_candidate
                     self._state_add_memory(
                         state,
-                        f"planner_override future_use_resolution_continue_search={recovered.tool}",
+                        f"planner_override resolution_payload_continue_search={recovered.tool}",
                     )
                     return recovered
                 candidate_plan = self._best_state_candidate_plan(state=state, hints=hints, used_tools=used_tools)
                 if candidate_plan is not None and candidate_plan.decision.tool not in {"finish", "rank_choices_from_state"}:
                     self._state_add_memory(
                         state,
-                        f"planner_guard=future_use_resolution_continue_search_prefers_state_candidate={candidate_plan.decision.tool}",
+                        f"planner_guard=resolution_payload_continue_search_prefers_state_candidate={candidate_plan.decision.tool}",
                     )
                     return candidate_plan.decision
                 current_scope_recovery = self._build_action_intent_specialized_recovery_decision(
                     state=state,
                     hints=hints,
-                    thought="why 题后续用途裁决虽然已有一轮结果，但 structured sufficiency 仍明确要求继续补证；当前又没有 generic recovery 或 targeted candidate 接管时，先回到当前题时间窗补关键帧，而不是直接 finish。",
+                    thought="why 题当前 resolution payload 虽然已有一轮结果，但 structured sufficiency 仍明确要求继续补证；当前又没有 generic recovery 或 targeted candidate 接管时，先回到当前题时间窗补关键帧，而不是直接 finish。",
                 )
                 if current_scope_recovery is not None and current_scope_recovery.tool not in {"finish", "rank_choices_from_state"}:
                     self._state_add_memory(
                         state,
-                        f"planner_override future_use_resolution_continue_search_current_scope={current_scope_recovery.tool}",
+                        f"planner_override resolution_payload_continue_search_current_scope={current_scope_recovery.tool}",
                     )
                     return current_scope_recovery
             best_index = int(last_result["best_index"])
             return PlannerDecision(
-                thought="why 题后续用途证据裁决已完成，直接结束。",
+                thought="why 题当前 resolution payload 已完成，直接结束。",
                 tool="finish",
                 args={
                     "prediction": best_index,
