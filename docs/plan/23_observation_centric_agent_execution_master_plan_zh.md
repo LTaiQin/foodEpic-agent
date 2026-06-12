@@ -275,6 +275,49 @@ Gap 只能来自 observation state，建议只保留以下通用类型：
 
 - [x] 已完成阶段：`7 / 9`
 - [ ] 进行中阶段：`Phase 4 / Phase 6`
+- [x] 本轮继续切掉 verifier 里一条 still answer-conditioned 的 `textual rank -> resolution payload -> blocker/gap` 旧链：
+  - 旧行为：
+    - `verifier.py`
+      - `_latest_action_intent_resolution_payload(...)`
+        在 why 任务上仍会把
+        `rank_choices_from_state`
+        当成最新 resolution payload
+    - 这会继续让：
+      - `_action_intent_verifier_blocker(...)`
+      - `_action_intent_has_plausible_competing_candidate_gap(...)`
+      - `_action_intent_missing_grounding_types(...)`
+      把 textual rank 的 `best_index/confidence`
+      当成 why 缺口判断的上游输入
+  - 当前变化：
+    - why verifier 的 latest resolution payload
+      现在只接受 observation-side 的：
+      - `infer_action_intent`
+      - `resolve_action_intent_pairwise`
+      - `resolve_action_intent_future_use`
+    - `rank_choices_from_state`
+      不再作为 why blocker/gap 的 payload 来源
+    - 同时补回 observation-centric 保守约束：
+      - 若当前 state 本身仍描述
+        `direct outcome is still not explicit`
+        这类未闭合 post-action observation，
+        即使没有 specialized payload，
+        verifier 仍会继续视为 unresolved
+  - 这意味着：
+    - why verifier 的 gap/blocker
+      又少了一条
+      `textual rank residue -> blocker/missing_evidence`
+      的回流链
+    - 若仍需继续搜证，
+      现在必须来自：
+      - observation-side specialized payload
+      - primary gap
+      - state 中真实未闭合的观测状态
+  - 本轮定向回归：
+    - `pytest -q tests/test_graph_agent.py -k 'accepts_ranked_best_index_after_repeated_vision_failures or textual_fallback_with_current_task_artifacts_and_grounding_can_finish or textual_fallback_without_current_task_artifacts_keeps_alternative_evidence_blocking or textual_fallback_without_open_needed_observation_payload_can_finish or textual_fallback_open_needed_observation_payload_alone_does_not_block_finish or textual_fallback_keeps_strict_residue_release_bucket_blocking or latest_resolution_payload_ignores_textual_rank_fallback or plausible_competing_candidate_gap_can_come_from_unclosed_observation_state_without_resolution_payload or plausible_competing_candidate_gap_does_not_require_candidate_evidence_indices_when_observation_uncertainty_remains'`
+    - 结果：`9 passed, 1137 deselected`
+  - 本轮专项回归：
+    - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+    - 结果：`693 passed, 453 deselected`
 - [x] 本轮继续切掉 why runtime 中一条真实存在的 `rank_choices_from_state -> candidate_answer_index -> conflict/finalizer` 残链：
   - 旧行为：
     - `executor.py`

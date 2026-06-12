@@ -1013,23 +1013,21 @@ class GraphAgentVerifier:
     def _action_intent_has_plausible_competing_candidate_gap(self, state: AgentState) -> bool:
         if not self._is_action_intent_task(state):
             return False
-        latest = self._latest_action_intent_resolution_payload(state)
-        if latest is None:
-            return False
-        _tool_name, payload = latest
-        if bool(payload.get("tool_failed")) or bool(payload.get("need_more_evidence")):
-            return False
-        choices = [str(choice) for choice in getattr(state, "choices", [])]
-        best_index = self._coerce_choice_index(payload.get("best_index"), choices)
-        if best_index is None or len(choices) < 2:
-            return False
         if not self._action_intent_competing_pair_still_needs_disambiguation(state=state):
             return False
+        latest = self._latest_action_intent_resolution_payload(state)
+        payload = latest[1] if latest is not None else {}
+        if isinstance(payload, dict) and (bool(payload.get("tool_failed")) or bool(payload.get("need_more_evidence"))):
+            return False
         try:
-            confidence = float(payload.get("confidence") or 0.0)
+            confidence = float(payload.get("confidence") or 0.0) if isinstance(payload, dict) else 0.0
         except Exception:  # noqa: BLE001
             confidence = 0.0
-        support_text = " ".join(str(payload.get(key) or "") for key in ("reason", "decisive_observation")).lower()
+        support_text = (
+            " ".join(str(payload.get(key) or "") for key in ("reason", "decisive_observation")).lower()
+            if isinstance(payload, dict)
+            else ""
+        )
         primary_gap_type = self._action_intent_primary_gap_type_from_state(state)
         has_structured_observation_gap = primary_gap_type in {
             "future_outcome",
@@ -1039,7 +1037,13 @@ class GraphAgentVerifier:
             "state_transition_unconfirmed",
             "workspace_change_unconfirmed",
         }
-        payload_uncertainty = self._action_intent_payload_points_to_later_outcome_uncertainty(payload)
+        payload_uncertainty = (
+            self._action_intent_payload_points_to_later_outcome_uncertainty(payload)
+            if isinstance(payload, dict)
+            else False
+        )
+        if self._action_intent_state_describes_unclosed_post_action_outcome(state):
+            return True
         if not support_text.strip() and not has_structured_observation_gap and not payload_uncertainty:
             return False
         direct_result_markers = (
@@ -1150,20 +1154,6 @@ class GraphAgentVerifier:
             if raw_result.get("best_index") is None:
                 continue
             return tool, raw_result
-        for call in reversed(list(getattr(state, "tool_trace", []) or [])):
-            if not isinstance(call, dict):
-                continue
-            tool = str(call.get("tool") or "")
-            if tool != "rank_choices_from_state":
-                continue
-            raw_result = call.get("raw_result")
-            if not isinstance(raw_result, dict):
-                continue
-            if raw_result.get("tool_failed") or raw_result.get("tool_ineffective"):
-                continue
-            if raw_result.get("best_index") is None:
-                continue
-            return tool, raw_result
         return None
 
     def _action_intent_competing_pair_still_needs_disambiguation(
@@ -1187,6 +1177,8 @@ class GraphAgentVerifier:
             "state_transition_unconfirmed",
             "workspace_change_unconfirmed",
         }:
+            return True
+        if self._action_intent_state_describes_unclosed_post_action_outcome(state):
             return True
         payload = latest[1] if latest is not None else {}
         support_text = self._action_intent_result_support_text(payload).lower() if isinstance(payload, dict) else ""
