@@ -1851,6 +1851,53 @@ class GraphAgent:
             return False
         return any(term in text_lc for term in speculative_markers)
 
+    def _action_intent_support_has_surface_contact_cleanup_uncertainty(self, text: str) -> bool:
+        text_lc = str(text or "").lower()
+        if self._action_intent_support_has_strong_surface_wiping_evidence(text_lc):
+            return False
+        has_surface_contact_only = any(
+            token in text_lc
+            for token in (
+                "touches the counter area",
+                "touches the counter surface",
+                "contact with the counter area",
+                "contact with the counter",
+                "moved across/onto the countertop",
+                "moved across the countertop",
+                "pressed it against the countertop",
+                "brought into contact with the counter area",
+                "used/place it there",
+                "placed onto the counter",
+                "near the counter/appliance area",
+                "counter area",
+                "object-to-surface interaction",
+                "接触台面",
+                "放到台面",
+                "靠近台面",
+            )
+        )
+        has_missing_cleaning_result = any(
+            token in text_lc
+            for token in (
+                "no wipe sweep",
+                "no extended wiping motion",
+                "no visible spill",
+                "no visible residue",
+                "visible spill/residue being removed",
+                "cleanup result is only weakly demonstrated",
+                "brief and does not clearly show",
+                "only weakly demonstrated",
+                "no clear wiping sweep",
+                "no cleaned area",
+                "no clear before/after cleanup result",
+                "没有明显擦拭",
+                "没有看到污渍",
+                "没有清理结果",
+                "证据很弱",
+            )
+        )
+        return has_surface_contact_only and has_missing_cleaning_result
+
     def _action_intent_support_has_exclusive_immediate_micro_outcome_evidence(self, text: str) -> bool:
         text_lc = str(text or "").lower()
         if any(
@@ -2774,31 +2821,8 @@ class GraphAgent:
                 )
             ):
                 gaps.append("exact_workspace_without_exact_use")
-        if (
-            any(term in choice_lc for term in ("wipe", "clean", "擦", "清洁"))
-            and any(term in choice_lc for term in ("surface", "counter", "countertop", "worktop", "table", "台面", "桌"))
-        ):
-            if self._action_intent_choice_is_weak_surface_contact_cleanup_claim(
-                choice=choice_lc,
-                support=support_lc,
-                contradiction=str(target_row.get("contradiction") or "").lower(),
-                action_object=action_object,
-                global_context=global_context,
-            ):
-                gaps.append("missing_surface_wiping_evidence")
-            if any(term in support_lc for term in ("not yet shown", "no wiping motion", "未显示", "还未显示", "尚未显示")):
-                gaps.append("missing_surface_wiping_evidence")
-            if (
-                has_modal_generic_support
-                and not has_direct_positive_support
-                and not any(
-                    term in support_lc
-                    for term in ("laid out on the worktop", "next to a visible spill", "ready for wiping", "ready to wipe", "放在台面旁准备擦", "准备擦")
-                )
-            ):
-                gaps.append("missing_surface_wiping_evidence")
-            if not self._action_intent_support_has_strong_surface_wiping_evidence(support_lc):
-                gaps.append("missing_surface_wiping_evidence")
+        if self._action_intent_support_has_surface_contact_cleanup_uncertainty(context_lc):
+            gaps.append("surface_cleanup_purpose_unresolved")
         if any(term in choice_lc for term in ("turn on", "switch on", "power on", "打开", "开启")):
             if not has_direct_positive_support and not any(
                 term in support_lc
@@ -2992,7 +3016,7 @@ class GraphAgent:
                     )
                     & {
                         "candidate_explicitly_lacks_observed_support",
-                        "missing_surface_wiping_evidence",
+                        "surface_cleanup_purpose_unresolved",
                         "missing_measurement_meta_evidence",
                         "missing_exact_measurement_role_evidence",
                         "missing_dry_hands_evidence",
@@ -3017,7 +3041,7 @@ class GraphAgent:
                 (
                     "candidate_explicitly_lacks_observed_support" in gaps
                     or (
-                        "missing_surface_wiping_evidence" in gaps
+                        "surface_cleanup_purpose_unresolved" in gaps
                         and "generic_access_direct_effect" not in gaps
                     )
                     or "missing_measurement_meta_evidence" in gaps

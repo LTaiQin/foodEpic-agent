@@ -4858,6 +4858,49 @@ Phase 0 审计后的最小真实缺口已经明确：
 - [x] 本轮合并回归：
   - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
   - 结果：`714 passed, 453 deselected`
+- [x] 本轮继续切掉 `graph_agent._action_intent_unresolved_semantic_gaps(...)` 里一条 still answer-conditioned 的 `surface-cleanup choice -> missing_surface_wiping_evidence` 旧链：
+  - 旧行为：
+    - 只有当 `best choice` 本身带有
+      - `wipe`
+      - `clean`
+      - `surface/counter/worktop`
+      这类语义时，
+      才会进入 `missing_surface_wiping_evidence`
+  - 问题：
+    - gap 来源仍然是 choice family，
+      不是 observation state
+    - 同一段 surface-contact observation，
+      只因为 choice 文本不同，
+      unresolved semantic gap 就会变化
+- [x] 新行为：
+  - 删除 `missing_surface_wiping_evidence`
+  - 改成统一 observation-side gap：
+    - `surface_cleanup_purpose_unresolved`
+  - 现在只允许由 candidate observation text 中的以下信息触发：
+    - surface-contact-only cue
+    - missing wipe sweep / missing cleanup-result cue
+    - 是否已存在 strong wiping evidence
+  - 一旦 observation text 已明确闭合
+    - visible spill target
+    - wipe sweep / repeated wiping
+    - direct cleanup result
+    generic surface-cleanup gap 必须退出
+- [x] 本轮新增 observation-side helper：
+  - `surface contact cleanup uncertainty`
+    - 例如：
+      - `touches the counter area`
+      - `moved across/onto the countertop`
+      - `no wipe sweep`
+      - `no clear before/after cleanup result`
+- [x] 本轮新增负约束测试：
+  - `test_graph_agent_action_intent_unresolved_semantic_gap_surface_cleanup_ignores_choice_categories`
+  - `test_graph_agent_action_intent_unresolved_semantic_gap_surface_cleanup_clears_after_strong_wiping_evidence`
+- [x] 本轮定向回归：
+  - `pytest -q tests/test_graph_agent.py -k 'unresolved_semantic_gap_surface_cleanup or unresolved_rerank_withholds_surface_cleanup_without_sweep_or_contact_chain or unresolved_rerank_prefers_direct_hand_contact_over_counter_cleanup or unresolved_rerank_withholds_weak_surface_contact_cleanup_without_runtime_relocation_override or finalizer_withholds_counter_cleanup_when_only_surface_proximity_is_shown'`
+  - 结果：`6 passed, 1163 deselected`
+- [x] 本轮合并回归：
+  - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+  - 结果：`716 passed, 453 deselected`
 
 ---
 
