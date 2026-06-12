@@ -536,10 +536,32 @@ class GraphAgentPlanner:
                 and confidence < 0.9
             ):
                 return True
-        return any(
-            isinstance(item, str) and item.startswith("action_intent_need_future_evidence=1")
-            for item in list(getattr(state, "working_memory", [])) + list(getattr(state, "evidence_bundle", []))
+        return self._action_intent_has_followup_gap_marker(state)
+
+    def _action_intent_followup_gap_marker_entries(self, state: AgentState) -> list[str]:
+        prefixes = (
+            "action_intent_followup_gap=1",
+            "action_intent_need_future_evidence=1",
         )
+        return [
+            item
+            for item in list(getattr(state, "working_memory", [])) + list(getattr(state, "evidence_bundle", []))
+            if isinstance(item, str) and item.startswith(prefixes)
+        ]
+
+    def _action_intent_has_followup_gap_marker(self, state: AgentState) -> bool:
+        return bool(self._action_intent_followup_gap_marker_entries(state))
+
+    def _action_intent_followup_gap_window_hint(self, state: AgentState, *, default: float = 8.0) -> float:
+        for item in reversed(self._action_intent_followup_gap_marker_entries(state)):
+            window_match = re.search(r"window_s=([0-9.]+)", item)
+            if not window_match:
+                continue
+            try:
+                return max(2.0, min(8.0, float(window_match.group(1))))
+            except Exception:  # noqa: BLE001
+                continue
+        return float(default)
 
     def _action_intent_result_support_text(self, result: dict[str, Any] | None) -> str:
         if not isinstance(result, dict):
@@ -1335,10 +1357,7 @@ class GraphAgentPlanner:
             )
         )
         review_late_focus = bias_profile["next_use_unclear"] or bias_profile["final_location_unclear"]
-        future_evidence_marker = any(
-            isinstance(item, str) and item.startswith("action_intent_need_future_evidence=1")
-            for item in list(getattr(state, "working_memory", [])) + list(getattr(state, "evidence_bundle", []))
-        )
+        future_evidence_marker = self._action_intent_has_followup_gap_marker(state)
         observation_late_followup = review_late_focus or future_evidence_marker
         observation_result_driven_followup = result_driven_followup and observation_late_followup
         if reveal_access_followup:
@@ -2266,10 +2285,7 @@ class GraphAgentPlanner:
         if not any("_followup_transition_" in name or "_followup_peaks_" in name for name in names):
             latest_intent = self._latest_successful_action_intent_result(state)
             bias_profile = self._action_intent_timeline_review_bias_profile(state)
-            future_evidence_marker = any(
-                isinstance(item, str) and item.startswith("action_intent_need_future_evidence=1")
-                for item in list(getattr(state, "working_memory", [])) + list(getattr(state, "evidence_bundle", []))
-            )
+            future_evidence_marker = self._action_intent_has_followup_gap_marker(state)
             allow_late_followup_review = (
                 bias_profile["next_use_unclear"]
                 or bias_profile["final_location_unclear"]
@@ -2999,10 +3015,7 @@ class GraphAgentPlanner:
                 return True
             if bool(latest_result.get("need_future_evidence")) or bool(latest_result.get("ambiguity")):
                 return True
-        if any(
-            isinstance(item, str) and item.startswith("action_intent_need_future_evidence=1")
-            for item in list(getattr(state, "working_memory", [])) + list(getattr(state, "evidence_bundle", []))
-        ):
+        if self._action_intent_has_followup_gap_marker(state):
             return True
         return self._action_intent_prefers_followup_state_change_only(state)
 
@@ -5225,16 +5238,10 @@ class GraphAgentPlanner:
             start_time = min(combined_times) - precondition_window_s
             followup_window_s = 8.0 if include_followup else 2.0
             if include_followup:
-                for item in reversed(list(getattr(state, "working_memory", []))):
-                    if not isinstance(item, str) or not item.startswith("action_intent_need_future_evidence=1"):
-                        continue
-                    window_match = re.search(r"window_s=([0-9.]+)", item)
-                    if window_match:
-                        try:
-                            followup_window_s = max(2.0, min(8.0, float(window_match.group(1))))
-                        except Exception:  # noqa: BLE001
-                            followup_window_s = 8.0
-                    break
+                followup_window_s = self._action_intent_followup_gap_window_hint(
+                    state,
+                    default=followup_window_s,
+                )
                 latest_followup_end = self._latest_action_intent_followup_end_time(state)
                 if latest_followup_end is not None:
                     followup_window_s = max(
@@ -6418,10 +6425,7 @@ class GraphAgentPlanner:
             return False
         bias_profile = self._action_intent_timeline_review_bias_profile(state)
         latest_timeline_review = self._latest_action_intent_timeline_review(state)
-        future_evidence_marker = any(
-            isinstance(item, str) and item.startswith("action_intent_need_future_evidence=1")
-            for item in list(getattr(state, "working_memory", [])) + list(getattr(state, "evidence_bundle", []))
-        )
+        future_evidence_marker = self._action_intent_has_followup_gap_marker(state)
         if bias_profile["next_use_unclear"] or bias_profile["final_location_unclear"]:
             return True
         if future_evidence_marker and latest_timeline_review:

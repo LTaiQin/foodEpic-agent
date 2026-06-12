@@ -390,7 +390,7 @@ class GraphAgentVerifier:
         for item in list(state.working_memory) + list(state.evidence_bundle):
             if not isinstance(item, str):
                 continue
-            if item.startswith("action_intent_need_future_evidence=1"):
+            if item.startswith("action_intent_need_future_evidence=1") or item.startswith("action_intent_followup_gap=1"):
                 return True
             if item.startswith("action_intent_pending_resolution="):
                 return True

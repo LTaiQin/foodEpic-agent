@@ -3151,6 +3151,33 @@ Phase 0 审计后的最小真实缺口已经明确：
 
 ### Phase 4 当前进展
 
+- [x] 本轮继续收掉 `action_intent_need_future_evidence=1` 这条旧 followup marker 链的 live producer/consumer：
+  - 旧行为：
+    - `executor.py` 在 `infer_action_intent` 后仍直接写：
+      - `action_intent_need_future_evidence=1 window_s=... focus=...`
+    - `planner.py` 与 `verifier.py` 中多处 runtime helper 仍直接消费这个旧前缀
+    - 这会让 old specialized marker 名字继续作为 why/action-intent 的 live followup gap 信号
+  - 当前变化：
+    - `executor.py`
+      不再生产旧前缀，改为写通用 marker：
+      - `action_intent_followup_gap=1 window_s=... focus=...`
+    - `planner.py`
+      新增统一 parser：
+      - `_action_intent_followup_gap_marker_entries(...)`
+      - `_action_intent_has_followup_gap_marker(...)`
+      - `_action_intent_followup_gap_window_hint(...)`
+    - `verifier.py`
+      的 pending-evidence gap 识别现也兼容：
+      - 新 `action_intent_followup_gap=1`
+      - 旧 `action_intent_need_future_evidence=1`
+    - 这样 followup gap 的 live producer 名字已经 observation-centric，
+      同时 runtime 仍兼容历史 session / 旧测试 / 旧 trace
+  - 本轮定向回归：
+    - `pytest -q tests/test_graph_agent.py -k 'executor_infer_action_intent_records_observation_centric_followup_gap_marker or followup_window_expands_with_window_level or followup_sampling_accepts_observation_centric_followup_gap_marker or followup_sampling_ignores_legacy_future_evidence_marker_override or followup_frames_trigger_second_intent_pass or frame_selection_isolates_current_task_artifacts or frame_selection_sorts_current_frames_by_time or future_use_resolution_records_decisive_observation_and_clears_flags or future_use_resolution_need_more_evidence_records_pending_resolution'`
+    - `10 passed, 1124 deselected`
+  - 本轮专项回归：
+    - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+    - `678 passed, 456 deselected`
 - [x] 本轮继续收掉 `planner._action_intent_followup_route(...) / _action_intent_timeline_review_resolver_hint(...) / _build_action_intent_followup_sampling_decision(...)` 这一簇 live specialized profile 命名：
   - 旧行为：
     - followup route 仍直接返回：
@@ -3628,6 +3655,18 @@ Phase 0 审计后的最小真实缺口已经明确：
 
 ### Phase 6 当前进展
 
+- [x] 本轮又迁移了 4 条专门验证 followup marker 消费的测试到新 observation-centric 前缀：
+  - `followup_window_expands_with_window_level`
+  - `followup_frames_trigger_second_intent_pass`
+  - `frame_selection_isolates_current_task_artifacts`
+  - `frame_selection_sorts_current_frames_by_time`
+- [x] 本轮新增 1 条 producer 级测试：
+  - `executor_infer_action_intent_records_observation_centric_followup_gap_marker`
+- [x] 新契约：
+  - 新 session / 新运行态应写：
+    - `action_intent_followup_gap=1`
+  - planner / verifier 仍允许兼容读取旧前缀，
+    但不再要求新结果继续写回 `action_intent_need_future_evidence=1`
 - [x] 本轮又迁移了 5 条仍在保护旧 specialized profile 或固定 window 数值的测试契约：
   - 2 条旧契约要求：
     - 已看过 followup 后必须直接进入 `resolve_action_intent_future_use`

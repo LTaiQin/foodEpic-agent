@@ -856,7 +856,13 @@ class GraphAgentExecutor:
             state.working_memory = [
                 item
                 for item in state.working_memory
-                if not (isinstance(item, str) and item.startswith("action_intent_need_future_evidence="))
+                if not (
+                    isinstance(item, str)
+                    and (
+                        item.startswith("action_intent_need_future_evidence=")
+                        or item.startswith("action_intent_followup_gap=")
+                    )
+                )
             ]
             state.add_memory(
                 f"action_intent_best_index={result.get('best_index')} confidence={result.get('confidence')}"
@@ -865,7 +871,7 @@ class GraphAgentExecutor:
                 state.add_memory(f"action_intent_second_best_index={result.get('second_best_index')}")
             if result.get("need_future_evidence"):
                 state.add_memory(
-                    f"action_intent_need_future_evidence=1 window_s={result.get('future_window_s')} focus={result.get('followup_focus')}"
+                    f"action_intent_followup_gap=1 window_s={result.get('future_window_s')} focus={result.get('followup_focus')}"
                 )
                 state.add_open_question("need_disambiguating_evidence")
             else:
