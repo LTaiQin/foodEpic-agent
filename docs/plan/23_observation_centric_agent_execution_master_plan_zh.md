@@ -275,6 +275,37 @@ Gap 只能来自 observation state，建议只保留以下通用类型：
 
 - [x] 已完成阶段：`7 / 9`
 - [ ] 进行中阶段：`Phase 4 / Phase 6`
+- [x] 本轮继续切掉 `graph_agent` 里一条 still answer-conditioned 的 `generic relocation/storage overclaim -> final-placement choice gate` 旧链：
+  - 旧行为：
+    - `graph_agent._action_intent_resolution_should_withhold_generic_relocation_or_storage_overclaim(...)`
+      仍先要求：
+      - `best_index`
+      - `best_choice`
+      命中 `put back / put away / final placement`
+      这类选项语义
+    - 然后才允许 finalizer 把它视作
+      generic relocation/storage overclaim
+  - 当前变化：
+    - helper 已改成 observation-side：
+      - 不再读取 final-placement choice category
+      - 只看 observation text 是否自己表达：
+        - broad relocation / broad storage residue
+          如 `carried away / left nearby / final location remains unclear`
+        - exact final location 是否真的闭合
+        - 是否已经出现更强的 exact followup outcome
+          如 same-object reuse / hidden-target retrieval / used on the scale
+    - 这意味着：
+      - 同样的 observation residue，
+        不应再因为答案写法不同而改变 withheld 逻辑
+      - why/action_intent 的 finalizer
+        又少了一条 `final-placement answer family -> generic relocation withheld`
+        的 live consumer
+  - 本轮定向回归：
+    - `pytest -q tests/test_graph_agent.py -k 'mixed_horizon_open_vs_weigh or mixed_horizon_label_vs_put_back or scale_nearby_claim_without_weighing_chain or generic_relocation_withhold or finalizer_withholds_put_away_claim_without_storage_chain or finalizer_withholds_generic_put_away_for_same_object_reuse_target or finalizer_withholds_generic_put_away_for_revealed_downstream_target or finalizer_withholds_put_back_claim_when_timeline_review_still_has_final_location_gap'`
+    - 结果：`9 passed, 1150 deselected`
+  - 本轮专项回归：
+    - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+    - 结果：`706 passed, 453 deselected`
 - [x] 本轮继续切掉 `graph_agent` 里一条 still answer-conditioned 的 `generic access/space overclaim -> choice text gate` 旧链：
   - 旧行为：
     - `graph_agent._action_intent_resolution_should_withhold_generic_access_or_space_overclaim(...)`
@@ -3669,6 +3700,28 @@ Phase 0 审计后的最小真实缺口已经明确：
 
 ### Phase 4 当前进展
 
+- [x] 本轮继续收掉 `graph_agent` 里一条 `generic relocation/storage overclaim -> final-placement choice gate` 的 live consumer 链：
+  - 旧行为：
+    - generic relocation/storage overclaim
+      仍先依赖 `put back / put away / final placement`
+      这类 answer family
+    - 因而 observation text 相同，
+      只因候选文本不同，
+      finalizer 就可能不进入该保守 withheld
+  - 当前变化：
+    - helper 已切到 observation-first：
+      - broad relocation/storage residue
+      - exact final location 是否闭合
+      - 是否已有更强的 exact downstream outcome
+      全部只由 observation text 决定
+    - 这样 generic relocation/storage withheld
+      不再需要 choice family 才能放行
+  - 本轮定向回归：
+    - `pytest -q tests/test_graph_agent.py -k 'mixed_horizon_open_vs_weigh or mixed_horizon_label_vs_put_back or scale_nearby_claim_without_weighing_chain or generic_relocation_withhold or finalizer_withholds_put_away_claim_without_storage_chain or finalizer_withholds_generic_put_away_for_same_object_reuse_target or finalizer_withholds_generic_put_away_for_revealed_downstream_target or finalizer_withholds_put_back_claim_when_timeline_review_still_has_final_location_gap'`
+    - `9 passed, 1150 deselected`
+  - 本轮专项回归：
+    - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+    - `706 passed, 453 deselected`
 - [x] 本轮继续收掉 `graph_agent` 里一条 `generic access/space overclaim -> choice category gate` 的 live consumer 链：
   - 旧行为：
     - generic access/space overclaim 仍要求当前 answer
@@ -4456,6 +4509,23 @@ Phase 0 审计后的最小真实缺口已经明确：
 
 ### Phase 6 当前进展
 
+- [x] 本轮又迁移了 4 条 still answer-conditioned 的 generic-relocation/storage 旧契约测试：
+  - `generic_relocation_withhold_ignores_choice_text_categories`
+  - `generic_relocation_withhold_clears_after_observed_final_location`
+  - `mixed_horizon_label_vs_put_back`
+  - `scale_nearby_claim_without_weighing_chain`
+- [x] 新契约：
+  - 不再要求：
+    - `put back / put away / later use nearby`
+      这类 answer text 决定是否进入 generic-relocation withheld
+    - 固定必须命中某一个 legacy withhold marker
+  - 只保护：
+    - observation-side 的 broad relocation/storage residue
+      才能触发该 helper
+    - 一旦 observation text 已闭合明确 final location，
+      helper 必须退出
+    - finalizer 必须保守 withheld，
+      但不要求固定走某一个旧 marker 名字
 - [x] 本轮又迁移了 4 条 still answer-conditioned 的 generic-access/space 旧契约测试：
   - `generic_access_withhold_ignores_choice_text_categories`
   - `generic_access_withhold_clears_after_exact_retrieval_chain`

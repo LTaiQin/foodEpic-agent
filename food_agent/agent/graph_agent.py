@@ -1153,27 +1153,26 @@ class GraphAgent:
         raw_result: dict[str, Any],
         state: AgentState,
     ) -> bool:
-        index = self._coerce_choice_index(raw_result.get("best_index"), state.choices)
-        if index is None:
-            return False
-        best_choice = str(state.choices[index]).strip().lower()
-        if not self._action_intent_choice_is_final_placement_candidate(best_choice):
-            return False
         text = self._action_intent_observation_support_text(raw_result).lower()
         if not text:
             return False
+        has_broad_relocation = self._action_intent_support_has_broad_relocation_or_storage_effect(text)
+        has_exact_final_location = self._action_intent_support_has_explicit_final_location_evidence(text)
+        has_exact_followup_outcome = self._action_intent_support_has_explicit_followup_outcome_evidence(text)
+        if not has_broad_relocation and not self._action_intent_text_explicitly_rules_out_exact_downstream_chain(text):
+            return False
         gap_types = self._action_intent_resolution_latest_gap_types(state)
-        if gap_types & {"future_outcome", "relation_confirmation", "target_discovery"}:
+        if has_broad_relocation and gap_types & {"future_outcome", "relation_confirmation", "target_discovery"}:
             return True
-        if self._action_intent_has_unresolved_timeline_review_gap(state):
+        if has_broad_relocation and self._action_intent_has_unresolved_timeline_review_gap(state):
             return True
         if self._action_intent_text_has_negative_evidence(text):
             return True
         if self._action_intent_text_explicitly_rules_out_exact_downstream_chain(text):
             return True
-        if self._action_intent_choice_has_explicit_final_placement_evidence(best_choice, text):
+        if has_exact_final_location:
             return False
-        if any(
+        if has_exact_followup_outcome and any(
             token in text
             for token in (
                 "same-object use",
@@ -1203,8 +1202,14 @@ class GraphAgent:
             )
         ):
             return True
-        if any(
-            token in text
+        if has_broad_relocation:
+            return True
+        return not self._action_intent_text_has_direct_positive_evidence(text)
+
+    def _action_intent_support_has_broad_relocation_or_storage_effect(self, text: str) -> bool:
+        text_lc = str(text or "").lower()
+        return any(
+            token in text_lc
             for token in (
                 "moved away",
                 "lifted away",
@@ -1230,9 +1235,7 @@ class GraphAgent:
                 "最终位置仍不明确",
                 "还看不出是否放回",
             )
-        ):
-            return True
-        return not self._action_intent_text_has_direct_positive_evidence(text)
+        )
 
     def _action_intent_resolution_should_withhold_state_change_overclaim(
         self,
