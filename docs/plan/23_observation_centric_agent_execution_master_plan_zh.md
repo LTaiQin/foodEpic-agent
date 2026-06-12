@@ -2701,6 +2701,35 @@ Phase 0 审计后的最小真实缺口已经明确：
 
 ### Phase 1 本轮收口补充
 
+- [x] `graph_agent.py` 的一条 still answer-conditioned 文本消费链已继续收掉：
+  - 旧行为：
+    - 多个 finalizer / overclaim gate 会把
+      - `needed_observation`
+      - `answer`
+      混进 support text 或 prior reasoning text
+    - `tap scale` 的 state-change overclaim 守卫
+      也会读取这类 prior trace 文本
+    - 这意味着：
+      - answer-side 的“还缺什么观察”
+      - 会反过来伪装成已经观测到的前置条件/后续用途线索
+  - 当前变化：
+    - `graph_agent.py` 新增 observation-only helper：
+      - `_action_intent_observation_support_text(...)`
+    - why finalizer / overclaim 判定现在只读：
+      - `reason`
+      - `decisive_observation`
+      - `direct_effect`
+      - `downstream_action`
+    - `_action_intent_prior_reasoning_text(...)`
+      也不再回收：
+      - `needed_observation`
+      - `answer`
+  - 本轮新增负约束测试：
+    - `test_graph_agent_action_intent_prior_reasoning_text_excludes_answer_conditioned_fields`
+    - `test_graph_agent_action_intent_tap_scale_state_change_overclaim_ignores_needed_observation_in_prior_trace`
+  - 本轮定向回归：
+    - `pytest -q tests/test_graph_agent.py -k 'graph_agent_action_intent_prior_reasoning_text_excludes_answer_conditioned_fields or graph_agent_action_intent_tap_scale_state_change_overclaim_ignores_needed_observation_in_prior_trace or graph_agent_action_intent_finalizer_withholds_weak_surface_wiping_claim_without_strong_motion or graph_agent_action_intent_finalizer_withholds_weak_measurement_meta_claim_without_reading_or_tare_signal or graph_agent_action_intent_finalizer_withholds_weak_boiling_check_without_brief_inspection_chain or graph_agent_action_intent_finalizer_withholds_generic_make_space_without_exact_chain_exclusion'`
+    - `6 passed, 1135 deselected`
 - [x] `graph_agent.py` 中剩余两条 unresolved-rerank 运行态专项 override 已删除：
   - `_override_generic_space_with_exact_immediate_use_candidate(...)`
   - `_override_generic_hidden_access_with_exact_revealed_target_candidate(...)`
@@ -2710,7 +2739,7 @@ Phase 0 审计后的最小真实缺口已经明确：
   - 改为 observation-first 的保守 finish 行为
 - [x] 当前专项全量回归结果：
   - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
-  - `632 passed, 453 deselected`
+  - `688 passed, 453 deselected`
 
 ---
 
