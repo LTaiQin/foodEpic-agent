@@ -1898,6 +1898,82 @@ class GraphAgent:
         )
         return has_surface_contact_only and has_missing_cleaning_result
 
+    def _action_intent_support_has_explicit_hand_drying_evidence(self, text: str) -> bool:
+        text_lc = str(text or "").lower()
+        if any(
+            token in text_lc
+            for token in (
+                "no visible hand-drying motion",
+                "no hand wiping",
+                "no wet-hand context",
+                "not applied to the hands",
+                "没有擦手",
+                "没有湿手",
+                "不是擦手",
+            )
+        ):
+            return False
+        return any(
+            token in text_lc
+            for token in (
+                "brought to both wet hands",
+                "applied to the hands",
+                "hands are wiped dry",
+                "wipes the hands",
+                "used to wipe them dry",
+                "hand area",
+                "dab/rub one hand",
+                "rub one hand",
+                "rubbed against the other hand",
+                "fingers",
+                "finger area",
+                "wet hands",
+                "after washing hands",
+                "双手",
+                "擦手",
+                "擦干双手",
+                "洗手后",
+                "湿手",
+            )
+        )
+
+    def _action_intent_support_has_hand_drying_purpose_uncertainty(self, text: str) -> bool:
+        text_lc = str(text or "").lower()
+        if self._action_intent_support_has_explicit_hand_drying_evidence(text_lc):
+            return False
+        has_hand_drying_reference = any(
+            token in text_lc
+            for token in (
+                "dry hands",
+                "dry hand",
+                "hand-drying",
+                "wipe them dry",
+                "wipes the hands",
+                "hand area",
+                "to the hands",
+                "wet hands",
+                "擦手",
+                "擦干双手",
+                "湿手",
+            )
+        )
+        has_missing_hand_context = any(
+            token in text_lc
+            for token in (
+                "no visible hand-drying motion",
+                "no hand wiping",
+                "no wet-hand context",
+                "not applied to the hands",
+                "there is no wet-hand context",
+                "it is never brought to the hands",
+                "no visible hand use",
+                "没有擦手",
+                "没有湿手",
+                "不是擦手",
+            )
+        )
+        return has_hand_drying_reference and has_missing_hand_context
+
     def _action_intent_support_has_exclusive_immediate_micro_outcome_evidence(self, text: str) -> bool:
         text_lc = str(text or "").lower()
         if any(
@@ -2786,13 +2862,8 @@ class GraphAgent:
         question_lc = str(getattr(state, "question", "") or "").lower()
         action_object = self._action_intent_question_object(question_lc)
         global_context = self._action_intent_scoped_global_context(state).lower()
-        if "dry" in choice_lc and "hand" in choice_lc:
-            if (
-                has_modal_generic_support
-                and not has_direct_positive_support
-                and not any(term in support_lc for term in ("brought to both wet hands", "wipe them dry", "擦干双手", "湿手"))
-            ):
-                gaps.append("missing_dry_hands_evidence")
+        if self._action_intent_support_has_hand_drying_purpose_uncertainty(context_lc):
+            gaps.append("hand_drying_purpose_unresolved")
         if self._action_intent_support_has_unresolved_relocation_purpose(context_lc):
             gaps.append("relocation_purpose_unresolved")
         if self._action_intent_choice_has_specific_space_target(choice_lc):
@@ -3019,7 +3090,7 @@ class GraphAgent:
                         "surface_cleanup_purpose_unresolved",
                         "missing_measurement_meta_evidence",
                         "missing_exact_measurement_role_evidence",
-                        "missing_dry_hands_evidence",
+                        "hand_drying_purpose_unresolved",
                         "relocation_purpose_unresolved",
                         "mixed_horizon_outcome_unresolved",
                     }

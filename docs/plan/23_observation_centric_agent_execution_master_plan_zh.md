@@ -4901,6 +4901,54 @@ Phase 0 审计后的最小真实缺口已经明确：
 - [x] 本轮合并回归：
   - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
   - 结果：`716 passed, 453 deselected`
+- [x] 本轮继续切掉 `graph_agent._action_intent_unresolved_semantic_gaps(...)` 里一条 still answer-conditioned 的 `dry-hands choice -> missing_dry_hands_evidence` 旧链：
+  - 旧行为：
+    - 只有当 `best choice` 本身带有
+      - `dry`
+      - `hand`
+      这类语义时，
+      才会进入 `missing_dry_hands_evidence`
+  - 问题：
+    - gap 来源仍然是 choice family，
+      不是 observation state
+    - 同一段 towel/hand observation，
+      只因为 choice 文本不同，
+      unresolved semantic gap 就会变化
+- [x] 新行为：
+  - 删除 `missing_dry_hands_evidence`
+  - 改成统一 observation-side gap：
+    - `hand_drying_purpose_unresolved`
+  - 现在只允许由 candidate observation text 中的以下信息触发：
+    - hand-drying reference
+    - missing wet-hand / missing hand-contact context
+    - 是否已存在 explicit hand-drying evidence
+  - 一旦 observation text 已明确闭合
+    - `brought to both wet hands`
+    - `used to wipe them dry`
+    - `hands are wiped dry`
+    这类 direct hand-contact chain，
+    generic hand-drying gap 必须退出
+- [x] 本轮新增 observation-side helper：
+  - `explicit hand drying evidence`
+    - 例如：
+      - `brought to both wet hands`
+      - `applied to the hands`
+      - `hands are wiped dry`
+      - `used to wipe them dry`
+  - `hand drying purpose uncertainty`
+    - 例如：
+      - `Picking up a tea towel could be for drying hands.`
+      - `There is no visible hand-drying motion or wet-hand context.`
+      - `it is never brought to the hands`
+- [x] 本轮新增负约束测试：
+  - `test_graph_agent_action_intent_unresolved_semantic_gap_hand_drying_ignores_choice_categories`
+  - `test_graph_agent_action_intent_unresolved_semantic_gap_hand_drying_clears_after_explicit_hand_contact`
+- [x] 本轮定向回归：
+  - `pytest -q tests/test_graph_agent.py -k 'unresolved_semantic_gap_hand_drying or unresolved_rerank_withholds_broad_low_evidence_guess or unresolved_rerank_keeps_dry_hands_with_explicit_hand_contact_chain or finalizer_withholds_unresolved_future_use_evidence_without_direct_support'`
+  - 结果：`5 passed, 1166 deselected`
+- [x] 本轮合并回归：
+  - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+  - 结果：`718 passed, 453 deselected`
 
 ---
 
