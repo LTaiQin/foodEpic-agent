@@ -275,6 +275,68 @@ Gap 只能来自 observation state，建议只保留以下通用类型：
 
 - [x] 已完成阶段：`7 / 9`
 - [ ] 进行中阶段：`Phase 4 / Phase 6`
+- [x] 本轮继续收掉一条 `resolution payload` 恢复链里残留的 specialized tool-name 假依赖：
+  - 旧行为：
+    - `planner._build_action_intent_resolution_transition_recovery_decision(...)`
+      仍显式接收 `tool_name`
+    - `planner._action_intent_resolution_needs_more_evidence(...)`
+      也仍显式接收 `tool_name`
+    - 尽管这两个函数的实际决策已经 observation-side 化，
+      但 runtime 调用栈和部分旧测试契约仍保留
+      `latest specialized tool identity -> helper arg`
+      这条假依赖
+  - 当前变化：
+    - 上述两个 helper 已移除 `tool_name` 形参
+    - `planner` 中所有相关调用位点也已同步删除
+    - 这意味着：
+      - resolution payload 的 transition recovery / needs-more-evidence 判断
+      - 现在在函数签名层面也不再接受 specialized tool identity 注入
+  - 本轮迁移测试：
+    - `test_planner_action_intent_verifier_blocked_infer_transition_recovery_does_not_inject_future_use_tool_name`
+      已改成断言：
+      - 不再向 transition recovery helper 注入 `tool_name`
+    - 原有
+      - `test_planner_action_intent_resolution_transition_recovery_is_not_driven_by_specialized_tool_name`
+      - `test_planner_action_intent_resolution_transition_recovery_reveal_hold_uses_observation_profile_not_tool_name`
+      继续保留并通过
+  - 本轮定向回归：
+    - `pytest -q tests/test_graph_agent.py -k 'verifier_blocked_infer_transition_recovery_does_not_inject_future_use_tool_name or resolution_transition_recovery_is_not_driven_by_specialized_tool_name or resolution_transition_recovery_reveal_hold_uses_observation_profile_not_tool_name'`
+    - `3 passed, 1133 deselected`
+  - 本轮专项回归：
+    - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+    - `683 passed, 453 deselected`
+- [x] 本轮继续收掉 `planner._heuristic_fallback(...)` 里一段仍由 specialized tool identity 主导的 resolution-failure retry 链：
+  - 旧行为：
+    - `resolve_action_intent_pairwise` 失败时，默认优先重试 `pairwise`
+    - `resolve_action_intent_future_use` 失败时，默认优先重试 `future_use`
+    - provider-level failure 的 memory guard 也直接把上一次 specialized tool name 写回运行态
+    - 这意味着：
+      - 即使当前 `primary_gap` 已经说明它更像 future-outcome / post-action 缺口
+      - retry 路径仍会先被上一次 tool identity 锁死
+  - 当前变化：
+    - 新增统一 helper：
+      - `planner._build_action_intent_resolution_retry_decision(...)`
+    - specialized resolution 失败后的第一次 retry，
+      现在只由：
+      - `primary_gap`
+      - `blocker_hint`
+      - payload 里的 later-outcome uncertainty / post-action uncertainty
+      决定
+    - failure 计数也已从“按单个 specialized tool 名字计数”
+      收成“按整个 resolution family 计数”
+    - provider-level failure memory guard 现已 generic 化：
+      - `planner_guard=action_intent_resolution_provider_failure_*`
+      不再把 `pairwise / future_use` 名字写回 live runtime guard
+  - 本轮迁移/新增测试：
+    - `test_planner_action_intent_resolution_provider_level_failure_skips_visual_retry_and_prefers_state_candidate`
+    - `test_planner_action_intent_resolution_failure_retry_prefers_future_profile_over_last_specialized_tool_name`
+    - `test_planner_action_intent_resolution_failure_retry_prefers_post_action_profile_over_last_specialized_tool_name`
+  - 本轮定向回归：
+    - `pytest -q tests/test_graph_agent.py -k 'resolution_provider_level_failure or resolution_failure_retry_prefers_future_profile_over_last_specialized_tool_name or resolution_failure_retry_prefers_post_action_profile_over_last_specialized_tool_name'`
+    - `3 passed, 1133 deselected`
+  - 本轮专项回归：
+    - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+    - `683 passed, 453 deselected`
 - [x] 本轮继续切掉了一段 `planner` 中仍由 `latest specialized tool name` 主导 `close_call / ready_to_finish` 的 live gate：
   - 旧行为：
     - `planner._action_intent_result_is_close_call_for_recovery(...)`
@@ -3151,6 +3213,60 @@ Phase 0 审计后的最小真实缺口已经明确：
 
 ### Phase 4 当前进展
 
+- [x] 本轮继续把一条已经 observation-side 化、但仍保留旧 specialized tool-name 形参的恢复链收干净：
+  - 旧行为：
+    - `resolution_transition_recovery`
+    - `resolution_needs_more_evidence`
+      两个 helper 还保留 `tool_name` 形参
+    - `planner` 的多个 runtime 调用位点
+      仍把 latest specialized tool identity
+      沿参数显式传进去
+  - 当前变化：
+    - 两个 helper 的 `tool_name` 形参已删除
+    - 所有相关 runtime 调用位点也已删掉该参数
+    - 这条链现在在签名层面也不再接受 specialized identity 注入
+  - 本轮迁移测试：
+    - `test_planner_action_intent_verifier_blocked_infer_transition_recovery_does_not_inject_future_use_tool_name`
+      已改成负约束：
+      - transition recovery helper 不再接收 `tool_name`
+  - 本轮定向回归：
+    - `pytest -q tests/test_graph_agent.py -k 'verifier_blocked_infer_transition_recovery_does_not_inject_future_use_tool_name or resolution_transition_recovery_is_not_driven_by_specialized_tool_name or resolution_transition_recovery_reveal_hold_uses_observation_profile_not_tool_name'`
+    - `3 passed, 1133 deselected`
+  - 本轮专项回归：
+    - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+    - `683 passed, 453 deselected`
+- [x] 本轮继续收掉 `planner._heuristic_fallback(...)` 里的 specialized resolution failure-retry tool-name 分支：
+  - 旧行为：
+    - 专用裁决失败后的第一次 retry，
+      仍先按
+      - `resolve_action_intent_pairwise`
+      - `resolve_action_intent_future_use`
+      分叉
+    - provider-level failure 的 memory guard
+      也把上一次 specialized tool identity
+      直接写回 live runtime
+  - 当前变化：
+    - retry 分支现已统一走：
+      - `planner._build_action_intent_resolution_retry_decision(...)`
+    - 这条链只看 observation-side 信息：
+      - `primary_gap`
+      - `blocker_hint`
+      - resolution payload 的 later-outcome / post-action uncertainty
+    - `provider_failure_*` guard 也已 generic 化为：
+      - `planner_guard=action_intent_resolution_provider_failure_*`
+    - 同时 failure 计数也已按整个 resolution family 统一统计，
+      不再因为上一次失败的是哪一个 specialized tool
+      就维持不同 retry 口径
+  - 本轮迁移/新增测试：
+    - `test_planner_action_intent_resolution_provider_level_failure_skips_visual_retry_and_prefers_state_candidate`
+    - `test_planner_action_intent_resolution_failure_retry_prefers_future_profile_over_last_specialized_tool_name`
+    - `test_planner_action_intent_resolution_failure_retry_prefers_post_action_profile_over_last_specialized_tool_name`
+  - 本轮定向回归：
+    - `pytest -q tests/test_graph_agent.py -k 'resolution_provider_level_failure or resolution_failure_retry_prefers_future_profile_over_last_specialized_tool_name or resolution_failure_retry_prefers_post_action_profile_over_last_specialized_tool_name'`
+    - `3 passed, 1133 deselected`
+  - 本轮专项回归：
+    - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+    - `683 passed, 453 deselected`
 - [x] 本轮继续收掉 `action_intent_need_future_evidence=1` 这条旧 followup marker 链的 live producer/consumer：
   - 旧行为：
     - `executor.py` 在 `infer_action_intent` 后仍直接写：

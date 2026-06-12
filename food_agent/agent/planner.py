@@ -3399,7 +3399,7 @@ class GraphAgentPlanner:
             )
         return None
 
-    def _action_intent_resolution_needs_more_evidence(self, *, tool_name: str, result: dict[str, Any]) -> bool:
+    def _action_intent_resolution_needs_more_evidence(self, *, result: dict[str, Any]) -> bool:
         if bool(result.get("need_more_evidence")):
             return True
         try:
@@ -3556,7 +3556,6 @@ class GraphAgentPlanner:
         *,
         state: AgentState,
         hints: dict[str, Any],
-        tool_name: str,
         result: dict[str, Any],
     ) -> PlannerDecision | None:
         if not self._is_action_intent_task(state):
@@ -3576,7 +3575,7 @@ class GraphAgentPlanner:
         decisive_observation = str(result.get("decisive_observation") or "").strip()
         missing_profile_grounding = prefers_future_profile and (confidence < 0.84 or not decisive_observation)
         if not (
-            self._action_intent_resolution_needs_more_evidence(tool_name=tool_name, result=result)
+            self._action_intent_resolution_needs_more_evidence(result=result)
             or self._action_intent_result_is_weak_generic_claim(state=state, result=result)
             or self._action_intent_result_is_workspace_or_final_placement_close_call(state=state, result=result)
             or missing_profile_grounding
@@ -3823,6 +3822,35 @@ class GraphAgentPlanner:
         if gap_type == "future_outcome":
             return "future_use_outcome_resolution"
         return "future_use_resolution"
+
+    def _build_action_intent_resolution_retry_decision(
+        self,
+        *,
+        state: AgentState,
+        hints: dict[str, Any],
+        result: dict[str, Any],
+    ) -> PlannerDecision | None:
+        primary_gap = self._action_intent_primary_gap(state)
+        blocker_hint = self._action_intent_verifier_blocker_hint(state)
+        prefers_future_profile = self._action_intent_recovery_prefers_future_profile(
+            state=state,
+            blocker_hint=blocker_hint,
+            primary_gap=primary_gap,
+            payload=result,
+        )
+        if prefers_future_profile:
+            return self._build_action_intent_future_use_resolution_decision(
+                state=state,
+                hints=hints,
+                result=result,
+                thought="why 题当前 resolution payload 失败，先用干净上下文重试更晚结果型专用裁决，不直接用上一轮结构化结果收口。",
+            )
+        return self._build_action_intent_pairwise_resolution_decision(
+            state=state,
+            hints=hints,
+            result=result,
+            thought="why 题当前 resolution payload 失败，先用干净上下文重试近窗结果型专用裁决，不直接用上一轮结构化结果收口。",
+        )
 
     def _action_intent_resolution_observation_focus(
         self,
@@ -4273,6 +4301,19 @@ class GraphAgentPlanner:
         count = 0
         for entry in getattr(state, "tool_trace", []):
             if not isinstance(entry, dict) or entry.get("tool") != tool_name:
+                continue
+            raw_result = entry.get("raw_result")
+            if isinstance(raw_result, dict) and raw_result.get("tool_failed"):
+                count += 1
+        return count
+
+    def _action_intent_failed_resolution_retry_count(self, state: AgentState) -> int:
+        count = 0
+        for entry in getattr(state, "tool_trace", []):
+            if not isinstance(entry, dict) or entry.get("tool") not in {
+                "resolve_action_intent_pairwise",
+                "resolve_action_intent_future_use",
+            }:
                 continue
             raw_result = entry.get("raw_result")
             if isinstance(raw_result, dict) and raw_result.get("tool_failed"):
@@ -8738,32 +8779,20 @@ class GraphAgentPlanner:
             and last_tool.get("tool") in {"resolve_action_intent_pairwise", "resolve_action_intent_future_use"}
             and last_result.get("tool_failed")
         ):
-            failed_tool = str(last_tool.get("tool") or "")
             provider_level_visual_failure = self._action_intent_failure_is_provider_level_visual_failure(last_result)
+            retry_resolution = self._build_action_intent_resolution_retry_decision(
+                state=state,
+                hints=hints,
+                result=last_result,
+            )
             if provider_level_visual_failure:
                 self._state_add_memory(
                     state,
-                    f"planner_guard={failed_tool}_provider_failure_skips_visual_retry=1",
+                    "planner_guard=action_intent_resolution_provider_failure_skips_visual_retry=1",
                 )
-            if self._action_intent_failed_tool_count(state, failed_tool) <= 1 and not provider_level_visual_failure:
-                if failed_tool == "resolve_action_intent_future_use":
-                    retry_future_use = self._build_action_intent_future_use_resolution_decision(
-                        state=state,
-                        hints=hints,
-                        result=last_result,
-                        thought="why 题后续用途裁决工具失败，先用干净上下文重试同一专用裁决，不直接用上一轮五选一结果收口。",
-                    )
-                    if retry_future_use is not None:
-                        return retry_future_use
-                if failed_tool == "resolve_action_intent_pairwise":
-                    retry_pairwise = self._build_action_intent_pairwise_resolution_decision(
-                        state=state,
-                        hints=hints,
-                        result=last_result,
-                        thought="why 题二选一后果裁决工具失败，先用干净上下文重试同一专用裁决，不直接用上一轮五选一结果收口。",
-                    )
-                    if retry_pairwise is not None:
-                        return retry_pairwise
+            if self._action_intent_failed_resolution_retry_count(state) <= 1 and not provider_level_visual_failure:
+                if retry_resolution is not None:
+                    return retry_resolution
             recovered_intent = self._latest_successful_action_intent_result(state)
             if self._action_intent_success_result_is_ready_for_failure_finish(
                 state=state,
@@ -8788,7 +8817,7 @@ class GraphAgentPlanner:
                 if candidate_plan is not None and candidate_plan.decision.tool not in {"finish", "rank_choices_from_state"}:
                     self._state_add_memory(
                         state,
-                        f"planner_guard={failed_tool}_provider_failure_prefers_state_candidate={candidate_plan.decision.tool}",
+                        f"planner_guard=action_intent_resolution_provider_failure_prefers_state_candidate={candidate_plan.decision.tool}",
                     )
                     return candidate_plan.decision
                 evidence_first = self._build_action_intent_evidence_first_recovery_decision(
@@ -8805,7 +8834,7 @@ class GraphAgentPlanner:
                         hints=hints,
                         used_tools=used_tools,
                         recovered=recovered,
-                        memory_prefix=f"planner_guard={failed_tool}_provider_failure_prefers_state_candidate_over_generic_recovery",
+                        memory_prefix="planner_guard=action_intent_resolution_provider_failure_prefers_state_candidate_over_generic_recovery",
                     )
                     if preferred_candidate is not None:
                         return preferred_candidate
@@ -9834,7 +9863,6 @@ class GraphAgentPlanner:
             and last_tool.get("tool") in {"resolve_action_intent_pairwise", "resolve_action_intent_future_use"}
             and last_result.get("best_index") is not None
         ):
-            latest_resolution_tool = str(last_tool.get("tool") or "")
             primary_gap = self._action_intent_primary_gap(state)
             blocker_hint = self._action_intent_verifier_blocker_hint(state)
             prefers_future_profile = self._action_intent_recovery_prefers_future_profile(
@@ -9902,7 +9930,6 @@ class GraphAgentPlanner:
                 if peak_guided is not None:
                     return peak_guided
             if self._action_intent_result_has_direct_post_action_evidence(last_result) and not self._action_intent_resolution_needs_more_evidence(
-                tool_name=latest_resolution_tool,
                 result=last_result,
             ):
                 best_index = int(last_result["best_index"])
@@ -9936,7 +9963,6 @@ class GraphAgentPlanner:
             transition_probe = self._build_action_intent_resolution_transition_recovery_decision(
                 state=state,
                 hints=hints,
-                tool_name=latest_resolution_tool,
                 result=last_result,
             )
             if transition_probe is not None:
@@ -9957,10 +9983,7 @@ class GraphAgentPlanner:
             if peak_guided is not None:
                 return peak_guided
             if (
-                self._action_intent_resolution_needs_more_evidence(
-                    tool_name=latest_resolution_tool,
-                    result=last_result,
-                )
+                self._action_intent_resolution_needs_more_evidence(result=last_result)
                 and self._action_intent_followup_attempt_count(state) < self._action_intent_extra_followup_budget(state)
             ):
                 extra_followup = self._build_action_intent_extra_followup_sampling_decision(
@@ -11871,7 +11894,6 @@ class GraphAgentPlanner:
                 transition_recovery = self._build_action_intent_resolution_transition_recovery_decision(
                     state=state,
                     hints=hints,
-                    tool_name=latest_action_intent_tool,
                     result=latest_action_intent_result,
                 )
                 if transition_recovery is not None:
@@ -15150,7 +15172,7 @@ class GraphAgentPlanner:
         if (
             prefers_future_profile
             and self._action_intent_result_has_direct_post_action_evidence(payload)
-            and not self._action_intent_resolution_needs_more_evidence(tool_name="", result=payload)
+            and not self._action_intent_resolution_needs_more_evidence(result=payload)
         ):
             return None
         if (
@@ -15197,7 +15219,6 @@ class GraphAgentPlanner:
             forced_transition_recovery = self._build_action_intent_resolution_transition_recovery_decision(
                 state=state,
                 hints=hints,
-                tool_name=tool_name,
                 result=payload,
             )
             if forced_transition_recovery is not None and not late_taken_outcome_support:
@@ -15217,7 +15238,6 @@ class GraphAgentPlanner:
             forced_transition_recovery = self._build_action_intent_resolution_transition_recovery_decision(
                 state=state,
                 hints=hints,
-                tool_name=tool_name,
                 result=payload,
             )
             if forced_transition_recovery is not None:
@@ -15231,7 +15251,6 @@ class GraphAgentPlanner:
             forced_transition_recovery = self._build_action_intent_resolution_transition_recovery_decision(
                 state=state,
                 hints=hints,
-                tool_name=tool_name,
                 result=payload,
             )
             if forced_transition_recovery is not None and (
@@ -15296,7 +15315,6 @@ class GraphAgentPlanner:
             transition_recovery = self._build_action_intent_resolution_transition_recovery_decision(
                 state=state,
                 hints=hints,
-                tool_name=tool_name,
                 result=payload,
             )
             if transition_recovery is not None:
@@ -15326,7 +15344,6 @@ class GraphAgentPlanner:
             transition_recovery = self._build_action_intent_resolution_transition_recovery_decision(
                 state=state,
                 hints=hints,
-                tool_name=tool_name,
                 result=payload,
             )
             if transition_recovery is not None:
@@ -15454,7 +15471,6 @@ class GraphAgentPlanner:
                 targeted_transition_recovery = self._build_action_intent_resolution_transition_recovery_decision(
                     state=state,
                     hints=hints,
-                    tool_name=tool_name,
                     result=payload,
                 )
                 if targeted_transition_recovery is not None:
@@ -15561,7 +15577,6 @@ class GraphAgentPlanner:
             forced_transition_recovery = self._build_action_intent_resolution_transition_recovery_decision(
                 state=state,
                 hints=hints,
-                tool_name=tool_name,
                 result=payload,
             )
             if forced_transition_recovery is not None:
