@@ -2361,13 +2361,12 @@ class GraphAgentPlanner:
         if tool_name == "sample_frames_around_peaks" and not tag.endswith("_followup_peaks"):
             return False
         if tool_name == "sample_sparse_frames":
-            structured_specialized_tool = self._action_intent_structured_specialized_recovery_tool(state)
             primary_gap = self._action_intent_primary_gap(state)
             if "_followup_ext" not in tag and not (
                 tag.endswith("_followup")
                 and (
-                    self._action_intent_pending_resolution_tool(state)
-                    or structured_specialized_tool
+                    self._action_intent_has_explicit_pending_resolution_marker(state)
+                    or self._action_intent_has_followup_gap_marker(state)
                     or isinstance(primary_gap, dict)
                 )
             ):
@@ -3040,12 +3039,11 @@ class GraphAgentPlanner:
         if not self._is_action_intent_task(state):
             return []
         latest_result = self._latest_successful_action_intent_result(state)
-        structured_specialized_tool = self._action_intent_structured_specialized_recovery_tool(state)
         primary_gap = self._action_intent_primary_gap(state)
         gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
         include_followup = (
-            bool(self._action_intent_pending_resolution_tool(state))
-            or bool(structured_specialized_tool)
+            self._action_intent_has_explicit_pending_resolution_marker(state)
+            or self._action_intent_has_followup_gap_marker(state)
             or gap_type in {"future_outcome", "relation_confirmation", "target_discovery"}
             or self._action_intent_followup_attempt_count(state) > 0
             or self._action_intent_has_transition_followup_frames(state)
@@ -4352,9 +4350,16 @@ class GraphAgentPlanner:
         if not self._is_action_intent_task(state):
             return False
         pending_tool = self._action_intent_pending_resolution_tool(state)
-        structured_specialized_tool = self._action_intent_structured_specialized_recovery_tool(state)
+        primary_gap = self._action_intent_primary_gap(state)
+        primary_gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
+        has_observation_gap_requiring_more_search = primary_gap_type in {
+            "future_outcome",
+            "relation_confirmation",
+            "target_discovery",
+            "immediate_outcome",
+        }
         if pending_tool and not (
-            structured_specialized_tool
+            has_observation_gap_requiring_more_search
             and self._should_continue_search_from_sufficiency(state)
             and self._action_intent_followup_attempt_count(state) >= 1
         ):
@@ -4953,7 +4958,6 @@ class GraphAgentPlanner:
         latest_resolution = self._latest_action_intent_resolution_payload(state)
         latest_action_intent_tool = latest_resolution[0] if latest_resolution is not None else ""
         latest_action_intent_result = latest_resolution[1] if latest_resolution is not None else {}
-        structured_specialized_tool = self._action_intent_structured_specialized_recovery_tool(state)
         primary_gap = self._action_intent_primary_gap(state)
         primary_gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
         explicit_downstream_object_target = self._action_intent_has_explicit_downstream_object_gap(state)
@@ -11822,7 +11826,6 @@ class GraphAgentPlanner:
             latest_resolution = self._latest_action_intent_resolution_payload(state)
             latest_action_intent_tool = latest_resolution[0] if latest_resolution is not None else ""
             latest_action_intent_result = latest_resolution[1] if latest_resolution is not None else {}
-            structured_specialized_tool = self._action_intent_structured_specialized_recovery_tool(state)
             primary_gap = self._action_intent_primary_gap(state)
             explicit_downstream_object_target = self._action_intent_has_explicit_downstream_object_gap(state)
             if (

@@ -263,8 +263,8 @@ Gap 只能来自 observation state，建议只保留以下通用类型：
 
 - [x] `Phase 0` 建立执行边界与冻结范围
 - [x] `Phase 1` 清空 Finalizer 里的旧答案语义补丁
-- [ ] `Phase 2` 统一 Primary Gap Schema
-- [ ] `Phase 3` 统一 Planner 搜索决策，只允许 Gap 驱动
+- [x] `Phase 2` 统一 Primary Gap Schema
+- [x] `Phase 3` 统一 Planner 搜索决策，只允许 Gap 驱动
 - [ ] `Phase 4` 收缩 Specialized Resolution，降级为普通搜证工具
 - [x] `Phase 5` 清理 State/Trace 中会污染后续思考的答案产物
 - [ ] `Phase 6` 系统性替换旧测试体系
@@ -273,7 +273,7 @@ Gap 只能来自 observation state，建议只保留以下通用类型：
 
 ### 当前完成度快照
 
-- [x] 已完成阶段：`5 / 9`
+- [x] 已完成阶段：`7 / 9`
 - [ ] 进行中阶段：`Phase 4 / Phase 6`
 - [x] 本轮继续切掉了一段 `planner` 中仍由 `latest specialized tool name` 主导 `close_call / ready_to_finish` 的 live gate：
   - 旧行为：
@@ -3498,6 +3498,40 @@ Phase 0 审计后的最小真实缺口已经明确：
     - 有显式 downstream primary gap 时
     - `heuristic_fallback` 必须优先走 `primary_gap` 恢复
     - 不能退回 `resolve_action_intent_future_use`
+- [x] 本轮继续切掉一条 `structured_specialized_tool -> followup/timeline/spatial-probe` 的 live consumer 链：
+  - 旧行为：
+    - `planner._action_intent_should_run_timeline_review(...)`
+      在 `sample_sparse_frames` 的普通 `followup` 标签场景里，
+      仍允许 `structured_specialized_tool` 直接放行 timeline review
+    - `planner._action_intent_candidate_inference_frames(...)`
+      仍会因为 `structured_specialized_tool` 保留 followup 帧
+    - `planner._action_intent_needs_spatial_probe(...)`
+      在 stale `pending_resolution` 存在时，
+      仍要求 `structured_specialized_tool` 非空才允许继续 observation-side spatial probe
+    - 这意味着：
+      - followup 帧保留
+      - timeline review
+      - spatial probe
+      这三类动作还会被旧 specialized 身份直接放行
+  - 当前变化：
+    - 上述三处 runtime consumer 已统一改成 observation-first：
+      - 显式 `pending_resolution` marker
+      - `action_intent_followup_gap` marker
+      - `primary_gap`
+      - followup 覆盖状态 / 搜索预算
+    - `structured_specialized_tool` 不再是这三处动作的放行条件
+    - stale `pending_resolution` 若要允许 spatial probe，
+      现在必须由真实 `primary_gap` 继续支撑，而不是靠旧 specialized identity
+  - 本轮迁移/新增测试：
+    - `test_planner_action_intent_candidate_inference_frames_include_followup_from_observation_gap_without_successful_intent_payload`
+    - `test_planner_action_intent_regular_followup_can_trigger_timeline_review_from_observation_gap_without_pending_marker`
+    - `test_planner_action_intent_spatial_probe_can_bypass_stale_pending_marker_when_observation_gap_still_requires_search`
+  - 本轮定向回归：
+    - `pytest -q tests/test_graph_agent.py -k 'candidate_inference_frames_include_followup_from_observation_gap_without_successful_intent_payload or regular_followup_can_trigger_timeline_review_from_observation_gap_without_pending_marker or spatial_probe_can_bypass_stale_pending_marker_when_observation_gap_still_requires_search or followup_route_does_not_bootstrap_from_structured_specialized_tool_without_observation_gap or followup_frames_without_pending_marker_do_not_auto_resume_structured_specialized_resolution or spatial_probe_only_after_direct_temporal_routes_are_exhausted'`
+    - `6 passed, 1128 deselected`
+  - 本轮专项回归：
+    - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+    - `678 passed, 456 deselected`
 
 ---
 
