@@ -4000,6 +4000,45 @@ class GraphAgentPlanner:
             return True
         return latest_end < action_end + 7.5
 
+    def _action_intent_ready_for_observation_grounded_pairwise_resolution(
+        self,
+        *,
+        state: AgentState,
+        result: dict[str, Any] | None,
+        followup_attempt_count: int,
+        pairwise_coverage_short: bool,
+        future_use_coverage_short: bool,
+        mixed_temporal_uncertainty: bool,
+    ) -> bool:
+        if not self._is_action_intent_task(state):
+            return False
+        if followup_attempt_count < 2 or not isinstance(result, dict):
+            return False
+        if self._action_intent_result_has_direct_post_action_evidence(result):
+            return False
+        if pairwise_coverage_short or future_use_coverage_short or mixed_temporal_uncertainty:
+            return False
+        if self._action_intent_has_next_use_followup_gap(state=state, result=result):
+            return False
+        if self._action_intent_result_points_to_later_outcome_uncertainty(result):
+            return False
+        primary_gap = self._action_intent_primary_gap(state)
+        gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
+        if gap_type in {"future_outcome", "relation_confirmation", "target_discovery"}:
+            return False
+        support_text = self._action_intent_result_support_text(result)
+        if not support_text:
+            return False
+        readiness_markers = (
+            "enough post-action coverage to run pairwise outcome resolution",
+            "enough immediate-result coverage to run pairwise outcome resolution",
+            "enough direct-result coverage to run pairwise outcome resolution",
+            "post-action coverage is now sufficient for pairwise outcome resolution",
+        )
+        if any(marker in support_text for marker in readiness_markers):
+            return True
+        return self._action_intent_result_has_indecisive_post_action_support(result)
+
     def _action_intent_post_action_followup_window_is_short(
         self,
         *,
@@ -9224,11 +9263,6 @@ class GraphAgentPlanner:
                 )
         if isinstance(last_result, dict) and last_tool.get("tool") == "infer_action_intent" and last_result.get("best_index") is not None:
             followup_attempt_count = self._action_intent_followup_attempt_count(state)
-            has_runner_up = last_result.get("second_best_index") is not None
-            candidate_count = len(
-                [value for value in (last_result.get("candidate_indices") or []) if value is not None]
-            )
-            has_multi_candidate_uncertainty = has_runner_up or candidate_count >= 2
             direct_post_resolved = self._action_intent_result_has_direct_post_action_evidence(last_result) and not self._action_intent_direct_evidence_still_needs_resolution(
                 state=state,
                 result=last_result,
@@ -9293,7 +9327,7 @@ class GraphAgentPlanner:
                         prediction=best_index,
                         confidence=float(last_result.get("confidence") or 0.0),
                     )
-            if needs_followup or needs_pairwise_resolution or needs_future_use_resolution or has_multi_candidate_uncertainty:
+            if needs_followup or needs_pairwise_resolution or needs_future_use_resolution:
                 if (
                     followup_attempt_count < 1
                     and self._action_intent_should_preempt_initial_followup_with_transition(
@@ -9314,7 +9348,6 @@ class GraphAgentPlanner:
                     needs_followup
                     or needs_pairwise_resolution
                     or needs_future_use_resolution
-                    or has_multi_candidate_uncertainty
                 ):
                     followup = self._build_action_intent_followup_sampling_decision(
                         state=state,
@@ -9372,7 +9405,6 @@ class GraphAgentPlanner:
                     )
                     or (
                         not support_text
-                        and has_multi_candidate_uncertainty
                         and reveal_subtype == "revealed_target_retrieval"
                         and not self._action_intent_has_next_use_followup_gap(state=state, result=last_result)
                     )
@@ -9462,6 +9494,22 @@ class GraphAgentPlanner:
                     )
                     if peak_followup is not None:
                         return peak_followup
+                if self._action_intent_ready_for_observation_grounded_pairwise_resolution(
+                    state=state,
+                    result=last_result,
+                    followup_attempt_count=followup_attempt_count,
+                    pairwise_coverage_short=pairwise_coverage_short,
+                    future_use_coverage_short=future_use_coverage_short,
+                    mixed_temporal_uncertainty=mixed_temporal_uncertainty,
+                ):
+                    pairwise = self._build_action_intent_pairwise_resolution_decision(
+                        state=state,
+                        hints=hints,
+                        result=last_result,
+                        thought="why 题当前已经补足动作后覆盖，剩余分歧仍是近窗结果解释；停止继续扩窗，进入 observation-first 的 pairwise 裁决。",
+                    )
+                    if pairwise is not None:
+                        return pairwise
                 if followup_attempt_count >= 1:
                     long_horizon_revisit = self._build_action_intent_cached_long_horizon_revisit_decision(
                         state=state,
@@ -9533,15 +9581,6 @@ class GraphAgentPlanner:
                         hints=hints,
                         result=last_result,
                         thought="why 题已补过一轮结果帧，改为只在前两名歧义候选之间做最终裁决。",
-                    )
-                    if pairwise is not None:
-                        return pairwise
-                if followup_attempt_count >= 2 and has_multi_candidate_uncertainty:
-                    pairwise = self._build_action_intent_pairwise_resolution_decision(
-                        state=state,
-                        hints=hints,
-                        result=last_result,
-                        thought="why 题当前已经补过足够的动作后覆盖，进入 observation-first 的 pairwise 结果裁决。",
                     )
                     if pairwise is not None:
                         return pairwise

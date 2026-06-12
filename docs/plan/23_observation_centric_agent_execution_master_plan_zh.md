@@ -438,6 +438,41 @@ Gap 只能来自 observation state，建议只保留以下通用类型：
   - 本轮专项回归：
     - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
     - `683 passed, 453 deselected`
+- [x] 本轮继续切掉 `planner._heuristic_fallback(...)` 里 `runner_up / candidate_count` 直接驱动 why followup 的链：
+  - 旧行为：
+    - 初始 followup gate 会把
+      - `second_best_index`
+      - `candidate_indices`
+      聚合成 `has_multi_candidate_uncertainty`
+    - 只要这个布尔量为真，
+      planner 就可能继续：
+      - `sample_sparse_frames`
+      - `resolve_action_intent_pairwise`
+    - 这属于典型的
+      `candidate competition -> search / specialized resolution`
+      直连链
+  - 当前变化：
+    - 已删除 `has_runner_up / candidate_count / has_multi_candidate_uncertainty`
+      这组直接门控
+    - why 的继续搜证不再允许仅因：
+      - `runner_up`
+      - `candidate_indices`
+      存在而继续扩窗或进入 pairwise
+    - 同时补回一个 observation-grounded 的晚期 pairwise 入口：
+      - 只有当动作后覆盖已经补足
+      - 当前不存在 later-outcome / next-use gap
+      - 当前 support text 明确表示 post-action coverage 已足够进入 pairwise outcome resolution
+      才允许停止继续扩窗并进入 `resolve_action_intent_pairwise`
+  - 本轮新增/改写测试：
+    - `test_planner_action_intent_runner_up_alone_does_not_trigger_initial_followup`
+    - `test_planner_action_intent_runner_up_alone_does_not_trigger_pairwise_after_multiple_followups`
+    - `test_planner_action_intent_pairwise_allows_resolution_after_extra_followup_has_already_been_sampled`
+  - 本轮定向回归：
+    - `pytest -q tests/test_graph_agent.py -k 'runner_up_alone_does_not_trigger_initial_followup or runner_up_alone_does_not_trigger_pairwise_after_multiple_followups or pairwise_allows_resolution_after_extra_followup_has_already_been_sampled or direct_followup_evidence_still_allows_finish'`
+    - `4 passed, 1135 deselected`
+  - 本轮专项回归：
+    - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+    - `686 passed, 453 deselected`
 - [x] 本轮继续切掉了一段 `planner` 中仍由 `latest specialized tool name` 主导 `close_call / ready_to_finish` 的 live gate：
   - 旧行为：
     - `planner._action_intent_result_is_close_call_for_recovery(...)`
@@ -4008,6 +4043,17 @@ Phase 0 审计后的最小真实缺口已经明确：
 
 ### Phase 6 当前进展
 
+- [x] 本轮又迁移了 2 条仍在保护 `runner_up -> action` 旧契约的测试：
+  - `runner_up_alone_does_not_trigger_initial_followup`
+  - `runner_up_alone_does_not_trigger_pairwise_after_multiple_followups`
+- [x] 新契约：
+  - 不再要求：
+    - 只要出现 `runner_up / candidate_indices`
+      planner 就必须继续 followup 或 pairwise
+  - 只保护：
+    - `runner_up` 本身不得单独触发搜索动作
+    - 若 observation-side post-action coverage 已足够，
+      才允许进入 pairwise resolution
 - [x] 本轮又迁移了 4 条专门验证 followup marker 消费的测试到新 observation-centric 前缀：
   - `followup_window_expands_with_window_level`
   - `followup_frames_trigger_second_intent_pass`
