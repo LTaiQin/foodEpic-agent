@@ -275,6 +275,44 @@ Gap 只能来自 observation state，建议只保留以下通用类型：
 
 - [x] 已完成阶段：`7 / 9`
 - [ ] 进行中阶段：`Phase 4 / Phase 6`
+- [x] 本轮继续把 `state/executor` 里的 observation-centric runtime scaffolding 收口为可验证状态：
+  - 当前变化：
+    - `state.py`
+      - 已支持运行态 `search_budget`
+      - `restore_session_memory(...)` 会过滤 action-intent 控制残影，包括：
+        - `action_intent_pending_resolution=`
+        - `action_intent_pending_candidates=`
+        - `action_intent_future_use_candidates=`
+        - `planner_guard=`
+        - `planner_override `
+      - `verification_history` / `export_session_memory(...)`
+        现在导出 observation-centric 的：
+        - `action_intent_trace`
+        - `primary_gap`
+        - `recommended_next_action`
+        - `finish_mode`
+      - `snapshot()` 继续避免把 `final_metadata / action_intent_trace`
+        这类非必要导出物回灌到 planner prompt
+    - `executor.py`
+      - 已在运行时初始化并递增 `search_budget`
+      - 已把 `final_metadata / structured_final_candidate`
+        收成 finish/export 层产物，而不是搜索主路径输入
+      - why 运行态会显式写入
+        `disable_legacy_specialized_recovery=1`
+        作为新 observation-first 分支保护
+      - `inspect_visual_evidence` 的 `needs_more_evidence`
+        会显式回灌为 observation-side gap marker，
+        而不是候选答案竞争产物
+  - 本轮补强测试：
+    - `test_agent_state_restore_session_memory_drops_action_intent_control_markers`
+      现覆盖 restored
+      `pending_candidates / future_use_candidates` 过滤
+  - 本轮定向回归：
+    - `pytest -q tests/test_graph_agent.py -k 'restore_session_memory or action_intent_trace or build_finish_metadata or materialize_structured_final_candidate or search_budget or visual_review_needs_more_evidence or disable_legacy_specialized_recovery'`
+    - `9 passed, 1128 deselected`
+  - 本轮专项回归：
+    - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+    - `684 passed, 453 deselected`
 - [x] 本轮继续切掉 `executor` 里一组 still runtime-active 的 candidate marker producer：
   - 旧行为：
     - `executor.py` 在以下路径仍会把答案候选残影写回 `working_memory`

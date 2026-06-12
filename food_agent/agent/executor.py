@@ -25,6 +25,7 @@ class GraphAgentExecutor:
     def execute(self, state: AgentState) -> AgentState:
         self.toolbox.set_runtime_context(question=state.question, inputs_json=state.inputs_json)
         hints = self.toolbox.default_hints(state.question, state.inputs_json)
+        state.initialize_search_budget()
         self._seed_reusable_memory(state, hints)
         self._initialize_reasoning_state(state, hints)
         self._emit_heartbeat(state=state, phase="initialized")
@@ -45,7 +46,11 @@ class GraphAgentExecutor:
                     conflicts=verification.conflicts,
                     recommend_next_action=verification.recommend_next_action,
                     summary=verification.summary,
+                    evidence_gaps=verification.evidence_gaps,
+                    sufficiency_decision=verification.sufficiency_decision,
+                    action_intent_hypotheses=verification.action_intent_hypotheses,
                 )
+                self._materialize_structured_final_candidate(state=state, verification=verification)
                 state.add_memory(f"verifier={verification.summary}")
                 self._emit_heartbeat(
                     state=state,
@@ -59,6 +64,26 @@ class GraphAgentExecutor:
                     },
                 )
                 if not verification.sufficient:
+                    if self._verification_allows_budget_exhausted_finish(state=state, verification=verification):
+                        finish_payload = self.toolbox.finish(
+                            prediction=decision.args.get("prediction"),
+                            answer=decision.args.get("answer"),
+                            confidence=decision.args.get("confidence"),
+                        )
+                        finish_payload["final_metadata"] = self._build_finish_metadata(
+                            state=state,
+                            verification=verification,
+                            finish_payload=finish_payload,
+                        )
+                        self._apply_finish(state, finish_payload)
+                        state.record_tool("finish", decision.args, self._summarize(finish_payload), raw_result=finish_payload)
+                        self._emit_heartbeat(
+                            state=state,
+                            phase="finished_budget_exhausted",
+                            tool="finish",
+                            extra={"prediction": state.final_prediction},
+                        )
+                        break
                     state.replace_open_questions(
                         state.open_questions + [item for item in verification.missing_evidence_types if item not in state.open_questions]
                     )
@@ -67,6 +92,11 @@ class GraphAgentExecutor:
                     state.add_hypothesis(f"verifier_blocked_finish={verification.recommend_next_action}")
                     continue
                 finish_payload = self.toolbox.finish(**decision.args)
+                finish_payload["final_metadata"] = self._build_finish_metadata(
+                    state=state,
+                    verification=verification,
+                    finish_payload=finish_payload,
+                )
                 self._apply_finish(state, finish_payload)
                 state.record_tool("finish", decision.args, self._summarize(finish_payload), raw_result=finish_payload)
                 self._emit_heartbeat(state=state, phase="finished", tool="finish", extra={"prediction": state.final_prediction})
@@ -101,6 +131,31 @@ class GraphAgentExecutor:
                 self._apply_finish(state, result)
                 self._emit_heartbeat(state=state, phase="finished", tool=decision.tool, extra={"prediction": state.final_prediction})
                 break
+        if state.final_prediction is None:
+            verification = self.verifier.verify(state=state)
+            state.record_verification(
+                sufficient=verification.sufficient,
+                confidence=verification.confidence,
+                missing_evidence_types=verification.missing_evidence_types,
+                conflicts=verification.conflicts,
+                recommend_next_action=verification.recommend_next_action,
+                summary=verification.summary,
+                evidence_gaps=verification.evidence_gaps,
+                sufficiency_decision=verification.sufficiency_decision,
+                action_intent_hypotheses=verification.action_intent_hypotheses,
+            )
+            self._materialize_structured_final_candidate(state=state, verification=verification)
+            self._emit_heartbeat(
+                state=state,
+                phase="loop_exhausted_verify",
+                extra={
+                    "sufficient": verification.sufficient,
+                    "finish_mode": verification.sufficiency_decision.get("finish_mode")
+                    if isinstance(verification.sufficiency_decision, dict)
+                    else "",
+                    "prediction": state.final_prediction,
+                },
+            )
         return state
 
     def _is_weight_task(self, state: AgentState) -> bool:
@@ -167,6 +222,9 @@ class GraphAgentExecutor:
         before_counts = self._state_counts(state)
         state.record_tool(decision.tool, decision.args, self._summarize(result), raw_result=result)
         self._merge_result_into_state(state, decision.tool, result)
+        after_counts = self._state_counts(state)
+        new_frames = max(0, int(after_counts["frames"]) - int(before_counts["frames"]))
+        state.update_search_budget_after_tool(tool_name=decision.tool, newly_added_frames=new_frames)
         self._update_reasoning_after_tool(state, decision.tool, result)
         self._reconcile_conflict_questions(state)
         self._record_ineffective_tool_if_needed(state, decision, result, before_counts)
@@ -204,6 +262,8 @@ class GraphAgentExecutor:
             state.add_open_question("need_state_evidence")
         if hints.get("location_keyword") and not self._is_weight_task(state):
             state.add_open_question("need_location_evidence")
+        if self._is_action_intent_task(state):
+            state.add_memory("disable_legacy_specialized_recovery=1")
         if not state.open_questions:
             state.add_open_question("need_disambiguating_evidence")
 
@@ -679,6 +739,9 @@ class GraphAgentExecutor:
                 state.add_memory(f"vision_disabled={reason}")
                 state.add_hypothesis("vision_evidence_unavailable")
                 state.add_open_question("need_alternative_evidence_path")
+            if result.get("needs_more_evidence"):
+                state.add_open_question("need_disambiguating_evidence")
+                state.add_memory("visual_review_needs_more_evidence=1")
             self._record_semantic_conflicts_from_payload(state, result)
             summary = self._inspection_summary(result)
             if summary:
@@ -913,6 +976,191 @@ class GraphAgentExecutor:
         state.final_prediction = int(payload.get("prediction")) if payload.get("prediction") is not None else None
         state.final_answer = str(payload.get("answer") or "")
         state.confidence = float(payload.get("confidence") or 0.0)
+        final_metadata = payload.get("final_metadata")
+        if isinstance(final_metadata, dict):
+            state.final_metadata = dict(final_metadata)
+
+    def _materialize_structured_final_candidate(
+        self,
+        *,
+        state: AgentState,
+        verification: VerificationResult,
+    ) -> None:
+        if not self._verification_allows_structured_candidate_materialization(state=state, verification=verification):
+            return
+        candidate = self._resolve_structured_final_candidate(state=state, verification=verification)
+        if candidate is None:
+            return
+        prediction, answer, confidence, source = candidate
+        state.final_prediction = prediction
+        state.final_answer = answer
+        state.confidence = max(float(getattr(state, "confidence", 0.0) or 0.0), confidence)
+        state.final_metadata.setdefault("structured_final_candidate", {})
+        state.final_metadata["structured_final_candidate"] = {
+            "prediction": prediction,
+            "answer": answer,
+            "confidence": confidence,
+            "source": source,
+        }
+
+    def _verification_allows_structured_candidate_materialization(
+        self,
+        *,
+        state: AgentState,
+        verification: VerificationResult,
+    ) -> bool:
+        finish_mode = ""
+        if isinstance(verification.sufficiency_decision, dict):
+            finish_mode = str(verification.sufficiency_decision.get("finish_mode") or "").strip()
+        if finish_mode in {"needs_more_evidence", "resolve_conflict"}:
+            return False
+        if verification.sufficient:
+            return True
+        return self._verification_allows_budget_exhausted_finish(state=state, verification=verification)
+
+    def _resolve_structured_final_candidate(
+        self,
+        *,
+        state: AgentState,
+        verification: VerificationResult,
+    ) -> tuple[int, str, float, str] | None:
+        for entry in reversed(list(getattr(state, "tool_trace", []) or [])):
+            if not isinstance(entry, dict):
+                continue
+            raw_result = entry.get("raw_result")
+            if not isinstance(raw_result, dict):
+                continue
+            if raw_result.get("tool_failed") or raw_result.get("tool_ineffective"):
+                continue
+            if raw_result.get("need_more_evidence") or raw_result.get("need_future_evidence"):
+                continue
+            index = self._coerce_choice_index(raw_result.get("best_index"), state.choices)
+            if index is None:
+                continue
+            answer = str(raw_result.get("answer") or state.choices[index])
+            try:
+                confidence = float(raw_result.get("confidence") or 0.58)
+            except Exception:  # noqa: BLE001
+                confidence = 0.58
+            return index, answer, confidence, f"tool_trace:{entry.get('tool') or 'unknown'}"
+        fallback = self.toolbox.rank_choices_from_state(
+            question=str(getattr(state, "question", "") or ""),
+            choices=[str(choice) for choice in getattr(state, "choices", [])],
+            evidence=[str(item) for item in getattr(state, "evidence_bundle", [])[-12:]],
+            working_memory=[str(item) for item in getattr(state, "working_memory", [])[-16:]],
+        )
+        index = self._coerce_choice_index(fallback.get("best_index"), state.choices)
+        if index is None:
+            return None
+        answer = str(fallback.get("answer") or state.choices[index])
+        try:
+            confidence = float(fallback.get("confidence") or 0.52)
+        except Exception:  # noqa: BLE001
+            confidence = 0.52
+        return index, answer, confidence, "rank_choices_from_state_fallback"
+
+    def _coerce_choice_index(self, value: Any, choices: list[Any]) -> int | None:
+        try:
+            index = int(value)
+        except Exception:  # noqa: BLE001
+            return None
+        return index if 0 <= index < len(choices) else None
+
+    def _build_finish_metadata(
+        self,
+        *,
+        state: AgentState,
+        verification: VerificationResult,
+        finish_payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        final_prediction = (
+            getattr(state, "final_prediction", None)
+            if getattr(state, "final_prediction", None) is not None
+            else finish_payload.get("prediction")
+        )
+        final_answer = (
+            str(getattr(state, "final_answer", "") or "")
+            if str(getattr(state, "final_answer", "") or "").strip()
+            else str(finish_payload.get("answer") or "")
+        )
+        final_confidence = max(
+            float(getattr(state, "confidence", 0.0) or 0.0),
+            float(finish_payload.get("confidence") or 0.0),
+        )
+        sufficiency_decision = (
+            dict(verification.sufficiency_decision)
+            if isinstance(verification.sufficiency_decision, dict)
+            else {}
+        )
+        budget = dict(getattr(state, "search_budget", {}) or {})
+        finish_reason = str(sufficiency_decision.get("finish_mode") or "")
+        blocking_hypotheses = [
+            str(item).strip()
+            for item in sufficiency_decision.get("blocking_hypotheses", [])
+            if isinstance(item, str) and str(item).strip()
+        ]
+        blocking_comparisons = [
+            dict(item)
+            for item in sufficiency_decision.get("blocking_comparisons", [])
+            if isinstance(item, dict) and item
+        ]
+        if not finish_reason:
+            structured_requires_more_evidence = (
+                isinstance(sufficiency_decision, dict)
+                and (
+                    sufficiency_decision.get("sufficient") is False
+                    or bool(sufficiency_decision.get("missing_gap_types"))
+                    or bool(str(sufficiency_decision.get("recommended_next_step") or "").strip())
+                    or bool(blocking_hypotheses)
+                    or bool(blocking_comparisons)
+                    or bool(verification.evidence_gaps)
+                )
+            )
+            if verification.sufficient and not structured_requires_more_evidence:
+                finish_reason = "finish_confident"
+            elif bool(budget.get("budget_exhausted") or state.is_search_budget_exhausted()):
+                finish_reason = "finish_budget_exhausted_best_guess"
+            elif verification.conflicts:
+                finish_reason = "resolve_conflict"
+            elif (
+                verification.missing_evidence_types
+                or verification.evidence_gaps
+                or blocking_hypotheses
+                or blocking_comparisons
+            ):
+                finish_reason = "needs_more_evidence"
+            else:
+                finish_reason = "finish_insufficient_evidence"
+        return {
+            "finish_reason": finish_reason,
+            "remaining_gaps": [item for item in verification.evidence_gaps if isinstance(item, dict)],
+            "final_support_summary": str(verification.summary or ""),
+            "used_budget": {
+                "tool_steps_used": int(budget.get("tool_steps_used") or 0),
+                "new_frames_observed": int(budget.get("new_frames_observed") or 0),
+                "long_horizon_expansions_used": int(budget.get("long_horizon_expansions_used") or 0),
+                "window_level": int(budget.get("window_level") or 0),
+                "budget_exhausted": bool(budget.get("budget_exhausted") or state.is_search_budget_exhausted()),
+            },
+            "prediction": final_prediction,
+            "answer": final_answer,
+            "confidence": final_confidence,
+        }
+
+    def _verification_allows_budget_exhausted_finish(
+        self,
+        *,
+        state: AgentState,
+        verification: VerificationResult,
+    ) -> bool:
+        finish_mode = ""
+        if isinstance(verification.sufficiency_decision, dict):
+            finish_mode = str(verification.sufficiency_decision.get("finish_mode") or "").strip()
+        if finish_mode == "finish_budget_exhausted_best_guess":
+            return True
+        if finish_mode:
+            return False
+        return bool(getattr(state, "is_search_budget_exhausted", lambda: False)()) and not bool(verification.sufficient)
 
     def _maybe_skip_explicit_writeback(self, state: AgentState, decision: PlannerDecision) -> dict[str, Any] | None:
         tool = decision.tool
@@ -951,7 +1199,16 @@ class GraphAgentExecutor:
                 parts.append(f"{key}={value}")
         obs = attrs.get("observation")
         if isinstance(obs, dict):
-            for key in ("scene_location", "ongoing_action", "possible_step", "state_change_hint"):
+            for key in (
+                "scene_location",
+                "ongoing_action",
+                "possible_step",
+                "state_change_hint",
+                "timeline_summary",
+                "immediate_result",
+                "next_action_hint",
+                "direct_purpose_hint",
+            ):
                 value = obs.get(key)
                 if value:
                     parts.append(f"{key}={value}")
@@ -959,6 +1216,15 @@ class GraphAgentExecutor:
 
     def _inspection_summary(self, payload: dict[str, Any]) -> str:
         preferred_keys = (
+            "timeline_summary",
+            "immediate_result",
+            "next_action_hint",
+            "direct_purpose_hint",
+            "access_or_reveal_evidence",
+            "hand_free_enablement_evidence",
+            "next_use_evidence",
+            "ambiguity_note",
+            "needs_more_evidence",
             "target_object",
             "target_location",
             "ongoing_action",
@@ -968,7 +1234,15 @@ class GraphAgentExecutor:
             "reading",
             "answer_hint",
         )
-        parts = [f"{key}={payload[key]}" for key in preferred_keys if payload.get(key)]
+        parts: list[str] = []
+        for key in preferred_keys:
+            value = payload.get(key)
+            if value is None or value == "":
+                continue
+            if key == "needs_more_evidence":
+                parts.append(f"{key}={1 if bool(value) else 0}")
+                continue
+            parts.append(f"{key}={value}")
         if parts:
             return "inspection; " + "; ".join(parts)
         raw = str(payload.get("raw_output") or "").strip()
@@ -1111,7 +1385,10 @@ class GraphAgentExecutor:
 
     def _auto_write_visual_observation(self, state: AgentState, payload: dict[str, Any]) -> None:
         label = str(
-            payload.get("possible_step")
+            payload.get("direct_purpose_hint")
+            or payload.get("timeline_summary")
+            or payload.get("immediate_result")
+            or payload.get("possible_step")
             or payload.get("ongoing_action")
             or payload.get("target_object")
             or "agent visual observation"
@@ -1120,7 +1397,23 @@ class GraphAgentExecutor:
             return
         attributes = {
             key: payload.get(key)
-            for key in ("ongoing_action", "possible_step", "target_object", "target_location", "state_change_hint", "answer_hint", "raw_output")
+            for key in (
+                "ongoing_action",
+                "possible_step",
+                "target_object",
+                "target_location",
+                "state_change_hint",
+                "timeline_summary",
+                "immediate_result",
+                "next_action_hint",
+                "direct_purpose_hint",
+                "access_or_reveal_evidence",
+                "hand_free_enablement_evidence",
+                "next_use_evidence",
+                "ambiguity_note",
+                "answer_hint",
+                "raw_output",
+            )
             if payload.get(key)
         }
         image_path = state.retrieved_frames[-1] if state.retrieved_frames else ""

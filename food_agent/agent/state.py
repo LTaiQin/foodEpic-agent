@@ -8,6 +8,32 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+@dataclass(frozen=True)
+class ActionIntentHypothesis:
+    choice_index: int
+    choice_text: str
+    support_evidence: list[str] = field(default_factory=list)
+    contradiction_evidence: list[str] = field(default_factory=list)
+    missing_observations: list[str] = field(default_factory=list)
+    comparison_summary: str = ""
+    comparison: dict[str, Any] = field(default_factory=dict)
+    score: float = 0.0
+    confidence: float = 0.0
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "choice_index": int(self.choice_index),
+            "choice_text": str(self.choice_text),
+            "support_evidence": [str(item) for item in self.support_evidence if item],
+            "contradiction_evidence": [str(item) for item in self.contradiction_evidence if item],
+            "missing_observations": [str(item) for item in self.missing_observations if item],
+            "comparison_summary": str(self.comparison_summary or ""),
+            "comparison": dict(self.comparison or {}),
+            "score": float(self.score),
+            "confidence": float(self.confidence),
+        }
+
+
 @dataclass
 class AgentState:
     video_id: str
@@ -31,9 +57,12 @@ class AgentState:
     tool_failures: list[dict[str, Any]] = field(default_factory=list)
     ineffective_tools: list[dict[str, Any]] = field(default_factory=list)
     verification_history: list[dict[str, Any]] = field(default_factory=list)
+    action_intent_hypotheses: list[dict[str, Any]] = field(default_factory=list)
+    search_budget: dict[str, Any] = field(default_factory=dict)
     final_answer: str = ""
     final_prediction: int | None = None
     confidence: float = 0.0
+    final_metadata: dict[str, Any] = field(default_factory=dict)
 
     def record_tool(self, name: str, args: dict[str, Any], result_summary: str, raw_result: Any | None = None) -> None:
         entry = {"tool": name, "args": args, "result_summary": result_summary}
@@ -79,7 +108,16 @@ class AgentState:
         conflicts: list[str],
         recommend_next_action: str,
         summary: str,
+        evidence_gaps: list[dict[str, Any]] | None = None,
+        sufficiency_decision: dict[str, Any] | None = None,
+        action_intent_hypotheses: list[dict[str, Any]] | None = None,
     ) -> None:
+        primary_gap_recovery_trace = self._latest_primary_gap_recovery_trace()
+        sanitized_sufficiency = self._sanitize_sufficiency_decision_for_runtime(sufficiency_decision)
+        primary_gap_snapshot = self._latest_primary_gap_snapshot(
+            evidence_gaps=evidence_gaps,
+            sufficiency_decision=sanitized_sufficiency,
+        )
         entry = {
             "sufficient": bool(sufficient),
             "confidence": float(confidence),
@@ -87,14 +125,55 @@ class AgentState:
             "conflicts": [str(item) for item in conflicts if item],
             "recommend_next_action": str(recommend_next_action or ""),
             "summary": str(summary or ""),
+            "evidence_gaps": [item for item in (evidence_gaps or []) if isinstance(item, dict)],
+            "sufficiency_decision": sanitized_sufficiency,
+            "action_intent_hypotheses": [],
+            "primary_gap_recovery_trace": primary_gap_recovery_trace,
+            "primary_gap": primary_gap_snapshot,
         }
         self.verification_history.append(entry)
+        self.action_intent_hypotheses = []
+        self._sync_action_intent_trace_from_verification(entry)
 
     def latest_verification(self) -> dict[str, Any]:
         if not self.verification_history:
             return {}
         latest = self.verification_history[-1]
         return latest if isinstance(latest, dict) else {}
+
+    def initialize_search_budget(self) -> None:
+        if self.search_budget:
+            return
+        self.search_budget = {
+            "max_tool_steps": int(self.max_steps),
+            "max_new_frames": 24,
+            "max_long_horizon_expansions": 2,
+            "window_level": 0,
+            "tool_steps_used": 0,
+            "new_frames_observed": 0,
+            "long_horizon_expansions_used": 0,
+            "budget_exhausted": False,
+        }
+
+    def update_search_budget_after_tool(self, *, tool_name: str, newly_added_frames: int = 0) -> None:
+        self.initialize_search_budget()
+        self.search_budget["tool_steps_used"] = int(self.search_budget.get("tool_steps_used") or 0) + 1
+        if newly_added_frames > 0:
+            self.search_budget["new_frames_observed"] = int(self.search_budget.get("new_frames_observed") or 0) + int(newly_added_frames)
+        if tool_name in {"query_object", "query_spatial_context", "sample_sparse_frames", "extract_frames_for_range"}:
+            self.search_budget["long_horizon_expansions_used"] = int(self.search_budget.get("long_horizon_expansions_used") or 0) + 1
+        if tool_name in {"sample_sparse_frames", "extract_frames_for_range"}:
+            self.search_budget["window_level"] = min(2, int(self.search_budget.get("window_level") or 0) + 1)
+        self.search_budget["budget_exhausted"] = bool(self.is_search_budget_exhausted())
+
+    def is_search_budget_exhausted(self) -> bool:
+        if not self.search_budget:
+            return False
+        return bool(
+            int(self.search_budget.get("tool_steps_used") or 0) >= int(self.search_budget.get("max_tool_steps") or self.max_steps)
+            or int(self.search_budget.get("new_frames_observed") or 0) >= int(self.search_budget.get("max_new_frames") or 24)
+            or int(self.search_budget.get("long_horizon_expansions_used") or 0) >= int(self.search_budget.get("max_long_horizon_expansions") or 2)
+        )
 
     def add_node_result(self, node: dict[str, Any]) -> None:
         node_id = str(node.get("node_id") or "")
@@ -168,6 +247,7 @@ class AgentState:
         self.tool_failures = self.tool_failures[-80:]
         self.ineffective_tools = self.ineffective_tools[-80:]
         self.verification_history = self.verification_history[-40:]
+        self.action_intent_hypotheses = self.action_intent_hypotheses[-8:]
 
     def inputs_payload(self) -> dict[str, Any]:
         try:
@@ -195,7 +275,7 @@ class AgentState:
             "working_memory": self.working_memory[-20:],
             "tool_failures": self.tool_failures[-10:],
             "ineffective_tools": self.ineffective_tools[-10:],
-            "verification_history": self.verification_history[-5:],
+            "search_budget": self.search_budget,
             "confidence": self.confidence,
         }
 
@@ -214,6 +294,8 @@ class AgentState:
             "tool_failures": self.tool_failures[-100:],
             "ineffective_tools": self.ineffective_tools[-100:],
             "verification_history": self.verification_history[-100:],
+            "action_intent_trace": self._export_action_intent_trace(limit=20),
+            "search_budget": self.search_budget,
             "confidence": self.confidence,
         }
 
@@ -222,8 +304,12 @@ class AgentState:
             return
         if str(payload.get("video_id") or self.video_id) != self.video_id:
             return
-        self.working_memory = self._string_list(payload.get("working_memory"), limit=200)
-        self.evidence_bundle = self._string_list(payload.get("evidence_bundle"), limit=200)
+        self.working_memory = self._sanitize_restored_runtime_strings(
+            self._string_list(payload.get("working_memory"), limit=200)
+        )
+        self.evidence_bundle = self._sanitize_restored_runtime_strings(
+            self._string_list(payload.get("evidence_bundle"), limit=200)
+        )
         self.retrieved_frames = self._string_list(payload.get("retrieved_frames"), limit=200)
         self.artifacts = self._string_list(payload.get("artifacts"), limit=200)
         visited_times = payload.get("visited_times")
@@ -235,7 +321,9 @@ class AgentState:
         retrieved_nodes = payload.get("retrieved_nodes")
         if isinstance(retrieved_nodes, list):
             self.retrieved_nodes = [item for item in retrieved_nodes[-200:] if isinstance(item, dict)]
-        self.hypotheses = self._string_list(payload.get("hypotheses"), limit=100)
+        self.hypotheses = self._sanitize_restored_runtime_strings(
+            self._string_list(payload.get("hypotheses"), limit=100)
+        )
         self.open_questions = self._string_list(payload.get("open_questions"), limit=100)
         tool_failures = payload.get("tool_failures")
         if isinstance(tool_failures, list):
@@ -245,7 +333,20 @@ class AgentState:
             self.ineffective_tools = [item for item in ineffective_tools[-100:] if isinstance(item, dict)]
         verification_history = payload.get("verification_history")
         if isinstance(verification_history, list):
-            self.verification_history = [item for item in verification_history[-100:] if isinstance(item, dict)]
+            sanitized_history: list[dict[str, Any]] = []
+            for item in verification_history[-100:]:
+                if not isinstance(item, dict):
+                    continue
+                entry = dict(item)
+                entry["action_intent_hypotheses"] = []
+                entry["sufficiency_decision"] = self._sanitize_sufficiency_decision_for_runtime(
+                    entry.get("sufficiency_decision")
+                )
+                sanitized_history.append(entry)
+            self.verification_history = sanitized_history
+        search_budget = payload.get("search_budget")
+        if isinstance(search_budget, dict):
+            self.search_budget = dict(search_budget)
         try:
             self.confidence = float(payload.get("confidence") or 0.0)
         except Exception:  # noqa: BLE001
@@ -260,3 +361,182 @@ class AgentState:
         if not isinstance(value, list):
             return []
         return [item for item in value[-limit:] if isinstance(item, str) and item]
+
+    def _export_action_intent_trace(self, *, limit: int) -> list[dict[str, Any]]:
+        trace: list[dict[str, Any]] = []
+        for verification in self.verification_history[-limit:]:
+            if not isinstance(verification, dict):
+                continue
+            sufficiency = verification.get("sufficiency_decision")
+            primary_gap = dict(verification.get("primary_gap") or {})
+            recommended_next_action = str(
+                (
+                    sufficiency.get("recommended_next_step")
+                    if isinstance(sufficiency, dict)
+                    else ""
+                )
+                or verification.get("recommend_next_action")
+                or ""
+            )
+            finish_mode = str(sufficiency.get("finish_mode") or "") if isinstance(sufficiency, dict) else ""
+            if not (
+                str(verification.get("summary") or "").strip()
+                or primary_gap
+                or str(verification.get("primary_gap_recovery_trace") or "").strip()
+                or recommended_next_action
+                or finish_mode
+            ):
+                continue
+            trace.append(
+                {
+                    "summary": str(verification.get("summary") or ""),
+                    "primary_gap": primary_gap,
+                    "primary_gap_recovery_trace": str(verification.get("primary_gap_recovery_trace") or ""),
+                    "recommended_next_action": recommended_next_action,
+                    "finish_mode": finish_mode,
+                }
+            )
+        return trace
+
+    def _latest_primary_gap_recovery_trace(self) -> str:
+        for item in reversed(self.hypotheses):
+            if isinstance(item, str) and item.startswith("primary_gap_recovery_trace="):
+                return item
+        for item in reversed(self.working_memory):
+            if isinstance(item, str) and item.startswith("primary_gap_recovery_trace="):
+                return item
+        return ""
+
+    def _latest_primary_gap_snapshot(
+        self,
+        *,
+        evidence_gaps: list[dict[str, Any]] | None,
+        sufficiency_decision: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        decision = sufficiency_decision if isinstance(sufficiency_decision, dict) else {}
+        recommended_next_step = str(decision.get("recommended_next_step") or "").strip()
+        gaps = [item for item in (evidence_gaps or []) if isinstance(item, dict)]
+        if gaps:
+            priority_rank = {"high": 0, "medium": 1, "low": 2}
+            preferred_gap_type = self._select_action_intent_primary_gap_type(
+                missing_gap_types=[
+                    str(item.get("gap_type") or "").strip()
+                    for item in gaps
+                    if isinstance(item, dict) and str(item.get("gap_type") or "").strip()
+                ],
+                recommended_next_step=recommended_next_step,
+            )
+            selected = sorted(
+                gaps,
+                key=lambda item: (
+                    priority_rank.get(str(item.get("priority") or "").lower(), 3),
+                    0 if str(item.get("gap_type") or "").strip() == preferred_gap_type and preferred_gap_type else 1,
+                    str(item.get("gap_type") or ""),
+                ),
+            )[0]
+            return {
+                "gap_type": str(selected.get("gap_type") or ""),
+                "missing_observation": str(selected.get("missing_observation") or ""),
+                "target_object": str(selected.get("target_object") or ""),
+                "target_fixture": str(selected.get("target_fixture") or ""),
+                "time_relation": str(selected.get("time_relation") or ""),
+                "source": str(selected.get("source") or ""),
+                "priority": str(selected.get("priority") or ""),
+            }
+        missing_gap_types = [
+            str(item).strip()
+            for item in decision.get("missing_gap_types", [])
+            if isinstance(item, str) and str(item).strip()
+        ]
+        if not missing_gap_types:
+            return {}
+        gap_type = self._select_action_intent_primary_gap_type(
+            missing_gap_types=missing_gap_types,
+            recommended_next_step=recommended_next_step,
+        )
+        if not gap_type:
+            return {}
+        return {
+            "gap_type": gap_type,
+            "missing_observation": "",
+            "target_object": "",
+            "target_fixture": "",
+            "time_relation": "derived_from_sufficiency",
+            "source": "sufficiency_missing_gap_types",
+            "priority": "high",
+        }
+
+    def _select_action_intent_primary_gap_type(
+        self,
+        *,
+        missing_gap_types: list[str],
+        recommended_next_step: str,
+    ) -> str:
+        candidates = {
+            str(item).strip()
+            for item in missing_gap_types
+            if isinstance(item, str) and str(item).strip()
+        }
+        if not candidates:
+            return ""
+        preferred_by_step = {
+            "need_precondition_context": ("precondition",),
+            "need_post_action_evidence": ("immediate_outcome", "future_outcome"),
+            "need_location_evidence": ("target_discovery", "relation_confirmation", "future_outcome"),
+            "need_disambiguating_evidence": ("relation_confirmation", "target_discovery", "future_outcome", "immediate_outcome"),
+        }
+        for candidate in preferred_by_step.get(recommended_next_step, ()):
+            if candidate in candidates:
+                return candidate
+        for candidate in (
+            "precondition",
+            "immediate_outcome",
+            "future_outcome",
+            "relation_confirmation",
+            "target_discovery",
+        ):
+            if candidate in candidates:
+                return candidate
+        return ""
+
+    def _sanitize_sufficiency_decision_for_runtime(self, value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+        missing_gap_types = [
+            str(item).strip()
+            for item in value.get("missing_gap_types", [])
+            if isinstance(item, str) and str(item).strip()
+        ]
+        return {
+            "sufficient": bool(value.get("sufficient")) if "sufficient" in value else False,
+            "missing_gap_types": missing_gap_types,
+            "blocking_hypotheses": [],
+            "blocking_comparisons": [],
+            "recommended_next_step": str(value.get("recommended_next_step") or "").strip(),
+            "finish_mode": str(value.get("finish_mode") or "").strip(),
+            "summary": str(value.get("summary") or "").strip(),
+        }
+
+    def _sanitize_restored_runtime_strings(self, items: list[str]) -> list[str]:
+        blocked_prefixes = (
+            "action_intent_pending_resolution=",
+            "action_intent_pending_candidates=",
+            "action_intent_future_use_candidates=",
+            "action_intent_resolution_withheld_for_",
+            "action_intent_unresolved_rerank_withheld",
+            "action_intent_top_hypothesis=",
+            "action_intent_runner_up=",
+            "action_intent_top_missing_observation=",
+            "action_intent_comparison_summary=",
+            "action_intent_blocking_comparison=",
+            "planner_guard=",
+            "planner_override ",
+        )
+        return [
+            item
+            for item in items
+            if isinstance(item, str) and item and not item.startswith(blocked_prefixes)
+        ]
+
+    def _sync_action_intent_trace_from_verification(self, entry: dict[str, Any]) -> None:
+        return None
