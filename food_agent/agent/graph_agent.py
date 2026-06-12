@@ -1065,31 +1065,12 @@ class GraphAgent:
         raw_result: dict[str, Any],
         state: AgentState,
     ) -> bool:
-        index = self._coerce_choice_index(raw_result.get("best_index"), state.choices)
-        if index is None:
-            return False
-        best_choice = str(state.choices[index]).strip().lower()
-        generic_access_patterns = (
-            "access what's behind",
-            "access what is behind",
-            "look what's behind",
-            "see what is behind",
-            "what is behind",
-            "look behind",
-            "see what's behind",
-            "access behind",
-            "to access the area behind",
-            "to access behind",
-            "后面有什么",
-            "看后面",
-            "查看后面",
-        )
-        best_is_generic_access = any(pattern in best_choice for pattern in generic_access_patterns)
-        best_is_generic_space = self._action_intent_choice_is_generic_direct_space_purpose(best_choice)
-        if not best_is_generic_access and not best_is_generic_space:
-            return False
         text = self._action_intent_observation_support_text(raw_result).lower()
         if not text:
+            return False
+        has_broad_effect = self._action_intent_support_has_broad_access_or_space_effect(text)
+        has_exact_chain = self._action_intent_support_has_exact_downstream_chain(text)
+        if not has_broad_effect and not self._action_intent_text_explicitly_rules_out_exact_downstream_chain(text):
             return False
         gap_types = self._action_intent_resolution_latest_gap_types(state)
         if gap_types & {"relation_confirmation", "target_discovery", "workspace_change_unconfirmed"}:
@@ -1100,7 +1081,7 @@ class GraphAgent:
             return True
         if self._action_intent_text_explicitly_rules_out_exact_downstream_chain(text):
             return True
-        if any(
+        if has_exact_chain and any(
             token in text
             for token in (
                 "direct target",
@@ -1108,28 +1089,24 @@ class GraphAgent:
                 "hidden-target retrieval",
                 "true next target",
                 "revealed target",
-                "revealed item",
-                "the hidden item is then picked up",
-                "retrieved from behind",
-                "picked up from behind",
-                "taken from behind",
-                "exact placement",
                 "the direct purpose is",
-                "slot becomes the destination",
-                "placed into the freed slot",
-                "used on the scale",
-                "used to weigh",
+                "rather than only generic access",
+                "stronger than generic access",
+                "weaker than the direct target",
                 "真正目标",
                 "直接目的",
                 "后面的目标",
-                "放进腾出的槽位",
-                "归位到空位",
-                "用于称量",
             )
         ):
             return True
-        if any(
-            token in text
+        if has_broad_effect and not has_exact_chain:
+            return True
+        return False
+
+    def _action_intent_support_has_broad_access_or_space_effect(self, text: str) -> bool:
+        text_lc = str(text or "").lower()
+        return any(
+            token in text_lc
             for token in (
                 "reveals the hidden area",
                 "hidden area behind",
@@ -1145,11 +1122,30 @@ class GraphAgent:
                 "区域更开阔",
                 "台面更空了",
             )
-        ):
-            if best_is_generic_space:
-                return True
-            return not self._action_intent_text_has_direct_positive_evidence(text)
-        return False
+        )
+
+    def _action_intent_support_has_exact_downstream_chain(self, text: str) -> bool:
+        text_lc = str(text or "").lower()
+        return any(
+            token in text_lc
+            for token in (
+                "retrieved from behind",
+                "picked up from behind",
+                "taken from behind",
+                "the hidden item is then picked up",
+                "hidden item is picked up",
+                "placed into the freed slot",
+                "slot becomes the destination",
+                "exact placement",
+                "used on the scale",
+                "used to weigh",
+                "取出后面的",
+                "拿到后面的",
+                "放进腾出的槽位",
+                "归位到空位",
+                "用于称量",
+            )
+        )
 
     def _action_intent_resolution_should_withhold_generic_relocation_or_storage_overclaim(
         self,

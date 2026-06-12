@@ -275,6 +275,41 @@ Gap 只能来自 observation state，建议只保留以下通用类型：
 
 - [x] 已完成阶段：`7 / 9`
 - [ ] 进行中阶段：`Phase 4 / Phase 6`
+- [x] 本轮继续切掉 `graph_agent` 里一条 still answer-conditioned 的 `generic access/space overclaim -> choice text gate` 旧链：
+  - 旧行为：
+    - `graph_agent._action_intent_resolution_should_withhold_generic_access_or_space_overclaim(...)`
+      仍先读：
+      - `best_index`
+      - `best_choice`
+      - `generic access` / `generic space` 选项语义
+    - 只有在当前候选文本看起来像
+      - `access what's behind`
+      - `make space`
+      这类 answer category 时，
+      才允许 finalizer 进入这条 withheld 逻辑
+  - 当前变化：
+    - helper 已改成 observation-side：
+      - 不再读取 `best choice` 语义
+      - 只看 observation text 是否自己表达：
+        - broad access / workspace effect
+          如 `revealed area / becomes more open / extra room`
+        - exact downstream chain
+          如 `picked up from behind / placed into the freed slot / used on the scale`
+        - 以及是否明确说 generic effect 只是较弱解释、
+          direct purpose/true next target 另有其物
+    - 这意味着：
+      - 换掉候选答案文本，
+        只要 observation-side evidence 不变，
+        generic-access/space overclaim 的 withheld 结果就不应变化
+      - `graph_agent` 又少了一条
+        `choice semantic family -> finalizer withheld`
+        的 live consumer
+  - 本轮定向回归：
+    - `pytest -q tests/test_graph_agent.py -k 'exact_targeted_placement_without_exact_chain or slot_placement_claim_when_timeline_review_keeps_slot_ambiguity or generic_access_withhold or finalizer_withholds_generic_access_when_specific_revealed_target_exists or finalizer_can_use_latest_pairwise_resolution'`
+    - 结果：`6 passed, 1151 deselected`
+  - 本轮专项回归：
+    - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+    - 结果：`704 passed, 453 deselected`
 - [x] 本轮继续切掉 `graph_agent` 里一条 still answer-conditioned 的 `choice text category -> broad generic finalizer withhold` 旧链：
   - 旧行为：
     - `graph_agent._action_intent_resolution_should_withhold_broad_generic_claim_without_direct_evidence(...)`
@@ -3634,6 +3669,29 @@ Phase 0 审计后的最小真实缺口已经明确：
 
 ### Phase 4 当前进展
 
+- [x] 本轮继续收掉 `graph_agent` 里一条 `generic access/space overclaim -> choice category gate` 的 live consumer 链：
+  - 旧行为：
+    - generic access/space overclaim 仍要求当前 answer
+      先命中 `access behind / make space`
+      这类固定 semantic family
+    - 这意味着相同 observation text，
+      只因候选文本不同，
+      finalizer 就可能走不同 withheld 路径
+  - 当前变化：
+    - helper 已切到 observation-first：
+      - broad access/workspace effect
+      - exact downstream chain
+      - `direct purpose / true next target` 对 generic effect 的显式压制
+      都只由 support text 自身决定
+    - 这样即使 answer wording 不同，
+      只要 observation residue 相同，
+      withheld 行为也应保持一致
+  - 本轮定向回归：
+    - `pytest -q tests/test_graph_agent.py -k 'exact_targeted_placement_without_exact_chain or slot_placement_claim_when_timeline_review_keeps_slot_ambiguity or generic_access_withhold or finalizer_withholds_generic_access_when_specific_revealed_target_exists or finalizer_can_use_latest_pairwise_resolution'`
+    - `6 passed, 1151 deselected`
+  - 本轮专项回归：
+    - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+    - `704 passed, 453 deselected`
 - [x] 本轮继续收掉 `graph_agent` 里一条 `choice category -> broad generic finalizer withhold` 的 live consumer 链：
   - 旧行为：
     - broad generic withheld 仍先依赖
@@ -4398,6 +4456,23 @@ Phase 0 审计后的最小真实缺口已经明确：
 
 ### Phase 6 当前进展
 
+- [x] 本轮又迁移了 4 条 still answer-conditioned 的 generic-access/space 旧契约测试：
+  - `generic_access_withhold_ignores_choice_text_categories`
+  - `generic_access_withhold_clears_after_exact_retrieval_chain`
+  - `exact_targeted_placement_without_exact_chain`
+  - `slot_placement_claim_when_timeline_review_keeps_slot_ambiguity`
+- [x] 新契约：
+  - 不再要求：
+    - `generic access` / `make space`
+      这类固定 answer text 决定是否进入 overclaim withheld
+    - 固定必须写回某一个 specific withheld marker
+  - 只保护：
+    - observation-side 的 broad access/workspace residue
+      才能触发 overclaim withheld
+    - 一旦 observation text 已明确闭合 exact retrieval/use/placement，
+      generic-access helper 必须退出
+    - finalizer 必须保守 withheld，
+      但不要求它一定经过某一个 legacy marker 名字
 - [x] 本轮又迁移了 2 条 still answer-conditioned 的 broad-generic 旧契约测试：
   - `broad_generic_withhold_ignores_choice_text_categories`
   - `broad_generic_withhold_requires_observation_side_uncertainty`
