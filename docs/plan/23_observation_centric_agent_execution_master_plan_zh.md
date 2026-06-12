@@ -4813,6 +4813,51 @@ Phase 0 审计后的最小真实缺口已经明确：
 - [x] 本轮合并回归：
   - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
   - 结果：`712 passed, 453 deselected`
+- [x] 本轮继续切掉 `graph_agent._action_intent_unresolved_semantic_gaps(...)` 里一条 still answer-conditioned 的 `move/relocate choice -> missing_simple_relocation_evidence` 旧链：
+  - 旧行为：
+    - 只有当 `best choice` 本身带有
+      - `move`
+      - `relocate`
+      - `set aside`
+      这类语义时，
+      才会进入 `missing_simple_relocation_evidence`
+  - 问题：
+    - gap 来源是 choice family，
+      不是 observation state
+    - 同一段 observation text，
+      只因为 choice 文本不同，
+      unresolved semantic gap 就会变化
+- [x] 新行为：
+  - 删除 `missing_simple_relocation_evidence`
+  - 改成统一 observation-side gap：
+    - `relocation_purpose_unresolved`
+  - 现在只允许由 candidate observation text 中的以下信息触发：
+    - relocation cue
+    - speculative set-aside cue
+    - relocation as byproduct / not-the-purpose cue
+  - 若 observation text 已明确闭合真实 repositioning outcome，
+    generic relocation gap 必须退出
+- [x] 本轮新增 observation-side helper：
+  - `explicit relocation outcome evidence`
+    - 例如：
+      - `relocated from near ... to ...`
+      - `moved to the left counter`
+      - `carried directly toward`
+  - `unresolved relocation purpose`
+    - 例如：
+      - `could potentially be set aside`
+      - `could in principle be set aside`
+      - `mere relocation is a byproduct`
+      - `not relocated for its own sake`
+- [x] 本轮新增负约束测试：
+  - `test_graph_agent_action_intent_unresolved_semantic_gap_relocation_ignores_choice_categories`
+  - `test_graph_agent_action_intent_unresolved_semantic_gap_relocation_clears_after_explicit_observed_repositioning`
+- [x] 本轮定向回归：
+  - `pytest -q tests/test_graph_agent.py -k 'unresolved_semantic_gap_relocation or unresolved_rerank_prefers_direct_hand_contact_over_counter_cleanup or unresolved_rerank_withholds_weak_generic_towel_use_without_runtime_relocation_override or unresolved_rerank_withholds_surface_cleanup_without_sweep_or_contact_chain or finalizer_withholds_weak_relocation_claim_without_direct_outcome'`
+  - 结果：`6 passed, 1161 deselected`
+- [x] 本轮合并回归：
+  - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+  - 结果：`714 passed, 453 deselected`
 
 ---
 

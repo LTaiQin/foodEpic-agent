@@ -1780,6 +1780,77 @@ class GraphAgent:
             )
         )
 
+    def _action_intent_support_has_explicit_relocation_outcome_evidence(self, text: str) -> bool:
+        text_lc = str(text or "").lower()
+        return any(
+            term in text_lc
+            for term in (
+                "picked up and then placed elsewhere",
+                "quickly set down on the counter in a different position",
+                "brief repositioning",
+                "left on the counter",
+                "set down on the counter",
+                "placed elsewhere",
+                "temporarily relocated",
+                "relocated from near",
+                "moved to the left counter",
+                "carried directly toward",
+                "moved to the sink",
+                "brought to the sink",
+                "放到别处",
+                "放到台面另一处",
+                "短暂挪动",
+                "移到水槽",
+            )
+        )
+
+    def _action_intent_support_has_unresolved_relocation_purpose(self, text: str) -> bool:
+        text_lc = str(text or "").lower()
+        relocation_markers = (
+            "set aside",
+            "put aside",
+            "relocate",
+            "relocated",
+            "different spot",
+            "different position",
+            "placed elsewhere",
+            "left on the counter",
+            "move does occur",
+            "literal move does occur",
+            "merely relocated",
+            "simply set aside",
+            "set down",
+            "put down elsewhere",
+            "放到一边",
+            "挪动",
+            "移开",
+        )
+        purpose_negating_markers = (
+            "not relocated for its own sake",
+            "rather than being relocated for its own sake",
+            "mere relocation is a byproduct",
+            "does not establish that moving it was the purpose",
+            "step within another use",
+            "not just moving",
+        )
+        speculative_markers = (
+            "could potentially",
+            "could in principle",
+            "could be set aside",
+            "may be set aside",
+            "might be set aside",
+            "still unclear",
+            "direct next use is still unclear",
+            "之后用途仍不明确",
+        )
+        if not any(term in text_lc for term in relocation_markers):
+            return False
+        if any(term in text_lc for term in purpose_negating_markers):
+            return True
+        if self._action_intent_support_has_explicit_relocation_outcome_evidence(text_lc):
+            return False
+        return any(term in text_lc for term in speculative_markers)
+
     def _action_intent_support_has_exclusive_immediate_micro_outcome_evidence(self, text: str) -> bool:
         text_lc = str(text or "").lower()
         if any(
@@ -2675,23 +2746,8 @@ class GraphAgent:
                 and not any(term in support_lc for term in ("brought to both wet hands", "wipe them dry", "擦干双手", "湿手"))
             ):
                 gaps.append("missing_dry_hands_evidence")
-        if any(term in choice_lc for term in ("move", "relocate", "set aside", "put aside", "移开", "挪动")):
-            if not any(
-                term in support_lc
-                for term in (
-                    "picked up and then placed elsewhere",
-                    "quickly set down on the counter in a different position",
-                    "brief repositioning",
-                    "left on the counter",
-                    "set down on the counter",
-                    "placed elsewhere",
-                    "temporarily relocated",
-                    "放到别处",
-                    "放到台面另一处",
-                    "短暂挪动",
-                )
-            ):
-                gaps.append("missing_simple_relocation_evidence")
+        if self._action_intent_support_has_unresolved_relocation_purpose(context_lc):
+            gaps.append("relocation_purpose_unresolved")
         if self._action_intent_choice_has_specific_space_target(choice_lc):
             if any(
                 term in context_lc
@@ -2940,7 +2996,7 @@ class GraphAgent:
                         "missing_measurement_meta_evidence",
                         "missing_exact_measurement_role_evidence",
                         "missing_dry_hands_evidence",
-                        "missing_simple_relocation_evidence",
+                        "relocation_purpose_unresolved",
                         "mixed_horizon_outcome_unresolved",
                     }
                 )
