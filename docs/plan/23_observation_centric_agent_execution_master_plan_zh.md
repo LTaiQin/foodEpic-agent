@@ -275,6 +275,43 @@ Gap 只能来自 observation state，建议只保留以下通用类型：
 
 - [x] 已完成阶段：`7 / 9`
 - [ ] 进行中阶段：`Phase 4 / Phase 6`
+- [x] 本轮继续切掉 `planner` 里一条 still answer-conditioned 的 `best_index -> choice text category -> weak generic followup` 旧链：
+  - 旧行为：
+    - `planner._action_intent_result_is_weak_generic_claim(...)`
+      仍先读取：
+      - `best_index`
+      - 对应 `state.choices[index]`
+    - 再把：
+      - `to clean.`
+      - `to dry.`
+      - `to store.`
+      - `to move.`
+      - `to measure.`
+      这类 choice category
+      当作 weak-generic close-call 的前置条件
+    - 后续继续影响：
+      - transition probe gate
+      - resolution transition recovery
+      - spatial probe gate
+      - resolution payload finish 前的 extra followup
+  - 当前变化：
+    - `weak_generic_claim` 已改成纯 observation-side 判据：
+      - 不再读取 `best_index -> choice text`
+      - 只看：
+        - result support text 是否自己承认这是 broad / generic explanation
+        - 是否同时承认缺少 direct / decisive observation
+        - 当前是否仍存在 open primary gap 或未闭合 post-action outcome
+    - 这意味着：
+      - planner 不再因为选项文本碰巧长得像 `to clean / to dry / to measure`
+        就进入 weak-generic followup
+      - 只有当 observation-side result 自己暴露“宽泛解释 + 证据不足”时，
+        才允许继续保守补证
+  - 本轮定向回归：
+    - `pytest -q tests/test_graph_agent.py -k 'weak_generic_claim_detector or future_use_weak_generic_claim_samples_more_instead_of_finishing'`
+    - 结果：`4 passed, 1146 deselected`
+  - 本轮专项回归：
+    - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+    - 结果：`697 passed, 453 deselected`
 - [x] 本轮继续切掉 planner 里一条 still answer-conditioned 的 `best_index -> choice category -> close-call recovery` 旧链：
   - 旧行为：
     - `planner.py`
@@ -3518,6 +3555,28 @@ Phase 0 审计后的最小真实缺口已经明确：
 
 ### Phase 4 当前进展
 
+- [x] 本轮继续收掉 `planner._action_intent_result_is_weak_generic_claim(...)` 里一条 `choice category -> weak generic followup` 的 live runtime 链：
+  - 旧行为：
+    - weak-generic detector 仍要求：
+      - 先读 `best_index`
+      - 再匹配对应 choice 是否属于
+        `to clean / to dry / to store / to move / to measure`
+    - 之后才允许 transition probe / extra followup / finish 前恢复链
+      把该结果视作 weak generic unresolved claim
+  - 当前变化：
+    - detector 已切到 observation-first：
+      - broad/generic claim 必须由 result support text 自己表达
+      - 证据不足也必须由 result support text 或 open primary gap / unclosed outcome 表达
+      - 不再允许 choice category 充当 weak-generic 的放行器
+  - 新增/迁移测试：
+    - `weak_generic_claim_detector_ignores_choice_text_categories`
+    - `weak_generic_claim_detector_requires_observation_side_uncertainty`
+  - 本轮定向回归：
+    - `pytest -q tests/test_graph_agent.py -k 'weak_generic_claim_detector or future_use_weak_generic_claim_samples_more_instead_of_finishing'`
+    - `4 passed, 1146 deselected`
+  - 本轮专项回归：
+    - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+    - `697 passed, 453 deselected`
 - [x] 本轮继续把 pending-resolution live marker 从 specialized tool name 改成 observation profile：
   - 旧行为：
     - specialized resolution 的 unresolved/failure 状态
@@ -4210,6 +4269,17 @@ Phase 0 审计后的最小真实缺口已经明确：
 
 ### Phase 6 当前进展
 
+- [x] 本轮又迁移了 2 条仍在保护 `choice text category -> weak generic` 旧契约的测试：
+  - `weak_generic_claim_detector_ignores_choice_text_categories`
+  - `weak_generic_claim_detector_requires_observation_side_uncertainty`
+- [x] 新契约：
+  - 不再要求：
+    - 只有 `to clean / to dry / to move / to measure`
+      这类固定 choice text 才能被视作 weak generic unresolved claim
+  - 只保护：
+    - choice text 本身不得触发 weak-generic followup
+    - 只有 observation-side 的 broad/generic explanation + evidence insufficiency
+      才允许继续补证
 - [x] 本轮又迁移了 2 条仍在保护 `runner_up -> action` 旧契约的测试：
   - `runner_up_alone_does_not_trigger_initial_followup`
   - `runner_up_alone_does_not_trigger_pairwise_after_multiple_followups`

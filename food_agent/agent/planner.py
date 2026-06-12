@@ -5498,79 +5498,68 @@ class GraphAgentPlanner:
         state: AgentState,
         result: dict[str, Any],
     ) -> bool:
-        try:
-            index = int(result.get("best_index"))
-        except Exception:  # noqa: BLE001
+        if not isinstance(result, dict):
             return False
-        choices = [str(choice) for choice in getattr(state, "choices", [])]
-        if index < 0 or index >= len(choices):
+        if self._action_intent_result_has_direct_post_action_evidence(result):
             return False
-        choice_lc = choices[index].strip().lower()
-        broad_generic_patterns = (
-            "to clean.",
-            "to dry.",
-            "to store.",
-            "to move.",
-            "to measure.",
-            "to measure the ingredients.",
+        text = self._action_intent_result_support_text(result).lower()
+        if not text.strip():
+            return False
+        broad_generic_markers = (
+            "least contradicted",
+            "broadest",
+            "broadest remaining explanation",
+            "broad purpose",
+            "generic purpose",
+            "could in principle",
+            "could broadly",
+            "might broadly",
+            "broadly compatible",
+            "somewhat compatible",
+            "compatible with",
+            "最宽泛",
+            "最不矛盾",
         )
-        if not any(pattern in choice_lc for pattern in broad_generic_patterns):
-            return False
-        text = " ".join(
-            str(result.get(key) or "")
-            for key in ("reason", "decisive_observation")
-        ).lower()
-        if any(
-            token in text
-            for token in (
-                "least contradicted",
-                "broadest",
-                "could in principle",
-                "could broadly",
-                "might broadly",
-                "compatible with",
-                "最宽泛",
-                "最不矛盾",
-            )
+        unresolved_markers = (
+            "no actual",
+            "no visible",
+            "not shown",
+            "not visible",
+            "unclear",
+            "cannot tell",
+            "can't tell",
+            "no direct",
+            "no decisive",
+            "remains unclear",
+            "still unclear",
+            "没有看到",
+            "未显示",
+            "不明确",
+        )
+        if any(token in text for token in broad_generic_markers) and any(
+            token in text for token in unresolved_markers
         ):
             return True
-        if any(
-            token in text
-            for token in (
-                "no actual",
-                "no visible",
-                "not shown",
-                "not visible",
-                "unclear",
-                "cannot tell",
-                "can't tell",
-                "没有看到",
-                "未显示",
-                "不明确",
-            )
-        ):
-            return True
-        direct_positive_terms = (
-            "placed on the scale",
-            "used on the scale",
-            "under running water",
-            "wiping motion",
-            "wiped the",
-            "dried the",
-            "stored in",
-            "returned to",
-            "reveals",
-            "revealed",
-            "picked up from behind",
-            "placed into the freed slot",
-            "directly enabled",
-            "明确看到",
-            "直接看到",
-            "放到秤上",
-            "开始擦",
-            "放回",
+        primary_gap = self._action_intent_primary_gap(state)
+        primary_gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
+        if primary_gap_type not in {
+            "future_outcome",
+            "immediate_result_missing",
+            "state_transition_unconfirmed",
+            "window_coverage_missing",
+        } and not self._action_intent_state_describes_unclosed_post_action_outcome(state):
+            return False
+        soft_generic_markers = (
+            "could be",
+            "could broadly",
+            "might broadly",
+            "compatible with",
+            "broadly compatible",
+            "somewhat compatible",
         )
-        return not any(token in text for token in direct_positive_terms)
+        return any(token in text for token in soft_generic_markers) and any(
+            token in text for token in unresolved_markers
+        )
 
     def _action_intent_state_describes_unclosed_post_action_outcome(self, state: AgentState) -> bool:
         text = " ".join(
