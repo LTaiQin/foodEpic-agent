@@ -926,8 +926,6 @@ class GraphAgentExecutor:
             state.add_memory(
                 f"action_intent_best_index={result.get('best_index')} confidence={result.get('confidence')}"
             )
-            if result.get("second_best_index") is not None:
-                state.add_memory(f"action_intent_second_best_index={result.get('second_best_index')}")
             if result.get("need_future_evidence"):
                 state.add_memory(
                     f"action_intent_followup_gap=1 window_s={result.get('future_window_s')} focus={result.get('followup_focus')}"

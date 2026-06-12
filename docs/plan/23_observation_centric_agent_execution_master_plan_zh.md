@@ -338,6 +338,28 @@ Gap 只能来自 observation state，建议只保留以下通用类型：
   - 本轮专项回归：
     - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
     - `684 passed, 453 deselected`
+- [x] 本轮继续收掉 `executor.py` 里一条无真实 consumer 的 why runtime 候选残影写回：
+  - 旧行为：
+    - `infer_action_intent` 成功后仍写：
+      - `action_intent_second_best_index=<...>`
+    - 这类 marker 已不再被 planner / graph_agent / verifier 主路径消费，
+      但仍会污染 why 运行态 memory
+  - 当前变化：
+    - `executor.py` 的新 `infer_action_intent` 结果只保留：
+      - `action_intent_best_index=...`
+      - `action_intent_followup_gap=...`
+    - 不再写 `action_intent_second_best_index=...`
+    - `_clear_action_intent_resolution_memory(...)` 继续兼容清理历史残留 marker
+  - 本轮迁移测试：
+    - `test_executor_infer_action_intent_records_observation_centric_followup_gap_marker`
+      已补成负约束：
+      - 新 why 运行态不再写 `action_intent_second_best_index=*`
+  - 本轮定向回归：
+    - `pytest -q tests/test_graph_agent.py -k 'executor_infer_action_intent_records_observation_centric_followup_gap_marker or executor_pairwise_resolution_clears_future_evidence_flag or executor_future_use_resolution_records_decisive_observation_and_clears_flags or executor_future_use_resolution_need_more_evidence_records_pending_resolution or executor_pairwise_failure_keeps_pending_resolution_without_generic_recovery or tap_scale_missing_state_change_prereq_blocks_structured_best_index_fallback'`
+    - `6 passed, 1135 deselected`
+  - 本轮专项回归：
+    - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+    - `688 passed, 453 deselected`
 - [x] 本轮继续把 `action_intent_pending_resolution=*` 这条旧 specialized marker 的 live producer/consumer 收成 observation-side profile：
   - 旧行为：
     - `executor.py` 在 specialized resolution `need_more_evidence / failure`
