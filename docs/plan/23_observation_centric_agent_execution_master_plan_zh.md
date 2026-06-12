@@ -3151,6 +3151,33 @@ Phase 0 审计后的最小真实缺口已经明确：
 
 ### Phase 4 当前进展
 
+- [x] 本轮继续收掉 `planner._action_intent_followup_route(...) / _action_intent_timeline_review_resolver_hint(...) / _build_action_intent_followup_sampling_decision(...)` 这一簇 live specialized profile 命名：
+  - 旧行为：
+    - followup route 仍直接返回：
+      - `resolver = future_use / pairwise`
+      - `timeline_review_future_use_hint / timeline_review_pairwise_hint`
+    - followup sampling 继续按 `future_use / pairwise` 走窗口和 thought 分叉
+    - timeline review bias profile 里也仍把 live `resolver_hint` 写成 `future_use / pairwise`
+  - 当前变化：
+    - 这一簇 live 路由命名已统一切到 observation-side profile：
+      - `future_outcome`
+      - `post_action`
+    - primary gap / timeline review / generic followup 的 live route 结果
+      不再把 `future_use / pairwise` 当作 planner 运行态行为标签
+    - followup sampling 的 thought 也进一步去专项化：
+      - 更晚结果 / 最终落点
+      - 直接结果 / 状态变化 / 紧邻后续动作
+      取代原来那种固定 `future_use/pairwise` 叙事
+  - 兼容策略：
+    - 当前只收 live route / resolver 命名
+    - `future_use_evidence_needed` 这类遗留 focus 字符串暂时仍作为兼容 trace 存在，
+      但不再作为 planner 的 live profile 决策标签
+  - 本轮定向回归：
+    - `pytest -q tests/test_graph_agent.py -k 'followup_route_prefers_future_outcome_from_timeline_review_hint or followup_route_future_use_window_expands_with_window_level or followup_route_prefers_post_action_from_timeline_review_hint or followup_route_prefers_top2_future_use_when_fullset_only_adds_hand_free_distractors or followup_route_does_not_construct_hand_free_future_use_pair_from_fullset or future_use_keeps_initial_followup_when_receptacle_probe_is_not_applicable'`
+    - `6 passed, 1126 deselected`
+  - 本轮专项回归：
+    - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+    - `676 passed, 456 deselected`
 - [x] 本轮继续收缩 `planner._recover_action_intent_after_verifier_blocked_finish(...)` 中 `infer_action_intent` 恢复尾部残留的 specialized profile 注入：
   - 旧行为：
     - `infer_action_intent` 被 verifier 拦下后，
@@ -3601,6 +3628,18 @@ Phase 0 审计后的最小真实缺口已经明确：
 
 ### Phase 6 当前进展
 
+- [x] 本轮又迁移了 5 条仍在保护旧 specialized profile 或固定 window 数值的测试契约：
+  - 2 条旧契约要求：
+    - 已看过 followup 后必须直接进入 `resolve_action_intent_future_use`
+  - 3 条旧契约要求：
+    - transition probe 的 `start_time / end_time` 必须等于某个固定数值
+- [x] 新契约：
+  - 允许：
+    - 先回到 `infer_action_intent` 重新消费当前 observation
+    - transition probe 在动作尾部附近做 observation-first 微调
+  - 不再要求：
+    - 仅因旧 `future_use` 标志就直接进入 dedicated specialized resolution
+    - 仅因历史实现细节把 transition probe 窗口钉死到固定小数
 - [x] 本轮又迁移了 2 条仍在保护旧 profile 注入的测试契约：
   - `verifier_blocked_infer_transition_recovery_does_not_inject_future_use_tool_name`
   - `verifier_blocked_infer_extra_followup_profile_prefers_primary_gap_over_future_flag`

@@ -295,14 +295,14 @@ class GraphAgentPlanner:
                 True,
                 "primary_gap_post_action_resolution",
                 min(4.0, self._action_intent_close_call_followup_window(state, profile="pairwise")),
-                "pairwise",
+                "post_action",
             )
         if gap_type in {"future_outcome", "relation_confirmation", "target_discovery"}:
             return (
                 True,
                 "primary_gap_long_horizon_resolution",
                 self._action_intent_close_call_followup_window(state, profile="future_use"),
-                "future_use",
+                "future_outcome",
             )
         support_text = self._action_intent_result_support_text(result)
         explicit_need_more = isinstance(result, dict) and (
@@ -349,19 +349,19 @@ class GraphAgentPlanner:
             "看不清",
             "不明确",
             )
-        if timeline_hint == "pairwise":
+        if timeline_hint == "post_action":
             return (
                 True,
-                "timeline_review_pairwise_hint",
+                "timeline_review_post_action_hint",
                 min(4.0, self._action_intent_close_call_followup_window(state, profile="pairwise")),
-                "pairwise",
+                "post_action",
             )
-        if timeline_hint == "future_use":
+        if timeline_hint == "future_outcome":
             return (
                 True,
-                "timeline_review_future_use_hint",
+                "timeline_review_future_outcome_hint",
                 self._action_intent_close_call_followup_window(state, profile="future_use"),
-                "future_use",
+                "future_outcome",
             )
         if explicit_need_more or any(marker in support_text for marker in uncertainty_markers):
             if explicit_need_more and not self._action_intent_result_has_immediate_post_action_uncertainty(result):
@@ -369,35 +369,35 @@ class GraphAgentPlanner:
                     True,
                     "future_use_evidence_needed",
                     4.0 if first_pass_generic_future_use else self._action_intent_close_call_followup_window(state, profile="future_use"),
-                    "future_use",
+                    "future_outcome",
                 )
-            if timeline_hint == "future_use" or self._action_intent_has_next_use_followup_gap(state=state, result=result):
+            if timeline_hint == "future_outcome" or self._action_intent_has_next_use_followup_gap(state=state, result=result):
                 return (
                     True,
-                    "timeline_review_future_use_hint" if timeline_hint == "future_use" else "future_use_evidence_needed",
+                    "timeline_review_future_outcome_hint" if timeline_hint == "future_outcome" else "future_use_evidence_needed",
                     self._action_intent_close_call_followup_window(state, profile="future_use"),
-                    "future_use",
+                    "future_outcome",
                 )
-            if timeline_hint == "pairwise" or self._action_intent_prefers_followup_state_change_only(state):
+            if timeline_hint == "post_action" or self._action_intent_prefers_followup_state_change_only(state):
                 return (
                     True,
-                    "timeline_review_pairwise_hint" if timeline_hint == "pairwise" else "post_action_evidence_needed",
+                    "timeline_review_post_action_hint" if timeline_hint == "post_action" else "post_action_evidence_needed",
                     min(4.0, self._action_intent_close_call_followup_window(state, profile="pairwise")),
-                    "pairwise",
+                    "post_action",
                 )
         if any(marker in support_text for marker in downstream_uncertainty_markers):
             return (
                 True,
                 "future_use_evidence_needed",
                 4.0 if first_pass_generic_future_use else self._action_intent_close_call_followup_window(state, profile="future_use"),
-                "future_use",
+                "future_outcome",
             )
         if "guess" in support_text or "guesses" in support_text:
             return (
                 True,
                 "future_use_evidence_needed",
                 self._action_intent_close_call_followup_window(state, profile="future_use"),
-                "future_use",
+                "future_outcome",
             )
         return False, "", 4.0, ""
 
@@ -413,9 +413,9 @@ class GraphAgentPlanner:
         primary_gap = self._action_intent_primary_gap(state)
         gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
         if gap_type in {"future_outcome", "relation_confirmation", "target_discovery"}:
-            return "future_use"
+            return "future_outcome"
         if gap_type in {"immediate_outcome", "state_transition_unconfirmed", "workspace_change_unconfirmed"}:
-            return "pairwise"
+            return "post_action"
         return ""
 
     def _action_intent_route_candidate_indices(
@@ -968,20 +968,20 @@ class GraphAgentPlanner:
         followup_attempt_count = self._action_intent_followup_attempt_count(state)
         if not semantic_resolver and isinstance(result, dict):
             if self._action_intent_needs_future_use_evidence(state=state, result=result):
-                semantic_resolver = "future_use"
+                semantic_resolver = "future_outcome"
                 focus = focus or "future_use_evidence_needed"
                 window_s = max(window_s, 4.0 if followup_attempt_count < 1 else 8.0)
             elif self._action_intent_pair_needs_outcome_resolution(state=state, result=result):
-                semantic_resolver = "pairwise"
+                semantic_resolver = "post_action"
                 focus = focus or "post_action_evidence_needed"
                 window_s = max(window_s, 4.0)
             elif self._action_intent_result_has_indecisive_post_action_support(result):
-                semantic_resolver = "future_use"
+                semantic_resolver = "future_outcome"
                 focus = focus or "generic_post_action_followup"
                 window_s = max(window_s, 4.0 if followup_attempt_count < 1 else 8.0)
-        if semantic_resolver == "future_use":
+        if semantic_resolver == "future_outcome":
             window_s = max(window_s, 4.0 if followup_attempt_count < 1 else 8.0)
-        elif semantic_resolver == "pairwise":
+        elif semantic_resolver == "post_action":
             late_outcome_like = self._action_intent_result_points_to_later_outcome_uncertainty(result)
             window_s = max(window_s, 8.0 if (self._action_intent_prefers_result_driven_followup(state) or late_outcome_like) else 4.0)
         if (
@@ -1012,10 +1012,13 @@ class GraphAgentPlanner:
         return PlannerDecision(
             thought=(
                 (
-                "why 题当前仍存在意图歧义，先补动作后紧邻的高密度结果帧，检查物体是否立刻被用于擦手/擦台面，"
-                    "还是只是短暂拿起后被放到别处。"
+                    "why 题当前仍存在意图歧义，先补动作后紧邻的高密度结果帧，检查是否立刻出现明确的直接结果或状态变化。"
                     if dense_near_followup
-                    else "why 题当前仍存在意图歧义，补动作后的结果帧，检查后续是继续取后方物体，还是只是腾空间/整理。"
+                    else (
+                        "why 题当前仍存在意图歧义，补动作后的结果帧，检查是否出现更晚目标、后续用途或最终落点。"
+                        if semantic_resolver == "future_outcome"
+                        else "why 题当前仍存在意图歧义，补动作后的结果帧，检查是否立刻出现明确的直接结果、状态变化或紧邻后续动作。"
+                    )
                 )
                 + (f" followup_focus={focus}" if focus else "")
             ),
@@ -2688,9 +2691,9 @@ class GraphAgentPlanner:
 
         resolver_hint = ""
         if next_use_unclear or final_location_unclear:
-            resolver_hint = "future_use"
+            resolver_hint = "future_outcome"
         elif revealed_target_retrieval or revealed_slot_placement or revealed_fixture_enablement or hand_free_next_action:
-            resolver_hint = "pairwise"
+            resolver_hint = "post_action"
 
         return {
             "has_review": True,
