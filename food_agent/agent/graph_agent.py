@@ -2145,20 +2145,6 @@ class GraphAgent:
         bias = self._action_intent_timeline_review_bias_profile(state)
         if not bias["has_review"] or not bias["needs_more_evidence"]:
             return False
-        index = self._coerce_choice_index(raw_result.get("best_index"), state.choices)
-        if index is None:
-            return False
-        choices = [str(choice) for choice in getattr(state, "choices", [])]
-        best_choice = choices[index].lower()
-        categories = selected_choice_categories(choices, [index])
-        best_categories = set(categories.get(index) or set())
-        needs_future_use = self._action_intent_resolution_has_long_horizon_gap(state) or bool(
-            best_categories
-            & {"final_place_return", "measure_weigh", "transfer_contents", "serve_consume", "clean_dry", "food_prep", "discard"}
-        )
-        needs_pairwise = self._action_intent_resolution_has_relation_or_target_gap(state) or bool(
-            best_categories & {"reveal_access", "placement_destination", "workspace_enablement", "fixture_enablement"}
-        )
         text = self._action_intent_observation_support_text(raw_result).lower()
         if self._action_intent_text_has_negative_evidence(text):
             return True
@@ -2181,46 +2167,15 @@ class GraphAgent:
             )
         ):
             return True
-        if bias["final_location_unclear"] and (
-            needs_future_use
-            or self._action_intent_choice_is_final_placement_candidate(best_choice)
-        ):
-            return not self._action_intent_choice_has_explicit_final_placement_evidence(best_choice, text)
-        if bias["next_use_unclear"] and needs_future_use:
-            return not self._action_intent_choice_has_explicit_later_outcome_evidence(best_choice, best_categories, text)
-        if bias["revealed_slot_placement"] and needs_pairwise:
-            return not any(
-                token in text
-                for token in (
-                    "placed into the freed slot",
-                    "put into the freed slot",
-                    "freed slot is used",
-                    "slot becomes the destination",
-                    "放进腾出的槽位",
-                    "归位到空位",
-                )
-            )
-        if bias["revealed_target_retrieval"] and needs_pairwise:
-            return not any(
-                token in text
-                for token in (
-                    "retrieved from behind",
-                    "picked up from behind",
-                    "taken from behind",
-                    "hidden item is picked up",
-                    "取出后面的",
-                    "拿到后面的",
-                )
-            )
-        if bias["revealed_slot_placement"] and self._action_intent_choice_is_exact_workspace_or_downstream_candidate(best_choice):
-            return not self._action_intent_choice_has_explicit_workspace_or_downstream_chain(
-                question=str(getattr(state, "question", "") or "").lower(),
-                choice=best_choice,
-                text=text,
-                action_object=self._action_intent_question_object(str(getattr(state, "question", "") or "").lower()),
-                global_context=self._action_intent_scoped_global_context(state).lower(),
-            )
-        if (bias["revealed_fixture_enablement"] or bias["hand_free_next_action"]) and needs_pairwise:
+        if bias["final_location_unclear"]:
+            return not self._action_intent_support_has_explicit_final_location_evidence(text)
+        if bias["next_use_unclear"]:
+            return not self._action_intent_support_has_explicit_followup_outcome_evidence(text)
+        if bias["revealed_slot_placement"]:
+            return not self._action_intent_support_has_explicit_revealed_slot_placement_evidence(text)
+        if bias["revealed_target_retrieval"]:
+            return not self._action_intent_support_has_explicit_hidden_target_retrieval_evidence(text)
+        if bias["revealed_fixture_enablement"] or bias["hand_free_next_action"]:
             direct_effect = str(raw_result.get("direct_effect") or "").strip().lower()
             downstream_action = str(raw_result.get("downstream_action") or "").strip().lower()
             if not direct_effect or not downstream_action:
@@ -2444,6 +2399,120 @@ class GraphAgent:
                 "放回冰箱",
                 "归位",
                 "放进腾出的槽位",
+            )
+        )
+
+    def _action_intent_support_has_explicit_final_location_evidence(self, text: str) -> bool:
+        text_lc = str(text or "").lower()
+        if self._action_intent_text_has_negative_evidence(text_lc):
+            return False
+        return any(
+            token in text_lc
+            for token in (
+                "put back",
+                "returned",
+                "placed back",
+                "stored away",
+                "stored in",
+                "returned to the fridge",
+                "returned to the shelf",
+                "put back in the fridge",
+                "hung back on the hook",
+                "returned to the drawer",
+                "returned to the cupboard",
+                "放回",
+                "归位",
+                "收起来",
+                "收纳回去",
+            )
+        )
+
+    def _action_intent_support_has_explicit_followup_outcome_evidence(self, text: str) -> bool:
+        text_lc = str(text or "").lower()
+        if self._action_intent_text_has_negative_evidence(text_lc):
+            return False
+        return any(
+            token in text_lc
+            for token in (
+                "put back",
+                "returned",
+                "stored",
+                "placed on the scale",
+                "put on the scale",
+                "used to weigh",
+                "weighed",
+                "scale reading",
+                "display changes",
+                "records the measurement",
+                "tilted to pour",
+                "emptied",
+                "poured",
+                "drained",
+                "served",
+                "retrieved from behind",
+                "picked up from behind",
+                "taken from behind",
+                "hidden item is picked up",
+                "placed into the freed slot",
+                "put into the freed slot",
+                "turned on",
+                "turned off",
+                "switches on",
+                "switches off",
+                "opened",
+                "closed",
+                "wiped",
+                "dried",
+                "under running water",
+                "放回",
+                "归位",
+                "放到秤上",
+                "称量",
+                "记录读数",
+                "倒出",
+                "盛到",
+                "取出后面的",
+                "拿到后面的",
+                "放进腾出的槽位",
+                "开启",
+                "关闭",
+                "打开",
+                "开始擦",
+                "擦干",
+            )
+        )
+
+    def _action_intent_support_has_explicit_revealed_slot_placement_evidence(self, text: str) -> bool:
+        text_lc = str(text or "").lower()
+        if self._action_intent_text_has_negative_evidence(text_lc):
+            return False
+        return any(
+            token in text_lc
+            for token in (
+                "placed into the freed slot",
+                "put into the freed slot",
+                "slot becomes the destination",
+                "destination is the freed slot",
+                "freed slot is used",
+                "放进腾出的槽位",
+                "归位到空位",
+            )
+        )
+
+    def _action_intent_support_has_explicit_hidden_target_retrieval_evidence(self, text: str) -> bool:
+        text_lc = str(text or "").lower()
+        if self._action_intent_text_has_negative_evidence(text_lc):
+            return False
+        return any(
+            token in text_lc
+            for token in (
+                "retrieved from behind",
+                "picked up from behind",
+                "taken from behind",
+                "hidden item is picked up",
+                "hidden jar is taken",
+                "取出后面的",
+                "拿到后面的",
             )
         )
 
@@ -2727,74 +2796,23 @@ class GraphAgent:
         )
         if target_row is None:
             return []
-        choices = [str(choice) for choice in getattr(state, "choices", [])]
-        choice_lc = str(target_row.get("choice") or "").lower()
         support_lc = str(target_row.get("support") or "").lower()
         contradiction_lc = str(target_row.get("contradiction") or "").lower()
         combined_lc = f"{support_lc} {contradiction_lc}".strip()
-        categories = selected_choice_categories(choices, [best_index])
-        best_categories = set(categories.get(best_index) or set())
         gaps: list[str] = []
-        if bias["final_location_unclear"] and (
-            self._action_intent_choice_is_final_placement_candidate(choice_lc)
-            or "final_place_return" in best_categories
-        ):
-            if not self._action_intent_choice_has_explicit_final_placement_evidence(choice_lc, combined_lc):
+        if bias["final_location_unclear"]:
+            if not self._action_intent_support_has_explicit_final_location_evidence(combined_lc):
                 gaps.append("timeline_review_final_location_gap")
-        if bias["next_use_unclear"] and best_categories & {
-            "measure_weigh",
-            "transfer_contents",
-            "serve_consume",
-            "inspect_check",
-            "open_close",
-            "clean_dry",
-            "food_prep",
-            "discard",
-            "final_place_return",
-        }:
-            if not self._action_intent_choice_has_explicit_later_outcome_evidence(choice_lc, best_categories, support_lc):
+        if bias["next_use_unclear"]:
+            if not self._action_intent_support_has_explicit_followup_outcome_evidence(combined_lc):
                 gaps.append("timeline_review_next_use_gap")
-        if bias["revealed_slot_placement"] and any(
-            token in choice_lc
-            for token in ("freed slot", "slot", "put into", "place into", "空位", "槽位", "放进", "归位")
-        ):
-            if not any(
-                token in combined_lc
-                for token in (
-                    "placed into the freed slot",
-                    "put into the freed slot",
-                    "slot becomes the destination",
-                    "destination is the freed slot",
-                    "放进腾出的槽位",
-                    "归位到空位",
-                )
-            ):
+        if bias["revealed_slot_placement"]:
+            if not self._action_intent_support_has_explicit_revealed_slot_placement_evidence(combined_lc):
                 gaps.append("timeline_review_revealed_slot_gap")
-        if bias["revealed_target_retrieval"] and any(
-            token in choice_lc
-            for token in ("retrieve", "pick up", "take", "hidden", "behind", "取", "拿")
-        ):
-            if not any(
-                token in combined_lc
-                for token in (
-                    "retrieved from behind",
-                    "picked up from behind",
-                    "taken from behind",
-                    "hidden item is picked up",
-                    "hidden jar is taken",
-                    "取出后面的",
-                    "拿到后面的",
-                )
-            ):
+        if bias["revealed_target_retrieval"]:
+            if not self._action_intent_support_has_explicit_hidden_target_retrieval_evidence(combined_lc):
                 gaps.append("timeline_review_revealed_target_gap")
-        if (bias["revealed_fixture_enablement"] or bias["hand_free_next_action"]) and (
-            "hand_free_enablement" in best_categories
-            or "open_close" in best_categories
-            or any(
-                token in choice_lc
-                for token in ("turn on", "turn off", "open", "close", "switch on", "switch off", "打开", "关闭", "开启")
-            )
-        ):
+        if bias["revealed_fixture_enablement"] or bias["hand_free_next_action"]:
             if not self._action_intent_text_has_direct_positive_evidence(support_lc):
                 gaps.append("timeline_review_next_use_gap")
         return gaps

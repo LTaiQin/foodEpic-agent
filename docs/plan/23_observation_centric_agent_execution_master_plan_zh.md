@@ -275,6 +275,48 @@ Gap 只能来自 observation state，建议只保留以下通用类型：
 
 - [x] 已完成阶段：`7 / 9`
 - [ ] 进行中阶段：`Phase 4 / Phase 6`
+- [x] 本轮继续切掉 `graph_agent` 里一条 still answer-conditioned 的 `timeline review bias -> choice/category gated gap` 旧链：
+  - 旧行为：
+    - `graph_agent.py`
+      - `_action_intent_resolution_should_withhold_timeline_review_bias_gap(...)`
+      - `_action_intent_unresolved_timeline_review_bias_gaps(...)`
+    - 都会先读取：
+      - `best_index`
+      - `choice` 文本
+      - `selected_choice_categories(...)`
+    - 再决定：
+      - `timeline_review_final_location_gap`
+      - `timeline_review_next_use_gap`
+      - `timeline_review_revealed_slot_gap`
+      - `timeline_review_revealed_target_gap`
+      是否成立
+  - 当前变化：
+    - 上述两处 runtime gate 已改成纯 observation-side：
+      - 不再读取 `choice/category`
+      - 只看 observation text 是否真的闭合：
+        - `final location`
+        - `followup outcome`
+        - `revealed slot placement`
+        - `hidden target retrieval`
+      - `revealed fixture / hand-free next action`
+        也只再看 `direct_effect + downstream_action`
+        是否构成真实正证据
+    - 这意味着：
+      - 切换候选答案文本，
+        只要 observation support text 不变，
+        timeline-review bias gap 的判断就不应改变
+      - why / action_intent 的继续搜证，
+        又少了一条 `timeline review observation -> answer category gate -> unresolved gap`
+        的回流链
+  - 本轮定向回归：
+    - `pytest -q tests/test_graph_agent.py -k 'timeline_review_bias_gap_detector or unresolved_timeline_review_bias_gaps_ignore_choice_categories'`
+    - 结果：`3 passed, 1150 deselected`
+  - 本轮子集回归：
+    - `pytest -q tests/test_graph_agent.py -k 'timeline_review and action_intent'`
+    - 结果：`41 passed, 1112 deselected`
+  - 本轮专项回归：
+    - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+    - 结果：`700 passed, 453 deselected`
 - [x] 本轮继续切掉 `planner` 里一条 still answer-conditioned 的 `best_index -> choice text category -> weak generic followup` 旧链：
   - 旧行为：
     - `planner._action_intent_result_is_weak_generic_claim(...)`
@@ -3555,6 +3597,34 @@ Phase 0 审计后的最小真实缺口已经明确：
 
 ### Phase 4 当前进展
 
+- [x] 本轮继续收掉 `graph_agent` 里一条 `timeline review bias -> choice/category -> unresolved/finalizer gate` 的 live consumer 链：
+  - 旧行为：
+    - timeline review 侧即使已经有 observation payload，
+      runtime 仍要继续靠
+      `best_index / choice text / selected_choice_categories`
+      才决定是否生成：
+      - `final_location_gap`
+      - `next_use_gap`
+      - `revealed_slot_gap`
+      - `revealed_target_gap`
+  - 当前变化：
+    - 这条链已统一切到 observation-first：
+      - `final location` 是否闭合
+      - `followup outcome` 是否闭合
+      - `revealed slot` 是否真的成为 destination
+      - `hidden target` 是否真的被取出
+      全都只由 observation support text 决定
+    - 因而 timeline review bias 不再需要 candidate semantic family
+      才能继续补证或保守 withheld
+  - 本轮定向回归：
+    - `pytest -q tests/test_graph_agent.py -k 'timeline_review_bias_gap_detector or unresolved_timeline_review_bias_gaps_ignore_choice_categories'`
+    - `3 passed, 1150 deselected`
+  - 本轮子集回归：
+    - `pytest -q tests/test_graph_agent.py -k 'timeline_review and action_intent'`
+    - `41 passed, 1112 deselected`
+  - 本轮专项回归：
+    - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+    - `700 passed, 453 deselected`
 - [x] 本轮继续收掉 `planner._action_intent_result_is_weak_generic_claim(...)` 里一条 `choice category -> weak generic followup` 的 live runtime 链：
   - 旧行为：
     - weak-generic detector 仍要求：
@@ -4269,6 +4339,19 @@ Phase 0 审计后的最小真实缺口已经明确：
 
 ### Phase 6 当前进展
 
+- [x] 本轮又迁移了 3 条 still answer-conditioned 的 timeline-review 旧契约测试：
+  - `timeline_review_bias_gap_detector_ignores_choice_categories_for_next_use`
+  - `timeline_review_bias_gap_detector_clears_after_observed_followup_outcome`
+  - `unresolved_timeline_review_bias_gaps_ignore_choice_categories`
+- [x] 新契约：
+  - 不再允许：
+    - `choice text / choice category`
+      单独决定 timeline-review gap 是否成立
+  - 只保护：
+    - 只要 observation support text 不变，
+      换候选答案文本不应改变 gap 判定
+    - 一旦 observation text 已明确闭合 followup outcome，
+      timeline-review next-use gap 必须消失
 - [x] 本轮又迁移了 2 条仍在保护 `choice text category -> weak generic` 旧契约的测试：
   - `weak_generic_claim_detector_ignores_choice_text_categories`
   - `weak_generic_claim_detector_requires_observation_side_uncertainty`
