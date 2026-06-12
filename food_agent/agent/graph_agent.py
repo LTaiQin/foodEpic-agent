@@ -1706,13 +1706,6 @@ class GraphAgent:
         raw_result: dict[str, Any],
         state: AgentState,
     ) -> bool:
-        index = self._coerce_choice_index(raw_result.get("best_index"), state.choices)
-        if index is None:
-            return False
-        choices = [str(choice) for choice in getattr(state, "choices", [])]
-        categories_by_index = selected_choice_categories(choices, [index])
-        best_choice = choices[index].lower()
-        best_categories = set(categories_by_index.get(index) or set())
         text = self._action_intent_observation_support_text(raw_result).lower()
         if not text:
             return False
@@ -1811,9 +1804,11 @@ class GraphAgent:
             return True
         if not any(term in text for term in nearby_placement_terms):
             return False
-        if self._action_intent_choice_is_immediate_micro_outcome_candidate(best_choice, best_categories):
-            return not self._action_intent_choice_has_explicit_immediate_micro_outcome_evidence(best_choice, text)
-        return not self._action_intent_choice_has_explicit_later_outcome_evidence(best_choice, best_categories, text)
+        if self._action_intent_support_has_explicit_final_location_evidence(text):
+            return False
+        if self._action_intent_support_has_exact_followup_outcome_evidence(text):
+            return False
+        return True
 
     def _action_intent_resolution_should_withhold_workspace_or_final_placement_overclaim(
         self,

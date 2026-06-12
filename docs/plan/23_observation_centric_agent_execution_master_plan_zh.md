@@ -275,6 +275,40 @@ Gap 只能来自 observation state，建议只保留以下通用类型：
 
 - [x] 已完成阶段：`7 / 9`
 - [ ] 进行中阶段：`Phase 4 / Phase 6`
+- [x] 本轮继续切掉 `graph_agent` 里一条 still answer-conditioned 的 `nonexclusive concrete late anchor -> choice/category gate` 旧链：
+  - 旧行为：
+    - `graph_agent._action_intent_resolution_should_withhold_nonexclusive_concrete_late_anchor_claim(...)`
+      仍先读取：
+      - `best_index`
+      - `best_choice`
+      - `selected_choice_categories(...)`
+    - 再决定：
+      - 当前是 immediate micro-outcome
+      - 还是 later-outcome candidate
+      然后才判断是否进入 nonexclusive late-anchor withheld
+  - 当前变化：
+    - helper 已改成 observation-side：
+      - 不再读取 `choice/category`
+      - 只看 observation text 是否自己表达：
+        - `label faces outward / visible while held`
+          这类 nonexclusive local cue
+        - `set beside / left nearby / adjacent to the weighing station`
+          这类 nearby late-anchor
+        - 同时没有闭合：
+          - exact final location
+          - exact followup outcome
+    - 这意味着：
+      - 只要 observation text 相同，
+        不应再因候选答案文本不同而改变 nonexclusive-late-anchor withheld
+      - why/action_intent 的 finalizer
+        又少了一条 `choice/category -> local-vs-late-anchor gate`
+        的 live consumer
+  - 本轮定向回归：
+    - `pytest -q tests/test_graph_agent.py -k 'nonexclusive_concrete_late_anchor or scale_nearby_claim_without_weighing_chain or generic_relocation_withhold'`
+    - 结果：`7 passed, 1154 deselected`
+  - 本轮专项回归：
+    - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+    - 结果：`708 passed, 453 deselected`
 - [x] 本轮继续切掉 `graph_agent` 里一条 still answer-conditioned 的 `generic relocation/storage overclaim -> final-placement choice gate` 旧链：
   - 旧行为：
     - `graph_agent._action_intent_resolution_should_withhold_generic_relocation_or_storage_overclaim(...)`
@@ -3700,6 +3734,27 @@ Phase 0 审计后的最小真实缺口已经明确：
 
 ### Phase 4 当前进展
 
+- [x] 本轮继续收掉 `graph_agent` 里一条 `nonexclusive concrete late anchor -> choice/category gate` 的 live consumer 链：
+  - 旧行为：
+    - nonexclusive-late-anchor helper
+      仍要先靠 `choice family`
+      判当前是 immediate 还是 later
+    - 这使得相同 observation text
+      可能因为答案 wording 不同而走不同 withheld
+  - 当前变化：
+    - helper 已切到 observation-first：
+      - `label visible but not yet read`
+      - `left nearby / beside scale / adjacent to station`
+      - exact final location / exact followup outcome 是否闭合
+      全都只由 observation text 决定
+    - 因而 nonexclusive late-anchor 不再依赖 answer family
+      才能触发
+  - 本轮定向回归：
+    - `pytest -q tests/test_graph_agent.py -k 'nonexclusive_concrete_late_anchor or scale_nearby_claim_without_weighing_chain or generic_relocation_withhold'`
+    - `7 passed, 1154 deselected`
+  - 本轮专项回归：
+    - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+    - `708 passed, 453 deselected`
 - [x] 本轮继续收掉 `graph_agent` 里一条 `generic relocation/storage overclaim -> final-placement choice gate` 的 live consumer 链：
   - 旧行为：
     - generic relocation/storage overclaim
@@ -4509,6 +4564,20 @@ Phase 0 审计后的最小真实缺口已经明确：
 
 ### Phase 6 当前进展
 
+- [x] 本轮又迁移了 3 条 still answer-conditioned 的 nonexclusive-late-anchor 旧契约测试：
+  - `nonexclusive_late_anchor_ignores_choice_categories`
+  - `nonexclusive_late_anchor_clears_after_exact_followup_outcome`
+  - `scale_nearby_claim_without_weighing_chain`
+- [x] 新契约：
+  - 不再要求：
+    - `immediate/later` 的 answer family 决定是否进入 nonexclusive late-anchor withheld
+  - 只保护：
+    - observation-side 的 nonexclusive local cue / nearby late-anchor
+      才能触发该 helper
+    - 一旦 observation text 已闭合 exact followup outcome，
+      helper 必须退出
+    - finalizer 必须保守 withheld，
+      但不要求必须来自旧的 answer-family 路由
 - [x] 本轮又迁移了 4 条 still answer-conditioned 的 generic-relocation/storage 旧契约测试：
   - `generic_relocation_withhold_ignores_choice_text_categories`
   - `generic_relocation_withhold_clears_after_observed_final_location`
