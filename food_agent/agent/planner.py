@@ -11942,12 +11942,8 @@ class GraphAgentPlanner:
                 if precondition is not None:
                     return precondition
             if (
-                latest_action_intent_tool in {
-                    "infer_action_intent",
-                    "resolve_action_intent_pairwise",
-                    "resolve_action_intent_future_use",
-                }
-                and isinstance(latest_action_intent_result, dict)
+                isinstance(latest_action_intent_result, dict)
+                and self._action_intent_result_support_text(latest_action_intent_result)
                 and any(
                     isinstance(item, str)
                     and item.startswith("action_intent_resolution_withheld_for_missing_direct_outcome_evidence=1")

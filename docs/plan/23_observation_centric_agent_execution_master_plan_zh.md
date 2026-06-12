@@ -3532,6 +3532,42 @@ Phase 0 审计后的最小真实缺口已经明确：
   - 本轮专项回归：
     - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
     - `678 passed, 456 deselected`
+- [x] 本轮继续切掉一条 `latest_action_intent_tool name -> transition_recovery` 的 live gate：
+  - 旧行为：
+    - `planner._recover_from_open_questions(...)`
+      在 `action_intent_resolution_withheld_for_missing_direct_outcome_evidence=1`
+      仍然打开时，
+      还会先检查
+      - `latest_action_intent_tool in {infer_action_intent, resolve_action_intent_pairwise, resolve_action_intent_future_use}`
+    - 然后才决定是否继续走
+      - `_build_action_intent_resolution_transition_recovery_decision(...)`
+    - 这意味着：
+      - transition recovery 仍需要一个固定 action-intent tool 名字来放行
+      - `rank_choices_from_state` 这类无 observation text 的 payload
+        与真正的 action-intent observation payload
+        仍然是靠 tool family 在前段被硬分流
+  - 当前变化：
+    - 上述 gate 已改成只看 observation-side payload 是否真实存在：
+      - `action_intent_result_support_text(...)`
+      - `missing_direct_outcome_evidence` marker
+    - 当前是否允许进入 transition recovery，
+      不再由具体 tool 名字放行，
+      而是由 payload 里是否真的携带
+      - `reason`
+      - `decisive_observation`
+      - `direct_effect`
+      - `downstream_action`
+      这些原始观测字段决定
+    - 因而 `rank_choices_from_state` 这类 metadata-only payload，
+      即使 marker 仍在，也不能再自举 transition recovery
+  - 本轮新增负约束测试：
+    - `test_planner_action_intent_open_question_missing_direct_outcome_marker_requires_observation_payload_before_transition_recovery`
+  - 本轮定向回归：
+    - `pytest -q tests/test_graph_agent.py -k 'open_question_missing_direct_outcome_marker_requires_observation_payload_before_transition_recovery or textual_fallback_missing_direct_outcome_marker_prefers_transition_probe or verifier_blocked_infer_transition_recovery_does_not_inject_future_use_tool_name or resolution_transition_recovery_is_not_driven_by_specialized_tool_name'`
+    - `4 passed, 1131 deselected`
+  - 本轮专项回归：
+    - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+    - `679 passed, 456 deselected`
 
 ---
 
