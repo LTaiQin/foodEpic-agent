@@ -4949,6 +4949,47 @@ Phase 0 审计后的最小真实缺口已经明确：
 - [x] 本轮合并回归：
   - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
   - 结果：`718 passed, 453 deselected`
+- [x] 本轮继续收掉 `graph_agent.py` finalizer 里一条 still answer-conditioned 的 `weak relocation / residue -> choice text gate` 旧链：
+  - 旧行为：
+    - 只有当 `best choice` 本身带有
+      - `move / relocate`
+      - 或 `wipe / clean / dry`
+      这类语义时，
+      才会进入弱 relocation / residue withheld
+  - 问题：
+    - finalizer 的 withheld 决策来源仍然是 choice family，
+      不是当前 observation text 是否缺少 direct outcome
+    - 同一段 towel/cloth observation，
+      只因为 choice 文本不同，
+      finalizer gate 就会变化
+- [x] 新行为：
+  - `weak relocation / residue` withheld 改成只看 observation-side uncertainty：
+    - `relocation outcome uncertainty`
+    - `residue release outcome uncertainty`
+  - 现在只允许由当前 observation text 中的以下信息触发：
+    - 是否缺少明确 relocation destination / direct relocation outcome
+    - 是否缺少明确 residue release / wipe-dry outcome
+  - 不再要求 `best choice` 先属于 `move` 或 `clean/dry` 家族
+- [x] 本轮新增 observation-side helper：
+  - `relocation outcome uncertainty`
+    - 例如：
+      - `held near the counter, but no direct relocation destination is shown`
+      - `no immediate transport destination`
+      - `no exact moved destination`
+  - `residue release outcome uncertainty`
+    - 例如：
+      - `no direct wipe/dry outcome is shown`
+      - `no direct residue outcome is shown`
+      - `no visible residue release`
+- [x] 本轮新增负约束测试：
+  - `test_graph_agent_action_intent_finalizer_weak_relocation_claim_ignores_choice_categories`
+  - `test_graph_agent_action_intent_finalizer_flip_residue_withhold_ignores_choice_categories`
+- [x] 本轮定向回归：
+  - `pytest -q tests/test_graph_agent.py -k 'weak_relocation_claim_without_direct_outcome or flip_cloth_cleanup_without_residue_outcome or weak_relocation_claim_ignores_choice_categories or flip_residue_withhold_ignores_choice_categories or finalizer_withholds_weak_surface_wiping_claim_without_strong_motion'`
+  - 结果：`5 passed, 1168 deselected`
+- [x] 本轮合并回归：
+  - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+  - 结果：`720 passed, 453 deselected`
 
 ---
 

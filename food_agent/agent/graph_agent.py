@@ -1401,34 +1401,12 @@ class GraphAgent:
     ) -> bool:
         question = str(getattr(state, "question", "") or "").lower()
         action_object = self._action_intent_question_object(question)
-        index = self._coerce_choice_index(raw_result.get("best_index"), state.choices)
-        if index is None:
-            return False
-        choice_lc = str(state.choices[index]).lower()
         text = self._action_intent_observation_support_text(raw_result).lower()
         if any(token in action_object for token in ("towel", "cloth", "napkin", "paper towel")):
-            if "move" in choice_lc and self._action_intent_choice_lacks_direct_relocation_outcome_evidence(
-                choice=choice_lc,
-                support=text,
-                contradiction="",
-            ):
+            if self._action_intent_support_has_relocation_outcome_uncertainty(text):
                 return True
             if any(token in question for token in ("<flip ", "<turn ", "<shake ", " flip ", " turn ", " shake ")):
-                if any(token in choice_lc for token in ("wipe", "clean", "dry")) and not any(
-                    token in text
-                    for token in (
-                        "crumb",
-                        "residue",
-                        "drop",
-                        "fall",
-                        "sink",
-                        "shake off",
-                        "掉",
-                        "落",
-                        "碎屑",
-                        "水槽",
-                    )
-                ):
+                if self._action_intent_support_has_residue_release_outcome_uncertainty(text):
                     return True
         return False
 
@@ -1973,6 +1951,75 @@ class GraphAgent:
             )
         )
         return has_hand_drying_reference and has_missing_hand_context
+
+    def _action_intent_support_has_relocation_outcome_uncertainty(self, text: str) -> bool:
+        text_lc = str(text or "").lower()
+        if self._action_intent_support_has_explicit_relocation_outcome_evidence(text_lc):
+            return False
+        has_relocation_reference = any(
+            token in text_lc
+            for token in (
+                "move",
+                "moved",
+                "relocate",
+                "relocated",
+                "set down",
+                "placed elsewhere",
+                "different position",
+                "different place",
+                "held near the counter",
+                "held near the worktop",
+                "transport destination",
+                "relocation destination",
+                "moved destination",
+                "挪动",
+                "移开",
+                "放到别处",
+            )
+        )
+        has_missing_destination = any(
+            token in text_lc
+            for token in (
+                "no direct relocation destination is shown",
+                "no direct relocation outcome is shown",
+                "no immediate transport destination",
+                "no exact moved destination",
+                "no direct relocation outcome",
+                "没有明确移动去向",
+                "没有明确放置位置",
+            )
+        )
+        return has_relocation_reference and has_missing_destination
+
+    def _action_intent_support_has_residue_release_outcome_uncertainty(self, text: str) -> bool:
+        text_lc = str(text or "").lower()
+        if any(
+            token in text_lc
+            for token in (
+                "crumb",
+                "residue",
+                "drop",
+                "fall",
+                "sink",
+                "shake off",
+                "掉",
+                "落",
+                "碎屑",
+                "水槽",
+            )
+        ):
+            return False
+        return any(
+            token in text_lc
+            for token in (
+                "no direct wipe/dry outcome is shown",
+                "no direct cleaning outcome is shown",
+                "no direct residue outcome is shown",
+                "no visible residue release",
+                "没有直接擦拭结果",
+                "没有残渣掉落结果",
+            )
+        )
 
     def _action_intent_support_has_exclusive_immediate_micro_outcome_evidence(self, text: str) -> bool:
         text_lc = str(text or "").lower()
