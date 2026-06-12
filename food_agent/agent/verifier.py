@@ -3,17 +3,11 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from food_agent.agent.action_intent import (
-    action_intent_needs_future_use_resolution,
-    action_intent_needs_pairwise_resolution,
-    action_intent_needs_precondition_context,
-    action_intent_requires_strict_visual_disambiguation,
-    selected_choice_categories,
-)
 from food_agent.agent.state import AgentState
 from food_agent.model_client import OpenAICompatibleModelClient
 
@@ -26,6 +20,55 @@ class VerificationResult:
     conflicts: list[str]
     recommend_next_action: str
     summary: str
+    evidence_gaps: list[dict[str, Any]] = field(default_factory=list)
+    sufficiency_decision: dict[str, Any] = field(default_factory=dict)
+    action_intent_hypotheses: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class EvidenceGap:
+    gap_type: str
+    priority: str
+    missing_observation: str
+    target_object: str = ""
+    target_fixture: str = ""
+    time_relation: str = ""
+    source: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "gap_type": self.gap_type,
+            "priority": self.priority,
+            "missing_observation": self.missing_observation,
+            "target_object": self.target_object,
+            "target_fixture": self.target_fixture,
+            "time_relation": self.time_relation,
+            "source": self.source,
+        }
+
+
+@dataclass(frozen=True)
+class SufficiencyDecision:
+    sufficient: bool
+    missing_gap_types: list[str]
+    blocking_hypotheses: list[str]
+    blocking_comparisons: list[dict[str, Any]]
+    recommended_next_step: str
+    finish_mode: str
+    summary: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "sufficient": self.sufficient,
+            "missing_gap_types": list(self.missing_gap_types),
+            "blocking_hypotheses": list(self.blocking_hypotheses),
+            "blocking_comparisons": [
+                dict(item) for item in self.blocking_comparisons if isinstance(item, dict)
+            ],
+            "recommended_next_step": self.recommended_next_step,
+            "finish_mode": self.finish_mode,
+            "summary": self.summary,
+        }
 
 
 class GraphAgentVerifier:
@@ -110,6 +153,17 @@ class GraphAgentVerifier:
         conflicts.extend(self._open_query_claim_conflicts(state))
         conflicts = self._filter_non_blocking_conflicts(state, conflicts)
         conflicts = list(dict.fromkeys(item for item in conflicts if item))
+        evidence_gaps = self._action_intent_build_evidence_gaps(
+            state=state,
+            missing=missing,
+            blocker_hint=self._action_intent_verifier_blocker(state, missing=missing),
+        )
+        action_intent_hypotheses = self._build_action_intent_hypotheses(
+            state=state,
+            missing=missing,
+            conflicts=conflicts,
+            evidence_gaps=evidence_gaps,
+        )
         evidence_count = len(state.evidence_bundle)
         sufficient = not missing and not conflicts and evidence_count > 0
         confidence = min(0.95, 0.3 + 0.08 * evidence_count)
@@ -125,6 +179,27 @@ class GraphAgentVerifier:
         if why_blocker:
             summary = f"{summary}; why_blocker={why_blocker}"
         recommend = "finish" if sufficient else (missing[0] if missing else (conflicts[0] if conflicts else "resolve_conflict"))
+        evidence_gaps = self._action_intent_build_evidence_gaps(
+            state=state,
+            missing=missing,
+            blocker_hint=why_blocker,
+        )
+        action_intent_hypotheses = self._build_action_intent_hypotheses(
+            state=state,
+            missing=missing,
+            conflicts=conflicts,
+            evidence_gaps=evidence_gaps,
+        )
+        sufficiency_decision = self._build_sufficiency_decision(
+            state=state,
+            sufficient=sufficient,
+            missing=missing,
+            conflicts=conflicts,
+            recommend_next_action=recommend,
+            summary=summary,
+            evidence_gaps=evidence_gaps,
+            action_intent_hypotheses=action_intent_hypotheses,
+        )
         return VerificationResult(
             sufficient=sufficient,
             confidence=confidence,
@@ -132,6 +207,9 @@ class GraphAgentVerifier:
             conflicts=conflicts,
             recommend_next_action=recommend,
             summary=summary,
+            evidence_gaps=evidence_gaps,
+            sufficiency_decision=sufficiency_decision,
+            action_intent_hypotheses=action_intent_hypotheses,
         )
 
     def _action_intent_verifier_blocker(self, state: AgentState, *, missing: list[str]) -> str:
@@ -144,63 +222,574 @@ class GraphAgentVerifier:
             latest = self._latest_action_intent_resolution_payload(state)
             if latest is None:
                 return "post_action_evidence"
-            tool_name, payload = latest
-            if tool_name == "resolve_action_intent_future_use":
-                return "future_use_close_call"
-            if tool_name == "resolve_action_intent_pairwise":
-                return "pairwise_close_call"
-            if self._action_intent_needs_future_use_resolution_due_to_latest_candidates(state, payload):
-                return "future_use_close_call"
-            if self._action_intent_needs_pairwise_resolution_due_to_latest_candidates(state, payload):
-                return "pairwise_close_call"
+            _tool_name, payload = latest
+            blocker_family = self._action_intent_payload_blocker_family(state=state, payload=payload)
+            if blocker_family:
+                return blocker_family
             return "post_action_evidence"
         latest = self._latest_action_intent_resolution_payload(state)
         if latest is None:
             return ""
-        tool_name, payload = latest
+        _tool_name, payload = latest
         if not self._action_intent_has_plausible_competing_candidate_gap(state):
             return ""
-        if tool_name == "resolve_action_intent_future_use":
-            return "future_use_close_call"
-        if tool_name == "resolve_action_intent_pairwise":
-            return "pairwise_close_call"
-        if self._action_intent_needs_future_use_resolution_due_to_latest_candidates(state, payload):
-            return "future_use_close_call"
-        if self._action_intent_needs_pairwise_resolution_due_to_latest_candidates(state, payload):
-            return "pairwise_close_call"
+        return self._action_intent_payload_blocker_family(state=state, payload=payload)
+
+    def _action_intent_build_evidence_gaps(
+        self,
+        *,
+        state: AgentState,
+        missing: list[str],
+        blocker_hint: str,
+    ) -> list[dict[str, Any]]:
+        if not self._is_action_intent_task(state):
+            return []
+        latest = self._latest_action_intent_resolution_payload(state)
+        payload: dict[str, Any] = {}
+        if latest is not None:
+            _tool_name, payload = latest
+        missing_set = {str(item) for item in missing if item}
+        gaps: list[EvidenceGap] = []
+        source = self._action_intent_gap_source(
+            state=state,
+            blocker_hint=blocker_hint,
+            payload=payload,
+        )
+        target_object = self._action_intent_gap_target_object(state=state)
+        target_fixture = self._action_intent_gap_target_fixture(state=state)
+
+        immediate_gap_needed = (
+            "need_post_action_evidence" in missing_set
+            and blocker_hint == "post_action_evidence"
+        ) or any(
+            isinstance(item, str)
+            and item.startswith("action_intent_resolution_withheld_for_missing_direct_outcome_evidence=1")
+            for item in list(getattr(state, "working_memory", []))[-16:]
+        )
+        if immediate_gap_needed:
+            gaps.append(
+                EvidenceGap(
+                    gap_type="immediate_outcome",
+                    priority="high",
+                    missing_observation=self._action_intent_observation_gap_text(
+                        state=state,
+                        gap_type="immediate_outcome",
+                        target_object=target_object,
+                        target_fixture=target_fixture,
+                    ),
+                    target_object=target_object,
+                    target_fixture=target_fixture,
+                    time_relation="after_action",
+                    source=source,
+                )
+            )
+
+        future_gap_needed = bool(payload.get("need_future_evidence")) or (
+            bool(payload.get("need_more_evidence"))
+            and bool(self._action_intent_payload_blocker_family(state=state, payload=payload))
+        )
+        if future_gap_needed:
+            gaps.append(
+                EvidenceGap(
+                    gap_type="future_outcome",
+                    priority="high",
+                    missing_observation=self._action_intent_observation_gap_text(
+                        state=state,
+                        gap_type="future_outcome",
+                        target_object=target_object,
+                        target_fixture=target_fixture,
+                    ),
+                    target_object=target_object,
+                    target_fixture=target_fixture,
+                    time_relation="later_after_action",
+                    source=source,
+                )
+            )
+        if "need_location_evidence" in missing_set:
+            gaps.append(
+                EvidenceGap(
+                    gap_type="target_discovery",
+                    priority="medium",
+                    missing_observation=self._action_intent_observation_gap_text(
+                        state=state,
+                        gap_type="target_discovery",
+                        target_object=target_object,
+                        target_fixture=target_fixture,
+                    ),
+                    target_object=target_object,
+                    target_fixture=target_fixture,
+                    time_relation="around_or_after_action",
+                    source=source or "need_location_evidence",
+                )
+            )
+        if "need_disambiguating_evidence" in missing_set and not gaps:
+            gaps.append(
+                EvidenceGap(
+                    gap_type="relation_confirmation",
+                    priority="medium",
+                    missing_observation=self._action_intent_observation_gap_text(
+                        state=state,
+                        gap_type="relation_confirmation",
+                        target_object=target_object,
+                        target_fixture=target_fixture,
+                    ),
+                    target_object=target_object,
+                    target_fixture=target_fixture,
+                    time_relation="around_or_after_action",
+                    source=source or "need_disambiguating_evidence",
+                )
+            )
+        deduped: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str, str]] = set()
+        for gap in gaps:
+            key = (gap.gap_type, gap.missing_observation, gap.target_object, gap.target_fixture)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(gap.as_dict())
+        return deduped
+
+    def _action_intent_gap_source(
+        self,
+        *,
+        state: AgentState,
+        blocker_hint: str,
+        payload: dict[str, Any] | None = None,
+    ) -> str:
+        if blocker_hint == "precondition_context":
+            return "precondition_gap"
+        if self._action_intent_recent_observation_focus(state):
+            return "verification_gap"
+        if self._action_intent_payload_blocker_family(state=state, payload=payload or {}):
+            return "resolution_followup_gap"
+        return "verification_gap"
+
+    def _action_intent_payload_blocker_family(
+        self,
+        *,
+        state: AgentState,
+        payload: dict[str, Any] | None,
+    ) -> str:
+        if not self._is_action_intent_task(state) or not isinstance(payload, dict):
+            return ""
+        if payload.get("best_index") is None or payload.get("tool_failed"):
+            return ""
+        if not bool(payload.get("need_more_evidence")) and not bool(payload.get("need_future_evidence")):
+            return ""
+        primary_gap_type = self._action_intent_primary_gap_type_from_state(state)
+        if primary_gap_type == "future_outcome":
+            return "future_gap_family"
+        if primary_gap_type in {
+            "immediate_outcome",
+            "relation_confirmation",
+            "target_discovery",
+            "state_transition_unconfirmed",
+            "workspace_change_unconfirmed",
+        }:
+            return "post_action_evidence"
+        if self._action_intent_payload_lacks_direct_post_action_evidence(payload):
+            return "post_action_evidence"
+        if self._action_intent_payload_points_to_later_outcome_uncertainty(payload):
+            return "future_gap_family"
         return ""
 
-    def _action_intent_needs_future_use_resolution_due_to_latest_candidates(
+    def _action_intent_primary_gap_type_from_state(self, state: AgentState) -> str:
+        latest = self._state_latest_verification(state)
+        decision = latest.get("sufficiency_decision")
+        if isinstance(decision, dict):
+            recommended = str(decision.get("recommended_next_step") or "").strip()
+            missing_gap_types = [
+                str(item).strip()
+                for item in decision.get("missing_gap_types", [])
+                if isinstance(item, str) and str(item).strip()
+            ]
+            selected = self._action_intent_select_primary_gap_type(
+                missing_gap_types=missing_gap_types,
+                recommended_next_step=recommended,
+            )
+            if selected:
+                return selected
+        return ""
+
+    def _state_latest_verification(self, state: AgentState) -> dict[str, Any]:
+        history = list(getattr(state, "verification_history", []) or [])
+        if not history:
+            return {}
+        latest = history[-1]
+        return latest if isinstance(latest, dict) else {}
+
+    def _action_intent_select_primary_gap_type(
         self,
-        state: AgentState,
-        payload: dict[str, Any],
-    ) -> bool:
-        best_index = self._coerce_choice_index(payload.get("best_index"), state.choices)
-        competitor_index = self._action_intent_competing_candidate_index(payload, state)
-        pair = None
-        if best_index is not None and competitor_index is not None and best_index != competitor_index:
-            pair = [best_index, competitor_index]
-        return action_intent_needs_future_use_resolution(
-            question=str(getattr(state, "question", "") or ""),
-            choices=[str(choice) for choice in getattr(state, "choices", [])],
-            indices=pair,
+        *,
+        missing_gap_types: list[str],
+        recommended_next_step: str,
+    ) -> str:
+        candidates = {
+            str(item).strip()
+            for item in missing_gap_types
+            if isinstance(item, str) and str(item).strip()
+        }
+        if not candidates:
+            return ""
+        preferred_by_step = {
+            "need_precondition_context": ("precondition",),
+            "need_post_action_evidence": ("immediate_outcome", "future_outcome"),
+            "need_location_evidence": ("target_discovery", "relation_confirmation", "future_outcome"),
+            "need_disambiguating_evidence": ("relation_confirmation", "target_discovery", "future_outcome", "immediate_outcome"),
+        }
+        for candidate in preferred_by_step.get(recommended_next_step, ()):
+            if candidate in candidates:
+                return candidate
+        for candidate in (
+            "precondition",
+            "immediate_outcome",
+            "future_outcome",
+            "relation_confirmation",
+            "target_discovery",
+        ):
+            if candidate in candidates:
+                return candidate
+        return ""
+
+    def _action_intent_payload_lacks_direct_post_action_evidence(self, payload: dict[str, Any]) -> bool:
+        support_text = self._action_intent_result_support_text(payload)
+        if not support_text:
+            return True
+        if self._action_intent_text_has_direct_outcome_clause(
+            text=support_text,
+            strong_result_terms=(
+                "immediately",
+                "right after",
+                "shortly after",
+                "next step",
+                "afterwards",
+                "placed on the scale",
+                "used on the scale",
+                "display changes",
+                "changes to 0",
+                "wiped",
+                "wipe both hands",
+                "wipe the hands",
+                "wipe the counter",
+                "dried the hands",
+                "dry the hands",
+                "under running water",
+                "returned to",
+                "put back",
+                "stored",
+                "poured",
+                "picked up from behind",
+                "taken from behind",
+                "retrieved from behind",
+                "placed into the freed slot",
+                "put into the freed slot",
+                "immediately picks up",
+                "used again shortly after",
+                "turned off",
+                "turned on",
+                "opened",
+                "closed",
+                "明确看到",
+                "直接看到",
+                "立刻",
+                "随后",
+                "接着",
+                "放到秤上",
+                "开始擦",
+                "放回",
+                "取到后面的",
+            ),
+            blocked_terms=(
+                "not enough",
+                "insufficient",
+                "unclear",
+                "uncertain",
+                "ambiguous",
+                "cannot tell",
+                "can't tell",
+                "not visible",
+                "not shown",
+                "no visible",
+                "no actual",
+                "missing",
+                "lack",
+                "merely",
+                "simply",
+                "only briefly",
+                "briefly",
+                "visible in hand",
+                "near the counter",
+                "picked up but not yet used",
+                "picked up but the next use is not shown",
+                "still unclear",
+                "still contested",
+                "未显示",
+                "没有看到",
+                "看不清",
+                "不明确",
+            ),
+        ):
+            return False
+        return True
+
+    def _action_intent_payload_points_to_later_outcome_uncertainty(self, payload: dict[str, Any]) -> bool:
+        support_text = self._action_intent_result_support_text(payload)
+        if not support_text:
+            return False
+        later_markers = (
+            "later",
+            "afterwards",
+            "next use",
+            "used again",
+            "returned to",
+            "put back",
+            "stored",
+            "final location",
+            "最终",
+            "之后",
+            "后续",
+            "放回",
+            "归位",
+        )
+        uncertainty_markers = (
+            "not shown",
+            "not visible",
+            "cannot tell",
+            "can't tell",
+            "unclear",
+            "uncertain",
+            "missing",
+            "lack",
+            "still unclear",
+            "未显示",
+            "没有看到",
+            "看不清",
+            "不明确",
+        )
+        return any(term in support_text for term in later_markers) and any(
+            term in support_text for term in uncertainty_markers
         )
 
-    def _action_intent_needs_pairwise_resolution_due_to_latest_candidates(
+    def _action_intent_gap_target_object(self, *, state: AgentState) -> str:
+        focus = self._action_intent_recent_observation_focus(state)
+        related_object = str(focus.get("related_object") or "").strip()
+        if related_object:
+            return related_object
+        subject_object = str(focus.get("subject_object") or "").strip()
+        if subject_object:
+            return subject_object
+        return ""
+
+    def _action_intent_gap_target_fixture(self, *, state: AgentState) -> str:
+        focus = self._action_intent_recent_observation_focus(state)
+        return str(focus.get("fixture") or "").strip()
+
+    def _action_intent_observation_gap_text(
         self,
+        *,
         state: AgentState,
-        payload: dict[str, Any],
-    ) -> bool:
-        best_index = self._coerce_choice_index(payload.get("best_index"), state.choices)
-        competitor_index = self._action_intent_competing_candidate_index(payload, state)
-        pair = None
-        if best_index is not None and competitor_index is not None and best_index != competitor_index:
-            pair = [best_index, competitor_index]
-        return action_intent_needs_pairwise_resolution(
-            question=str(getattr(state, "question", "") or ""),
-            choices=[str(choice) for choice in getattr(state, "choices", [])],
-            indices=pair,
+        gap_type: str,
+        target_object: str,
+        target_fixture: str,
+    ) -> str:
+        subject_object = str(self._action_intent_recent_observation_focus(state).get("subject_object") or "").strip()
+        if target_object and target_object == subject_object:
+            target_object = ""
+        subject_text = subject_object or "该动作对象"
+        if gap_type == "immediate_outcome":
+            return f"需要确认{subject_text}在动作后短时间内是否出现可观察的直接结果。"
+        if gap_type == "future_outcome":
+            if target_object:
+                return f"需要确认{subject_text}在更晚时段是否与{target_object}产生明确的后续用途、取放或交互结果。"
+            if target_fixture:
+                return f"需要确认{subject_text}在更晚时段是否到达{target_fixture}附近并形成明确的最终落点或后续用途。"
+            return f"需要确认{subject_text}在更晚时段是否出现明确的后续用途、最终落点或下游结果。"
+        if gap_type == "target_discovery":
+            if target_object:
+                return f"需要确认{target_object}在关键时间窗内是否重新出现，以及相关对象轨迹或位置是否闭合。"
+            if target_fixture:
+                return f"需要确认与{target_fixture}相关的关键对象或区域在动作前后是否被重新观察到。"
+            return "需要确认关键对象或区域在动作前后是否重新出现，以及对象轨迹或位置是否闭合。"
+        if gap_type == "relation_confirmation":
+            if target_object:
+                return f"需要确认{subject_text}与{target_object}之间是否形成了可观察的空间或功能关系。"
+            if target_fixture:
+                return f"需要确认{subject_text}与{target_fixture}附近区域之间是否形成了可观察的空间或功能关系。"
+            return f"需要确认{subject_text}与相关对象或区域之间是否形成了可观察的空间或功能关系。"
+        return "需要补充当前动作相关的原始观测证据。"
+
+    def _action_intent_recent_observation_focus(self, state: AgentState) -> dict[str, str]:
+        subject_object = self._action_intent_question_subject_object(state)
+        related_object = ""
+        fixture = ""
+        for call in reversed(list(getattr(state, "tool_trace", []) or [])):
+            if not isinstance(call, dict):
+                continue
+            tool = str(call.get("tool") or "")
+            args = call.get("args") if isinstance(call.get("args"), dict) else {}
+            raw_result = call.get("raw_result") if isinstance(call.get("raw_result"), dict) else {}
+            if not related_object and tool == "query_object":
+                query_name = str(args.get("query") or "").strip()
+                if query_name and query_name != subject_object:
+                    related_object = query_name
+            if tool == "query_spatial_context":
+                if not subject_object:
+                    subject_candidate = str(args.get("object_name") or "").strip()
+                    if subject_candidate:
+                        subject_object = subject_candidate
+                if not fixture:
+                    fixture = str(args.get("fixture") or "").strip()
+                if not related_object:
+                    related_object = self._action_intent_extract_related_object_from_spatial_result(raw_result, subject_object)
+                if not fixture:
+                    fixture = self._action_intent_extract_fixture_from_spatial_result(raw_result)
+            if subject_object and related_object and fixture:
+                break
+        if not fixture:
+            fixture = self._action_intent_extract_fixture_from_evidence(state)
+        return {
+            "subject_object": subject_object,
+            "related_object": related_object,
+            "fixture": fixture,
+        }
+
+    def _action_intent_question_subject_object(self, state: AgentState) -> str:
+        question = str(getattr(state, "question", "") or "")
+        match = re.search(r"<([^>]+)>", question)
+        if not match:
+            return ""
+        action_text = str(match.group(1) or "").strip().lower()
+        tokens = [token for token in re.split(r"[^a-z]+", action_text) if token]
+        stopwords = {
+            "move",
+            "take",
+            "pick",
+            "put",
+            "open",
+            "close",
+            "flip",
+            "turn",
+            "tap",
+            "lift",
+            "slide",
+            "pull",
+            "push",
+            "up",
+            "down",
+        }
+        for token in reversed(tokens):
+            if token not in stopwords:
+                return token
+        return ""
+
+    def _action_intent_extract_related_object_from_spatial_result(
+        self,
+        raw_result: dict[str, Any],
+        subject_object: str,
+    ) -> str:
+        fixture_markers = ("fridge", "sink", "counter", "worktop", "shelf", "hob", "scale")
+        for key in ("relations", "object_tracks", "object_masks"):
+            values = raw_result.get(key)
+            if not isinstance(values, list):
+                continue
+            for item in values:
+                if not isinstance(item, dict):
+                    continue
+                for candidate_key in ("target", "object", "object_name"):
+                    candidate = str(item.get(candidate_key) or "").strip()
+                    lowered = candidate.lower()
+                    if candidate and candidate != subject_object and not any(marker in lowered for marker in fixture_markers):
+                        return candidate
+        return ""
+
+    def _action_intent_extract_fixture_from_spatial_result(self, raw_result: dict[str, Any]) -> str:
+        for key in ("object_masks", "relations"):
+            values = raw_result.get(key)
+            if not isinstance(values, list):
+                continue
+            for item in values:
+                if not isinstance(item, dict):
+                    continue
+                candidate = str(item.get("fixture") or item.get("target") or "").strip()
+                if candidate and any(marker in candidate.lower() for marker in ("fridge", "sink", "counter", "worktop", "shelf", "hob", "scale")):
+                    return candidate
+        return ""
+
+    def _action_intent_extract_fixture_from_evidence(self, state: AgentState) -> str:
+        combined = " ".join(str(item) for item in list(getattr(state, "evidence_bundle", []))[-12:])
+        lowered = combined.lower()
+        for candidate in ("fridge", "sink", "counter", "worktop", "shelf", "hob", "scale"):
+            if candidate in lowered:
+                return candidate
+        return ""
+
+    def _action_intent_result_support_text(self, result: dict[str, Any] | None) -> str:
+        if not isinstance(result, dict):
+            return ""
+        return " ".join(
+            str(result.get(key) or "")
+            for key in (
+                "reason",
+                "support",
+                "decisive_observation",
+                "direct_effect",
+                "downstream_action",
+            )
+        ).strip().lower()
+
+    def _build_action_intent_hypotheses(
+        self,
+        *,
+        state: AgentState,
+        missing: list[str],
+        conflicts: list[str],
+        evidence_gaps: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        return []
+
+    def _build_sufficiency_decision(
+        self,
+        *,
+        state: AgentState | None = None,
+        sufficient: bool,
+        missing: list[str],
+        conflicts: list[str],
+        recommend_next_action: str,
+        summary: str,
+        evidence_gaps: list[dict[str, Any]],
+        action_intent_hypotheses: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        gap_types = [
+            str(item.get("gap_type") or "")
+            for item in evidence_gaps
+            if isinstance(item, dict) and item.get("gap_type")
+        ]
+        blocking_hypotheses = list(dict.fromkeys([*missing, *conflicts]))
+        blocking_comparisons: list[dict[str, Any]] = []
+        has_structured_blockers = bool(blocking_hypotheses)
+        budget_exhausted = bool(getattr(state, "is_search_budget_exhausted", lambda: False)()) if state is not None else False
+        if sufficient:
+            finish_mode = "finish_confident"
+        elif budget_exhausted:
+            finish_mode = "finish_budget_exhausted_best_guess"
+        elif conflicts:
+            finish_mode = "resolve_conflict"
+        elif gap_types or missing or has_structured_blockers:
+            finish_mode = "needs_more_evidence"
+        else:
+            finish_mode = "finish_insufficient_evidence"
+        decision = SufficiencyDecision(
+            sufficient=sufficient,
+            missing_gap_types=gap_types,
+            blocking_hypotheses=list(dict.fromkeys(blocking_hypotheses)),
+            blocking_comparisons=[
+                item for item in blocking_comparisons if isinstance(item, dict) and item
+            ],
+            recommended_next_step=str(recommend_next_action or ""),
+            finish_mode=finish_mode,
+            summary=summary,
         )
+        return decision.as_dict()
 
     def _is_weight_task(self, state: AgentState) -> bool:
         return str(getattr(state, "task_family", "")) == "ingredient_ingredient_weight"
@@ -327,32 +916,53 @@ class GraphAgentVerifier:
             return False
         if self._action_intent_has_pending_evidence_gap(state):
             return False
-        if any(
-            isinstance(item, str) and item.startswith("action_intent_needed_observation=")
-            for item in list(getattr(state, "working_memory", []))[-16:]
-        ):
-            return False
         if not self._action_intent_has_current_task_artifact_grounding(state):
             return False
-        choices = [str(choice) for choice in getattr(state, "choices", [])]
-        question = str(getattr(state, "question", "") or "")
-        if action_intent_requires_strict_visual_disambiguation(
-            question=question,
-            choices=choices,
-            indices=None,
-        ):
-            return False
-        if action_intent_needs_precondition_context(question=question, choices=choices, indices=None):
+        primary_gap_type = self._action_intent_primary_gap_type_from_state(state)
+        blocker_hint = self._action_intent_verifier_blocker(state, missing=[])
+        if primary_gap_type == "precondition" or blocker_hint == "precondition_context":
             if not self._action_intent_has_precondition_grounding(state):
                 return False
         if (
-            action_intent_needs_future_use_resolution(question=question, choices=choices, indices=None)
-            or action_intent_needs_pairwise_resolution(question=question, choices=choices, indices=None)
+            primary_gap_type in {"future_outcome", "relation_confirmation", "target_discovery"}
+            or blocker_hint == "future_gap_family"
         ) and not self._action_intent_has_post_action_grounding(state):
+            return False
+        if (
+            primary_gap_type in {"immediate_outcome", "state_transition_unconfirmed", "workspace_change_unconfirmed"}
+            or blocker_hint == "post_action_evidence"
+        ) and not self._action_intent_has_post_action_grounding(state):
+            return False
+        if self._action_intent_state_describes_unclosed_post_action_outcome(state):
             return False
         if self._action_intent_has_unresolved_secondary_conflicts(state):
             return False
         return True
+
+    def _action_intent_state_describes_unclosed_post_action_outcome(self, state: AgentState) -> bool:
+        text = " ".join(
+            str(item)
+            for item in list(getattr(state, "evidence_bundle", []) or []) + list(getattr(state, "working_memory", []) or [])
+            if isinstance(item, str) and item
+        ).lower()
+        if not text:
+            return False
+        unresolved_markers = (
+            "missing_direct_outcome",
+            "direct outcome is still not explicit",
+            "direct outcome after",
+            "direct outcome right after",
+            "direct outcome is not visible",
+            "direct outcome remains unresolved",
+            "still unclear",
+            "still unresolved",
+            "not yet visible",
+            "未显示",
+            "不明确",
+            "看不清",
+        )
+        direct_outcome_scope = ("direct outcome", "state_change_hint", "timeline_event", "post_action")
+        return any(marker in text for marker in unresolved_markers) and any(scope in text for scope in direct_outcome_scope)
 
     def _action_intent_has_current_task_artifact_grounding(self, state: AgentState) -> bool:
         task_prefix = f"{str(getattr(state, 'task_family', '') or '').lower()}_"
@@ -392,7 +1002,7 @@ class GraphAgentVerifier:
                 continue
             if item.startswith("action_intent_need_future_evidence=1") or item.startswith("action_intent_followup_gap=1"):
                 return True
-            if item.startswith("action_intent_pending_resolution="):
+            if item.startswith("action_intent_pending_resolution=") or item.startswith("action_intent_pending_resolution_profile="):
                 return True
         if self._action_intent_has_unresolved_timeline_review_gap(state):
             return True
@@ -406,34 +1016,32 @@ class GraphAgentVerifier:
         latest = self._latest_action_intent_resolution_payload(state)
         if latest is None:
             return False
-        tool_name, payload = latest
+        _tool_name, payload = latest
         if bool(payload.get("tool_failed")) or bool(payload.get("need_more_evidence")):
             return False
-        best_index = self._coerce_choice_index(payload.get("best_index"), state.choices)
-        competitor_index = self._action_intent_competing_candidate_index(payload, state)
-        if best_index is None or competitor_index is None or best_index == competitor_index:
+        choices = [str(choice) for choice in getattr(state, "choices", [])]
+        best_index = self._coerce_choice_index(payload.get("best_index"), choices)
+        if best_index is None or len(choices) < 2:
             return False
-        if not self._action_intent_competing_pair_still_needs_disambiguation(
-            state=state,
-            best_index=best_index,
-            competitor_index=competitor_index,
-        ):
+        if not self._action_intent_competing_pair_still_needs_disambiguation(state=state):
             return False
-        if self._action_intent_needed_observation_remains_open(payload):
-            return True
         try:
             confidence = float(payload.get("confidence") or 0.0)
         except Exception:  # noqa: BLE001
             confidence = 0.0
-        if tool_name == "resolve_action_intent_pairwise":
-            direct_effect = str(payload.get("direct_effect") or "").strip()
-            downstream_action = str(payload.get("downstream_action") or "").strip()
-            return confidence < 0.84 or not direct_effect or not downstream_action
-        if tool_name == "resolve_action_intent_future_use":
-            decisive = str(payload.get("decisive_observation") or "").strip()
-            score_gap = self._action_intent_future_use_score_gap(payload)
-            return confidence < 0.84 or not decisive or score_gap < 0.18
         support_text = " ".join(str(payload.get(key) or "") for key in ("reason", "decisive_observation")).lower()
+        primary_gap_type = self._action_intent_primary_gap_type_from_state(state)
+        has_structured_observation_gap = primary_gap_type in {
+            "future_outcome",
+            "immediate_outcome",
+            "relation_confirmation",
+            "target_discovery",
+            "state_transition_unconfirmed",
+            "workspace_change_unconfirmed",
+        }
+        payload_uncertainty = self._action_intent_payload_points_to_later_outcome_uncertainty(payload)
+        if not support_text.strip() and not has_structured_observation_gap and not payload_uncertainty:
+            return False
         direct_result_markers = (
             "immediately",
             "right after",
@@ -477,7 +1085,7 @@ class GraphAgentVerifier:
             "看不清",
             "不明确",
         )
-        return confidence < 0.9 or not self._action_intent_text_has_direct_outcome_clause(
+        return confidence < 0.84 or not self._action_intent_text_has_direct_outcome_clause(
             text=support_text,
             strong_result_terms=direct_result_markers,
             blocked_terms=blocked_terms,
@@ -525,30 +1133,6 @@ class GraphAgentVerifier:
             return True
         return False
 
-    def _action_intent_needed_observation_remains_open(self, payload: dict[str, Any] | None) -> bool:
-        if not isinstance(payload, dict):
-            return False
-        text = str(payload.get("needed_observation") or "").strip().lower()
-        if not text:
-            return False
-        unresolved_markers = (
-            "whether",
-            "more post-action frames",
-            "actual use",
-            "direct physical effect",
-            "put back",
-            "placed on the scale",
-            "put on the scale",
-            "read/checked first",
-            "picked up before",
-            "applied to the hands",
-            "full or unstable",
-            "counter does not get messy",
-            "final placement",
-            "state change",
-        )
-        return any(marker in text for marker in unresolved_markers)
-
     def _latest_action_intent_resolution_payload(self, state: AgentState) -> tuple[str, dict[str, Any]] | None:
         for call in reversed(list(getattr(state, "tool_trace", []) or [])):
             if not isinstance(call, dict):
@@ -566,64 +1150,60 @@ class GraphAgentVerifier:
             if raw_result.get("best_index") is None:
                 continue
             return tool, raw_result
+        for call in reversed(list(getattr(state, "tool_trace", []) or [])):
+            if not isinstance(call, dict):
+                continue
+            tool = str(call.get("tool") or "")
+            if tool != "rank_choices_from_state":
+                continue
+            raw_result = call.get("raw_result")
+            if not isinstance(raw_result, dict):
+                continue
+            if raw_result.get("tool_failed") or raw_result.get("tool_ineffective"):
+                continue
+            if raw_result.get("best_index") is None:
+                continue
+            return tool, raw_result
         return None
-
-    def _action_intent_competing_candidate_index(self, payload: dict[str, Any], state: AgentState) -> int | None:
-        second_best = self._coerce_choice_index(payload.get("second_best_index"), state.choices)
-        if second_best is not None:
-            return second_best
-        losing = self._coerce_choice_index(payload.get("losing_index"), state.choices)
-        if losing is not None:
-            return losing
-        candidate_scores: list[tuple[int, float]] = []
-        for item in payload.get("candidate_evidence") or []:
-            if not isinstance(item, dict):
-                continue
-            index = self._coerce_choice_index(item.get("index"), state.choices)
-            if index is None:
-                continue
-            try:
-                score = float(item.get("score") or 0.0)
-            except Exception:  # noqa: BLE001
-                score = 0.0
-            candidate_scores.append((index, score))
-        if len(candidate_scores) < 2:
-            return None
-        ranked = sorted(candidate_scores, key=lambda pair: (-pair[1], pair[0]))
-        return ranked[1][0]
-
-    def _action_intent_future_use_score_gap(self, payload: dict[str, Any]) -> float:
-        scores: list[float] = []
-        for item in payload.get("candidate_evidence") or []:
-            if not isinstance(item, dict):
-                continue
-            try:
-                scores.append(float(item.get("score") or 0.0))
-            except Exception:  # noqa: BLE001
-                continue
-        if len(scores) < 2:
-            return 0.0
-        ranked = sorted(scores, reverse=True)
-        return ranked[0] - ranked[1]
 
     def _action_intent_competing_pair_still_needs_disambiguation(
         self,
         *,
         state: AgentState,
-        best_index: int,
-        competitor_index: int,
     ) -> bool:
-        question = str(getattr(state, "question", "") or "")
-        choices = [str(choice) for choice in getattr(state, "choices", [])]
-        pair = [best_index, competitor_index]
-        if action_intent_needs_future_use_resolution(question=question, choices=choices, indices=pair):
+        latest = self._latest_action_intent_resolution_payload(state)
+        if latest is not None:
+            _tool_name, payload = latest
+            if self._action_intent_payload_lacks_direct_post_action_evidence(payload):
+                return True
+            if self._action_intent_payload_points_to_later_outcome_uncertainty(payload):
+                return True
+        primary_gap_type = self._action_intent_primary_gap_type_from_state(state)
+        if primary_gap_type in {
+            "future_outcome",
+            "immediate_outcome",
+            "relation_confirmation",
+            "target_discovery",
+            "state_transition_unconfirmed",
+            "workspace_change_unconfirmed",
+        }:
             return True
-        if action_intent_needs_pairwise_resolution(question=question, choices=choices, indices=pair):
-            return True
-        categories = selected_choice_categories(choices, pair)
-        best_categories = set(categories.get(best_index) or set())
-        competitor_categories = set(categories.get(competitor_index) or set())
-        return best_categories != competitor_categories and bool(best_categories | competitor_categories)
+        payload = latest[1] if latest is not None else {}
+        support_text = self._action_intent_result_support_text(payload).lower() if isinstance(payload, dict) else ""
+        uncertainty_markers = (
+            "still unclear",
+            "unclear",
+            "not visible",
+            "not shown",
+            "cannot tell",
+            "can't tell",
+            "insufficient",
+            "ambiguous",
+            "看不清",
+            "不明确",
+            "证据不足",
+        )
+        return any(marker in support_text for marker in uncertainty_markers)
 
     def _action_intent_has_unresolved_timeline_review_gap(self, state: AgentState) -> bool:
         if not self._is_action_intent_task(state):
@@ -713,21 +1293,40 @@ class GraphAgentVerifier:
         missing: list[str] = []
         if self._has_action_intent_textual_rank_fallback_answer(state):
             missing.append("need_alternative_evidence_path")
-        choices = [str(choice) for choice in getattr(state, "choices", [])]
-        question = str(getattr(state, "question", "") or "")
         if self._action_intent_has_pending_evidence_gap(state):
             missing.append("need_disambiguating_evidence")
         if self._action_intent_has_plausible_competing_candidate_gap(state):
             missing.append("need_disambiguating_evidence")
+        primary_gap_type = self._action_intent_primary_gap_type_from_state(state)
+        latest = self._latest_action_intent_resolution_payload(state)
+        payload = latest[1] if latest is not None else {}
+        blocker_hint = self._action_intent_verifier_blocker(state, missing=missing)
         needs_specialized_resolution = (
-            action_intent_needs_future_use_resolution(question=question, choices=choices, indices=None)
-            or action_intent_needs_pairwise_resolution(question=question, choices=choices, indices=None)
+            primary_gap_type in {
+                "future_outcome",
+                "immediate_outcome",
+                "relation_confirmation",
+                "target_discovery",
+                "state_transition_unconfirmed",
+                "workspace_change_unconfirmed",
+            }
+            or blocker_hint in {"future_gap_family", "post_action_evidence"}
+            or (
+                isinstance(payload, dict)
+                and (
+                    self._action_intent_payload_lacks_direct_post_action_evidence(payload)
+                    or self._action_intent_payload_points_to_later_outcome_uncertainty(payload)
+                )
+            )
         )
         if not self._action_intent_has_successful_specialized_resolution(state):
             if needs_specialized_resolution:
                 missing.append("need_disambiguating_evidence")
             if (
-                action_intent_needs_precondition_context(question=question, choices=choices, indices=None)
+                (
+                    primary_gap_type == "precondition"
+                    or self._action_intent_precondition_dependency_is_observation_grounded(state)
+                )
                 and not self._action_intent_has_precondition_grounding(state)
             ):
                 missing.append("need_precondition_context")
@@ -746,45 +1345,40 @@ class GraphAgentVerifier:
         has_specialized_resolution = self._action_intent_has_successful_specialized_resolution(state)
         if has_specialized_resolution:
             return True
-        choices = [str(choice) for choice in getattr(state, "choices", [])]
-        question = str(getattr(state, "question", "") or "")
-        if (
-            action_intent_needs_future_use_resolution(question=question, choices=choices, indices=None)
-            or action_intent_needs_pairwise_resolution(question=question, choices=choices, indices=None)
-        ):
-            return False
-        if action_intent_needs_precondition_context(question=question, choices=choices, indices=None):
+        primary_gap_type = self._action_intent_primary_gap_type_from_state(state)
+        latest = self._latest_action_intent_resolution_payload(state)
+        payload = latest[1] if latest is not None else {}
+        if primary_gap_type == "precondition":
             if not self._action_intent_has_precondition_grounding(state):
                 return False
-        if (
-            action_intent_needs_future_use_resolution(question=question, choices=choices, indices=None)
-            or action_intent_needs_pairwise_resolution(question=question, choices=choices, indices=None)
+        if primary_gap_type in {
+            "future_outcome",
+            "immediate_outcome",
+            "relation_confirmation",
+            "target_discovery",
+            "state_transition_unconfirmed",
+            "workspace_change_unconfirmed",
+        }:
+            return False
+        if isinstance(payload, dict) and (
+            self._action_intent_payload_lacks_direct_post_action_evidence(payload)
+            or self._action_intent_payload_points_to_later_outcome_uncertainty(payload)
         ):
+            return False
+        blocker_hint = self._action_intent_verifier_blocker(state, missing=[])
+        if blocker_hint in {"future_gap_family", "post_action_evidence"}:
+            return False
+        if blocker_hint == "precondition_context":
+            if not self._action_intent_has_precondition_grounding(state):
+                return False
+        if blocker_hint in {"future_gap_family", "post_action_evidence"}:
             if not self._action_intent_has_post_action_grounding(state):
                 return False
         return True
 
     def _action_intent_has_successful_specialized_resolution(self, state: AgentState) -> bool:
-        for item in list(state.evidence_bundle) + list(state.working_memory):
-            if not isinstance(item, str):
-                continue
-            if item.startswith(
-                (
-                    "action_intent_pairwise_reason=",
-                    "action_intent_future_use_reason=",
-                    "action_intent_future_use_observation=",
-                    "action_intent_prior_direct_override_best_index=",
-                    "action_intent_causal_override_best_index=",
-                    "action_intent_exact_use_override_best_index=",
-                    "action_intent_hidden_target_override_best_index=",
-                )
-            ):
-                return True
         for call in list(getattr(state, "tool_trace", []) or []):
             if not isinstance(call, dict):
-                continue
-            tool = str(call.get("tool") or "")
-            if tool not in {"resolve_action_intent_pairwise", "resolve_action_intent_future_use"}:
                 continue
             raw_result = call.get("raw_result")
             if not isinstance(raw_result, dict):
@@ -793,9 +1387,11 @@ class GraphAgentVerifier:
                 continue
             if raw_result.get("best_index") is None:
                 continue
-            if bool(raw_result.get("need_more_evidence")):
+            if bool(raw_result.get("need_more_evidence")) or bool(raw_result.get("need_future_evidence")):
                 continue
-            if self._action_intent_needed_observation_remains_open(raw_result):
+            if self._action_intent_payload_lacks_direct_post_action_evidence(raw_result):
+                continue
+            if self._action_intent_payload_points_to_later_outcome_uncertainty(raw_result):
                 continue
             return True
         return False
@@ -844,6 +1440,57 @@ class GraphAgentVerifier:
         )
         combined = " ".join(str(item) for item in list(state.evidence_bundle) + list(state.working_memory)).lower()
         return any(term in combined for term in precondition_terms)
+
+    def _action_intent_precondition_dependency_is_observation_grounded(self, state: AgentState) -> bool:
+        if not self._is_action_intent_task(state):
+            return False
+        subject_object = str(self._action_intent_question_subject_object(state) or "").strip().lower()
+        object_anchor_tokens = {
+            "towel",
+            "cloth",
+            "napkin",
+            "spoon",
+            "ladle",
+            "board",
+            "tray",
+            "scale",
+            "switch",
+            "button",
+            "tap",
+        }
+        evidence_text = " ".join(str(item) for item in list(state.evidence_bundle) + list(state.working_memory)).lower()
+        precondition_markers = (
+            "dry hands",
+            "wet hands",
+            "wipe",
+            "wiping",
+            "wiped",
+            "washed",
+            "wash",
+            "rinsed",
+            "messy",
+            "spill",
+            "dirty",
+            "already on",
+            "already lit",
+            "before the tap",
+            "before tapping",
+            "display was already lit",
+            "scale was already on",
+            "container was already on the scale",
+            "container already on the scale",
+            "bowl already on the scale",
+            "干手",
+            "湿手",
+            "擦手",
+            "清洗",
+            "溢出",
+            "已经亮",
+            "已经开机",
+        )
+        if any(marker in evidence_text for marker in precondition_markers):
+            return True
+        return any(token in subject_object for token in object_anchor_tokens)
 
     def _action_intent_has_post_action_grounding(self, state: AgentState) -> bool:
         for path in list(getattr(state, "retrieved_frames", []) or []):
@@ -987,6 +1634,8 @@ class GraphAgentVerifier:
             conflicts=[str(item) for item in payload.get("conflicts", []) if item],
             recommend_next_action=str(payload.get("recommend_next_action") or ""),
             summary=str(payload.get("summary") or ""),
+            evidence_gaps=[item for item in payload.get("evidence_gaps", []) if isinstance(item, dict)],
+            sufficiency_decision=payload.get("sufficiency_decision") if isinstance(payload.get("sufficiency_decision"), dict) else {},
         )
 
     def _heuristic_verify_freeform_answer(self, state: AgentState, *, answer_text: str) -> VerificationResult:
@@ -1001,6 +1650,8 @@ class GraphAgentVerifier:
                 conflicts=base.conflicts,
                 recommend_next_action=missing[0],
                 summary=f"{base.summary}; answer_critic=empty_answer",
+                evidence_gaps=list(base.evidence_gaps),
+                sufficiency_decision=dict(base.sufficiency_decision),
             )
         missing = list(base.missing_evidence_types)
         conflicts = list(base.conflicts)
@@ -1021,6 +1672,16 @@ class GraphAgentVerifier:
             conflicts=conflicts,
             recommend_next_action=recommend,
             summary=f"{base.summary}; answer_critic_missing={missing}; answer_critic_conflicts={conflicts}",
+            evidence_gaps=list(base.evidence_gaps),
+            sufficiency_decision=self._build_sufficiency_decision(
+                state=state,
+                sufficient=sufficient,
+                missing=missing,
+                conflicts=conflicts,
+                recommend_next_action=recommend,
+                summary=f"{base.summary}; answer_critic_missing={missing}; answer_critic_conflicts={conflicts}",
+                evidence_gaps=list(base.evidence_gaps),
+            ),
         )
 
     def _model_verify_freeform_answer(self, state: AgentState, *, answer_text: str) -> VerificationResult:
@@ -1058,6 +1719,8 @@ class GraphAgentVerifier:
             conflicts=[str(item) for item in payload.get("conflicts", []) if item],
             recommend_next_action=str(payload.get("recommend_next_action") or ""),
             summary=str(payload.get("summary") or ""),
+            evidence_gaps=[item for item in payload.get("evidence_gaps", []) if isinstance(item, dict)],
+            sufficiency_decision=payload.get("sufficiency_decision") if isinstance(payload.get("sufficiency_decision"), dict) else {},
         )
 
     def _merge_results(self, heuristic: VerificationResult, refined: VerificationResult) -> VerificationResult:
@@ -1074,6 +1737,16 @@ class GraphAgentVerifier:
             conflicts=conflicts,
             recommend_next_action=recommend,
             summary=summary,
+            evidence_gaps=list(heuristic.evidence_gaps or refined.evidence_gaps),
+            sufficiency_decision=self._build_sufficiency_decision(
+                state=None,
+                sufficient=sufficient,
+                missing=missing,
+                conflicts=conflicts,
+                recommend_next_action=recommend,
+                summary=summary,
+                evidence_gaps=list(heuristic.evidence_gaps or refined.evidence_gaps),
+            ),
         )
 
     def _detect_conflicts(self, state: AgentState) -> list[str]:

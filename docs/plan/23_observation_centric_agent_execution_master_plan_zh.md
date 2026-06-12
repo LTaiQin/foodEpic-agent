@@ -275,6 +275,44 @@ Gap 只能来自 observation state，建议只保留以下通用类型：
 
 - [x] 已完成阶段：`7 / 9`
 - [ ] 进行中阶段：`Phase 4 / Phase 6`
+- [x] 本轮继续把 `action_intent_pending_resolution=*` 这条旧 specialized marker 的 live producer/consumer 收成 observation-side profile：
+  - 旧行为：
+    - `executor.py` 在 specialized resolution `need_more_evidence / failure`
+      后仍直接写：
+      - `action_intent_pending_resolution=resolve_action_intent_future_use`
+      - `action_intent_pending_resolution=resolve_action_intent_pairwise`
+    - `planner.py` 的
+      - `_action_intent_resolution_mode(...)`
+      - `_action_intent_pending_resolution_tool(...)`
+      - finish gate / spatial-probe gate
+      仍直接消费这类 tool-name marker
+    - `verifier.py` 的 pending evidence gap 识别也仍把它当 live unresolved marker
+  - 当前变化：
+    - 新运行态 producer 已改为写 observation-side marker：
+      - `action_intent_pending_resolution_profile=future_outcome`
+      - `action_intent_pending_resolution_profile=post_action`
+    - `planner.py` 新增：
+      - `_action_intent_pending_resolution_marker_entries(...)`
+      - `_action_intent_pending_resolution_profile(...)`
+    - `pending_resolution_tool` 现在由 observation profile + primary gap / missing gap types
+      映射回 resolution tool，
+      不再直接依赖 runtime 写回的 specialized tool name
+    - `verifier.py` 与 planner finish gate 现已同时兼容：
+      - 新 `pending_resolution_profile`
+      - 旧 `pending_resolution`
+      但新运行态不再写旧 marker
+  - 本轮迁移/新增测试：
+    - `test_planner_action_intent_pending_resolution_tool_accepts_observation_profile_marker`
+    - executor 两条相关测试现已改成断言：
+      - 写入 `pending_resolution_profile`
+      - 不再写回旧 `pending_resolution=<tool>`
+    - 一条 planner 现有测试也已改成直接使用新 `pending_resolution_profile=post_action`
+  - 本轮定向回归：
+    - `pytest -q tests/test_graph_agent.py -k 'pending_resolution_tool or future_use_resolution_need_more_evidence_records_pending_resolution or pairwise_failure_keeps_pending_resolution_without_generic_recovery or followup_state_change_only_helper_does_not_override_structured_future_outcome_close_call or verifier_action_intent_builds_future_outcome_gap_from_resolution_payload_without_close_call_source'`
+    - `8 passed, 1129 deselected`
+  - 本轮专项回归：
+    - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+    - `684 passed, 453 deselected`
 - [x] 本轮继续收掉一条 `resolution payload` 恢复链里残留的 specialized tool-name 假依赖：
   - 旧行为：
     - `planner._build_action_intent_resolution_transition_recovery_decision(...)`
@@ -3213,6 +3251,25 @@ Phase 0 审计后的最小真实缺口已经明确：
 
 ### Phase 4 当前进展
 
+- [x] 本轮继续把 pending-resolution live marker 从 specialized tool name 改成 observation profile：
+  - 旧行为：
+    - specialized resolution 的 unresolved/failure 状态
+      仍写 `pending_resolution=<future_use/pairwise>`
+    - planner / verifier runtime 继续直接消费这个 tool-name marker
+  - 当前变化：
+    - 新运行态改写为：
+      - `action_intent_pending_resolution_profile=future_outcome`
+      - `action_intent_pending_resolution_profile=post_action`
+    - planner 侧由 profile + gap schema 映射 resolution family，
+      不再直接吃 specialized tool-name marker
+    - verifier / finish gate 兼容新旧两套 marker，
+      但新运行态不再写旧 marker
+  - 本轮定向回归：
+    - `pytest -q tests/test_graph_agent.py -k 'pending_resolution_tool or future_use_resolution_need_more_evidence_records_pending_resolution or pairwise_failure_keeps_pending_resolution_without_generic_recovery or followup_state_change_only_helper_does_not_override_structured_future_outcome_close_call or verifier_action_intent_builds_future_outcome_gap_from_resolution_payload_without_close_call_source'`
+    - `8 passed, 1129 deselected`
+  - 本轮专项回归：
+    - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+    - `684 passed, 453 deselected`
 - [x] 本轮继续把一条已经 observation-side 化、但仍保留旧 specialized tool-name 形参的恢复链收干净：
   - 旧行为：
     - `resolution_transition_recovery`

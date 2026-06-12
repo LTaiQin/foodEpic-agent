@@ -563,6 +563,34 @@ class GraphAgentPlanner:
                 continue
         return float(default)
 
+    def _action_intent_pending_resolution_marker_entries(self, state: AgentState) -> list[str]:
+        prefixes = (
+            "action_intent_pending_resolution_profile=",
+            "action_intent_pending_resolution=",
+        )
+        return [
+            item
+            for item in list(getattr(state, "working_memory", [])) + list(getattr(state, "evidence_bundle", []))
+            if isinstance(item, str) and item.startswith(prefixes)
+        ]
+
+    def _action_intent_pending_resolution_profile(self, state: AgentState) -> str:
+        for item in reversed(self._action_intent_pending_resolution_marker_entries(state)):
+            profile_match = re.search(r"action_intent_pending_resolution_profile=(\w+)", item)
+            if profile_match:
+                profile = profile_match.group(1)
+                if profile in {"future_outcome", "post_action"}:
+                    return profile
+            legacy_match = re.search(r"action_intent_pending_resolution=(\w+)", item)
+            if not legacy_match:
+                continue
+            tool = legacy_match.group(1)
+            if tool == "resolve_action_intent_future_use":
+                return "future_outcome"
+            if tool == "resolve_action_intent_pairwise":
+                return "post_action"
+        return ""
+
     def _action_intent_result_support_text(self, result: dict[str, Any] | None) -> str:
         if not isinstance(result, dict):
             return ""
@@ -3211,34 +3239,30 @@ class GraphAgentPlanner:
                     for item in decision.get("missing_gap_types", [])
                     if isinstance(item, str) and str(item).strip()
                 ]
-            for item in reversed(list(getattr(state, "working_memory", []))):
-                if not isinstance(item, str):
-                    continue
-                match = re.search(r"action_intent_pending_resolution=(\w+)", item)
-                if not match:
-                    continue
-                tool = match.group(1)
-                if tool == "resolve_action_intent_future_use" and (
-                    self._action_intent_needs_future_use_evidence(state=state, result=latest_result_for_marker)
-                    or gap_type == "future_outcome"
-                    or "future_outcome" in missing_gap_types
-                ):
-                    return tool
-                if tool == "resolve_action_intent_pairwise" and (
-                    self._action_intent_pair_needs_outcome_resolution(state=state, result=latest_result_for_marker)
-                    or gap_type in {"relation_confirmation", "target_discovery"}
-                    or bool({"relation_confirmation", "target_discovery"} & set(missing_gap_types))
-                ):
-                    return tool
+            pending_profile = self._action_intent_pending_resolution_profile(state)
+            pairwise_gap_types = {
+                "immediate_outcome",
+                "state_transition_unconfirmed",
+                "workspace_change_unconfirmed",
+                "relation_confirmation",
+                "target_discovery",
+            }
+            if pending_profile == "future_outcome" and (
+                self._action_intent_needs_future_use_evidence(state=state, result=latest_result_for_marker)
+                or gap_type == "future_outcome"
+                or "future_outcome" in missing_gap_types
+            ):
+                return "resolve_action_intent_future_use"
+            if pending_profile == "post_action" and (
+                self._action_intent_pair_needs_outcome_resolution(state=state, result=latest_result_for_marker)
+                or gap_type in pairwise_gap_types
+                or bool(pairwise_gap_types & set(missing_gap_types))
+            ):
+                return "resolve_action_intent_pairwise"
         return ""
 
     def _action_intent_has_explicit_pending_resolution_marker(self, state: AgentState) -> bool:
-        for item in reversed(list(getattr(state, "working_memory", []))):
-            if not isinstance(item, str):
-                continue
-            if re.search(r"action_intent_pending_resolution=(\w+)", item):
-                return True
-        return False
+        return bool(self._action_intent_pending_resolution_marker_entries(state))
 
     def _resume_action_intent_specialized_resolution_from_followup_artifacts(
         self,
@@ -14900,6 +14924,7 @@ class GraphAgentPlanner:
             isinstance(item, str)
             and (
                 item.startswith("action_intent_pending_resolution=")
+                or item.startswith("action_intent_pending_resolution_profile=")
                 or item.startswith("action_intent_resolution_withheld_for_")
                 or item.startswith("action_intent_unresolved_rerank_withheld")
             )
@@ -14939,6 +14964,7 @@ class GraphAgentPlanner:
             isinstance(item, str)
             and (
                 item.startswith("action_intent_pending_resolution=")
+                or item.startswith("action_intent_pending_resolution_profile=")
                 or item.startswith("action_intent_resolution_withheld_for_")
                 or item.startswith("action_intent_unresolved_rerank_withheld")
             )
@@ -14973,6 +14999,7 @@ class GraphAgentPlanner:
             isinstance(item, str)
             and (
                 item.startswith("action_intent_pending_resolution=")
+                or item.startswith("action_intent_pending_resolution_profile=")
                 or item.startswith("action_intent_resolution_withheld_for_")
                 or item.startswith("action_intent_unresolved_rerank_withheld")
             )

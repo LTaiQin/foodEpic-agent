@@ -355,18 +355,10 @@ class GraphAgentExecutor:
         if decision.tool in {"resolve_action_intent_pairwise", "resolve_action_intent_future_use"}:
             state.prune_open_question("need_alternative_evidence_path")
             state.add_open_question("need_disambiguating_evidence")
-            state.working_memory = [
-                item
-                for item in state.working_memory
-                if not (
-                    isinstance(item, str)
-                    and (
-                        item.startswith("action_intent_need_future_evidence=")
-                        or item.startswith("action_intent_second_best_index=")
-                    )
-                )
-            ]
-            state.add_memory(f"action_intent_pending_resolution={decision.tool}")
+            self._clear_action_intent_resolution_memory(state)
+            pending_profile = self._action_intent_pending_resolution_profile_for_tool(decision.tool)
+            if pending_profile:
+                state.add_memory(f"action_intent_pending_resolution_profile={pending_profile}")
             candidate_indices = decision.args.get("candidate_indices") if isinstance(decision.args, dict) else None
             if candidate_indices:
                 state.add_memory(f"action_intent_pending_candidates={candidate_indices}")
@@ -487,6 +479,13 @@ class GraphAgentExecutor:
         for item in self._structured_answer_prune_targets(state, tool_name):
             state.prune_open_question(item)
 
+    def _action_intent_pending_resolution_profile_for_tool(self, tool_name: str) -> str:
+        if tool_name == "resolve_action_intent_future_use":
+            return "future_outcome"
+        if tool_name == "resolve_action_intent_pairwise":
+            return "post_action"
+        return ""
+
     def _clear_action_intent_resolution_memory(self, state: AgentState) -> None:
         state.working_memory = [
             item
@@ -497,6 +496,7 @@ class GraphAgentExecutor:
                     item.startswith("action_intent_need_future_evidence=")
                     or item.startswith("action_intent_second_best_index=")
                     or item.startswith("action_intent_pending_resolution=")
+                    or item.startswith("action_intent_pending_resolution_profile=")
                     or item.startswith("action_intent_pending_candidates=")
                     or item.startswith("action_intent_needed_observation=")
                 )
@@ -512,7 +512,9 @@ class GraphAgentExecutor:
     ) -> None:
         self._clear_action_intent_resolution_memory(state)
         if result.get("need_more_evidence"):
-            state.add_memory(f"action_intent_pending_resolution={tool_name}")
+            pending_profile = self._action_intent_pending_resolution_profile_for_tool(tool_name)
+            if pending_profile:
+                state.add_memory(f"action_intent_pending_resolution_profile={pending_profile}")
             if result.get("candidate_indices"):
                 state.add_memory(f"action_intent_pending_candidates={result.get('candidate_indices')}")
             if result.get("needed_observation"):
