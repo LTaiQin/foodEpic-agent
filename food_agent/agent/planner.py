@@ -831,6 +831,34 @@ class GraphAgentPlanner:
             return True
         return self._action_intent_result_points_to_later_outcome_uncertainty(payload)
 
+    def _action_intent_observation_close_call_profile(
+        self,
+        *,
+        state: AgentState,
+        blocker_hint: str,
+        primary_gap: dict[str, Any] | None,
+        payload: dict[str, Any] | None,
+    ) -> str:
+        gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
+        if gap_type in {"immediate_outcome", "state_transition_unconfirmed", "workspace_change_unconfirmed"}:
+            return "post_action"
+        if gap_type in {"future_outcome", "relation_confirmation", "target_discovery"}:
+            return "future_outcome"
+        if self._action_intent_blocker_is_post_action_family(state=state, blocker_hint=blocker_hint):
+            return "post_action"
+        if self._action_intent_recovery_prefers_future_profile(
+            state=state,
+            blocker_hint=blocker_hint,
+            primary_gap=primary_gap,
+            payload=payload,
+        ):
+            return "future_outcome"
+        if self._action_intent_result_has_immediate_post_action_uncertainty(payload):
+            return "post_action"
+        if self._action_intent_result_points_to_later_outcome_uncertainty(payload):
+            return "future_outcome"
+        return "post_action"
+
     def _action_intent_best_choice_is_broad_relative_to_competitors(
         self,
         *,
@@ -15188,6 +15216,12 @@ class GraphAgentPlanner:
             primary_gap=primary_gap,
             payload=payload,
         )
+        observation_close_call_profile = self._action_intent_observation_close_call_profile(
+            state=state,
+            blocker_hint=blocker_hint,
+            primary_gap=primary_gap,
+            payload=payload,
+        )
         late_taken_outcome_support = self._action_intent_payload_supports_late_taken_outcome(payload)
         if (
             prefers_future_profile
@@ -15489,14 +15523,14 @@ class GraphAgentPlanner:
                 finalize_long_horizon_revisit = self._build_action_intent_finalize_withheld_long_horizon_revisit_decision(
                     state=state,
                     hints=hints,
-                    thought="why 题被 verifier/finalizer 拦下，因为后续用途或最终位置仍未排他；直接沿缓存的更晚目标节点向后追，而不是继续停留在近窗半成品证据上。",
+                    thought="why 题被 verifier/finalizer 拦下，当前证据仍没把后续结果真正压实；如果已存在更晚目标节点，就直接沿缓存的更晚节点向后追。",
                 )
                 if finalize_long_horizon_revisit is not None:
                     return finalize_long_horizon_revisit
                 targeted_transition_recovery = self._build_action_intent_resolution_transition_recovery_decision(
                     state=state,
                     hints=hints,
-                    tool_name="resolve_action_intent_future_use",
+                    tool_name=tool_name,
                     result=payload,
                 )
                 if targeted_transition_recovery is not None:
@@ -15505,7 +15539,7 @@ class GraphAgentPlanner:
                     state=state,
                     hints=hints,
                     result=payload,
-                    thought="why 题被 verifier 判为缺少动作后决定性证据，且当前歧义属于近窗结果型；先直接围绕动作尾部补更密的关键帧，再决定是否扩 followup。",
+                    thought="why 题被 verifier 判为当前近窗结果仍缺决定性观测；先直接围绕动作尾部补更密的关键帧，再决定是否继续扩窗。",
                 )
                 if initial_transition_probe is not None and self._action_intent_followup_attempt_count(state) < 1:
                     return initial_transition_probe
@@ -15517,7 +15551,7 @@ class GraphAgentPlanner:
                     state=state,
                     hints=hints,
                     result=payload,
-                    thought="why 题被 verifier 判为缺少动作后决定性证据；先围绕动作尾部后的短窗口主动补关键帧，确认是否真的出现称重、倒空、检查、放回或具体下游使用。",
+                    thought="why 题被 verifier 判为当前近窗结果仍缺决定性观测；先围绕动作尾部后的短窗口主动补关键帧，确认是否真的出现明确的直接结果或状态变化。",
                 )
                 if transition_probe is not None:
                     return transition_probe
@@ -15531,15 +15565,12 @@ class GraphAgentPlanner:
                     return extra_followup
             if (
                 not has_structured_gap
-                and self._action_intent_blocker_is_future_gap_family(
-                    state=state,
-                    blocker_hint=blocker_hint,
-                )
+                and prefers_future_profile
             ):
                 finalize_long_horizon_revisit = self._build_action_intent_finalize_withheld_long_horizon_revisit_decision(
                     state=state,
                     hints=hints,
-                    thought="why 题被 verifier/finalizer 拦下，因为 pairwise 竞争在更晚用途/最终位置上仍未排他；直接追更晚目标节点，而不是只在当前局部结果附近反复补帧。",
+                    thought="why 题被 verifier/finalizer 拦下，因为当前更晚结果或最终落点仍未排他；直接追更晚目标节点，而不是只在当前局部结果附近反复补帧。",
                 )
                 if finalize_long_horizon_revisit is not None:
                     return finalize_long_horizon_revisit
@@ -15547,7 +15578,7 @@ class GraphAgentPlanner:
                     state=state,
                     hints=hints,
                     result=payload,
-                    thought="why 题被 verifier 判为 top-2 close call，且分歧集中在动作后立刻结果；先直接补尾部密采样关键帧，再决定是否做泛化 followup。",
+                    thought="why 题被 verifier 判为当前更晚结果仍缺决定性观测；先直接补尾部密采样关键帧，再决定是否继续扩窗。",
                 )
                 if initial_transition_probe is not None and self._action_intent_followup_attempt_count(state) < 1:
                     return initial_transition_probe
@@ -15559,7 +15590,7 @@ class GraphAgentPlanner:
                     state=state,
                     hints=hints,
                     result=payload,
-                    thought="why 题被 verifier 判为 top-2 后果型 close call；先主动补更近的结果帧，再回到二选一裁决。",
+                    thought="why 题被 verifier 判为当前更晚结果仍未排他；先主动补更近的结果帧，再决定是否继续做更晚目标追证。",
                 )
                 if transition_probe is not None:
                     return transition_probe
@@ -15567,7 +15598,7 @@ class GraphAgentPlanner:
                 state=state,
                 hints=hints,
                 result=payload,
-                thought="why 题被 verifier 拦下，因为当前 top 候选仍没把竞争解释真正压下去；先按当前冲突类型主动重采样决定性关键帧。",
+                thought="why 题被 verifier 拦下，因为当前 observation gap 仍未闭合；先按当前缺口主动重采样决定性关键帧。",
             )
             if transition_probe is not None:
                 return transition_probe
@@ -15577,18 +15608,7 @@ class GraphAgentPlanner:
                 focus="verifier_blocked_close_call_recovery",
                 window_s=self._action_intent_close_call_followup_window(
                     state,
-                    profile=(
-                        "future_use"
-                        if (
-                            self._action_intent_needs_future_use_evidence(state=state, result=payload)
-                            or self._action_intent_blocker_is_future_gap_family(
-                                state=state,
-                                blocker_hint=blocker_hint,
-                            )
-                            or self._action_intent_result_points_to_later_outcome_uncertainty(payload)
-                        )
-                        else "pairwise"
-                    ),
+                    profile=observation_close_call_profile,
                 ),
             )
             if extra_followup is not None:
@@ -15632,17 +15652,7 @@ class GraphAgentPlanner:
             focus="verifier_blocked_close_call_recovery",
             window_s=self._action_intent_close_call_followup_window(
                 state,
-                profile=(
-                    "future_use"
-                    if (
-                        self._action_intent_blocker_is_future_gap_family(
-                            state=state,
-                            blocker_hint=blocker_hint,
-                        )
-                        or self._action_intent_result_points_to_later_outcome_uncertainty(payload)
-                    )
-                    else "pairwise"
-                ),
+                profile=observation_close_call_profile,
             ),
         )
         if extra_followup is not None:

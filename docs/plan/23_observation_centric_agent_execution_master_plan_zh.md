@@ -3151,6 +3151,35 @@ Phase 0 审计后的最小真实缺口已经明确：
 
 ### Phase 4 当前进展
 
+- [x] 本轮继续收缩 `planner._recover_action_intent_after_verifier_blocked_finish(...)` 中 `infer_action_intent` 恢复尾部残留的 specialized profile 注入：
+  - 旧行为：
+    - `infer_action_intent` 被 verifier 拦下后，
+      仍会在恢复尾部继续注入旧 specialized 语义：
+      - `tool_name="resolve_action_intent_future_use"` 传给 transition recovery
+      - `future_use / pairwise` 两种旧 profile 决定 extra followup window
+      - thought 文案仍直接按“后果型 close call / top-2 / future use”分叉
+  - 当前变化：
+    - 新增 observation-side helper：
+      - `planner._action_intent_observation_close_call_profile(...)`
+    - close-call / extra-followup profile 现在只由以下 observation-side 状态决定：
+      - `primary_gap`
+      - `blocker_hint`
+      - `later outcome uncertainty`
+      - `immediate post-action uncertainty`
+    - `infer_action_intent` 路径下的 transition recovery
+      不再注入 `resolve_action_intent_future_use` 作为伪 specialized tool name，
+      而是保留真实来源 `infer_action_intent`
+    - 相关 thought 也已改成统一 observation-gap 表述，
+      不再把恢复逻辑写成 `top-2 close call / pairwise / future_use` 的专项叙事
+  - 本轮新增负约束测试：
+    - `test_planner_action_intent_verifier_blocked_infer_transition_recovery_does_not_inject_future_use_tool_name`
+    - `test_planner_action_intent_verifier_blocked_infer_extra_followup_profile_prefers_primary_gap_over_future_flag`
+  - 本轮定向回归：
+    - `pytest -q tests/test_graph_agent.py -k 'verifier_blocked_infer_action_intent_prefers_observation_first_transition_recovery_over_specialized_resume or verifier_blocked_infer_transition_recovery_does_not_inject_future_use_tool_name or verifier_blocked_infer_extra_followup_profile_prefers_primary_gap_over_future_flag or verifier_blocked_immediate_gap_prefers_transition_probe or verifier_blocked_future_gap_prefers_later_outcome_recovery'`
+    - `5 passed, 1127 deselected`
+  - 本轮专项回归：
+    - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+    - `676 passed, 456 deselected`
 - [x] 本轮继续切掉 `planner._build_action_intent_resolution_transition_recovery_decision(...)` 里最后一组活跃的 specialized tool 身份分支：
   - 旧行为：
     - 仍会根据
@@ -3572,6 +3601,16 @@ Phase 0 审计后的最小真实缺口已经明确：
 
 ### Phase 6 当前进展
 
+- [x] 本轮又迁移了 2 条仍在保护旧 profile 注入的测试契约：
+  - `verifier_blocked_infer_transition_recovery_does_not_inject_future_use_tool_name`
+  - `verifier_blocked_infer_extra_followup_profile_prefers_primary_gap_over_future_flag`
+- [x] 新契约：
+  - 不再允许：
+    - `infer_action_intent` 在 verifier-blocked 恢复里伪装成 `future_use`
+    - `need_future_evidence` 这种旧 payload 标志单独决定 extra followup window
+  - 只允许：
+    - transition recovery 保留真实来源工具
+    - extra followup window 由 `primary_gap + blocker_hint + observation uncertainty` 决定
 - [x] 本轮又迁移了 2 条仍在保护“固定恢复动作”的旧测试契约：
   - `needed_observation_revealed_slot_prefers_downstream_object_over_slot_fixture`
   - `needed_observation_sink_slot_prefers_downstream_object_over_fixture`
