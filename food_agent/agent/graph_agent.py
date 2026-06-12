@@ -8952,6 +8952,8 @@ class GraphAgent:
         answer_text: str,
         prediction: int | None,
     ) -> tuple[str, int | None]:
+        if str(getattr(state, "task_family", "") or "").strip().lower() == "fine_grained_why_recognition":
+            return answer_text, prediction
         if prediction is None or not (0 <= prediction < len(state.choices)):
             fallback = self._latest_candidate_answer_index(state)
             if fallback is None:

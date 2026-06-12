@@ -1750,14 +1750,15 @@ class GraphAgentVerifier:
         )
 
     def _detect_conflicts(self, state: AgentState) -> list[str]:
-        candidate_indices = {
-            item.split("=", 1)[1]
-            for item in state.hypotheses
-            if isinstance(item, str) and item.startswith("candidate_answer_index=")
-        }
         conflicts: list[str] = []
-        if len(candidate_indices) > 1:
-            conflicts.append("multiple_candidate_answers")
+        if not self._is_action_intent_task(state):
+            candidate_indices = {
+                item.split("=", 1)[1]
+                for item in state.hypotheses
+                if isinstance(item, str) and item.startswith("candidate_answer_index=")
+            }
+            if len(candidate_indices) > 1:
+                conflicts.append("multiple_candidate_answers")
         ocr_readings = self._extract_prefixed_values(state, prefixes=("ocr_reading=",), separators=(";", "|"))
         if len(ocr_readings) > 1:
             conflicts.append("conflicting_ocr_readings")

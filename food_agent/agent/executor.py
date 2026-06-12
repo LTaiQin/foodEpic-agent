@@ -394,7 +394,11 @@ class GraphAgentExecutor:
                 state.prune_open_question("need_alternative_evidence_path")
                 state.prune_open_question("need_time_localization")
                 state.add_hypothesis("stationary_evidence_collected")
-        if tool_name == "rank_choices_from_state" and result.get("best_index") is not None:
+        if (
+            tool_name == "rank_choices_from_state"
+            and result.get("best_index") is not None
+            and not self._is_action_intent_task(state)
+        ):
             state.add_hypothesis(f"candidate_answer_index={result.get('best_index')}")
         if self._is_weight_task(state) and self._has_stable_weight_answer_evidence(state):
             state.prune_open_question("need_alternative_evidence_path")

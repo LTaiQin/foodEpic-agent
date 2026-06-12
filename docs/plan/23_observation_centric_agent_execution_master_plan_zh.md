@@ -275,6 +275,39 @@ Gap 只能来自 observation state，建议只保留以下通用类型：
 
 - [x] 已完成阶段：`7 / 9`
 - [ ] 进行中阶段：`Phase 4 / Phase 6`
+- [x] 本轮继续切掉 why runtime 中一条真实存在的 `rank_choices_from_state -> candidate_answer_index -> conflict/finalizer` 残链：
+  - 旧行为：
+    - `executor.py`
+      - `rank_choices_from_state` 在 why 任务上仍会把
+        `candidate_answer_index=*`
+        写入 `state.hypotheses`
+    - `verifier.py`
+      - `_detect_conflicts(...)`
+        仍会把这类候选残影直接折叠成
+        `multiple_candidate_answers`
+    - `graph_agent.py`
+      - `_guard_residual_mcq_answer(...)`
+        仍可能在 why finalizer 尾部用
+        `candidate_answer_index=*`
+        覆盖当前模型输出
+  - 当前变化：
+    - why / `fine_grained_why_recognition`
+      不再写入新的 `candidate_answer_index=*`
+    - why verifier 不再把这类残影当成 live conflict 来源
+    - why finalizer 不再允许 `candidate_answer_index=*`
+      作为 residual MCQ guard 的 fallback / override
+  - 这意味着：
+    - why 的 runtime 搜证与最终收口
+      又少了一条
+      `textual rank residue -> conflict/final answer`
+      的回流链
+    - 非 why 任务的现有 candidate guard 仍保持原状
+  - 本轮定向回归：
+    - `pytest -q tests/test_graph_agent.py -k 'verifier_detects_conflicting_candidate_answers or verifier_action_intent_ignores_candidate_answer_residue_conflict or graph_agent_action_intent_finalizer_does_not_use_candidate_answer_residue_guard or executor_rank_choices_from_state_does_not_write_candidate_answer_index_for_action_intent or finalize_action_intent_does_not_use_legacy_best_index_state_for_finalize or finalize_action_intent_does_not_reenable_legacy_best_index_finalize'`
+    - 结果：`6 passed, 1138 deselected`
+  - 本轮专项回归：
+    - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+    - 结果：`691 passed, 453 deselected`
 - [x] 本轮继续把 `state/executor` 里的 observation-centric runtime scaffolding 收口为可验证状态：
   - 当前变化：
     - `state.py`
