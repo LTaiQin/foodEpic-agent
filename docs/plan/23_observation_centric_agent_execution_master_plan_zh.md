@@ -4748,6 +4748,71 @@ Phase 0 审计后的最小真实缺口已经明确：
 - [x] 对应本轮合并回归：
   - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
   - 结果：`710 passed, 453 deselected`
+- [x] 本轮继续切掉 `graph_agent._action_intent_unresolved_semantic_gaps(...)` 里一条 still answer-conditioned 的 `best choice family -> mixed-horizon unresolved gap` 旧链：
+  - 旧行为：
+    - 先用 `selected_choice_categories(...)`
+      把 `best choice` 判成：
+      - immediate micro outcome
+      - 或 later outcome
+    - 再分别写入：
+      - `missing_immediate_micro_outcome_evidence`
+      - `missing_later_outcome_evidence`
+  - 问题：
+    - gap 的来源不是 observation state，
+      而是候选答案家族
+    - 这会让同一段 observation text
+      只因为 choice 文本不同，
+      就进入不同 unresolved gap
+- [x] 新行为：
+  - `mixed_horizon` unresolved gap 不再区分
+    - immediate gap
+    - later gap
+  - 改成统一 observation-side gap：
+    - `mixed_horizon_outcome_unresolved`
+  - 触发条件只允许来自：
+    - 当前 candidate observation text 的 uncertainty
+    - 当前 candidate set 是否同时存在
+      - local anchor
+      - followup horizon reference
+    - 当前 observation text 是否尚未闭合 exact observed outcome
+- [x] 本轮新增 observation-side helper：
+  - `local continuation anchor`
+    - 例如：
+      - `held in hand`
+      - `stays in hand`
+      - `remains held`
+  - `followup horizon reference`
+    - 例如：
+      - `later`
+      - `shortly after`
+      - `final location`
+      - `used on the scale`
+      - `tipped toward`
+  - 并补齐 uncertainty 覆盖：
+    - `could still be`
+    - `may still be`
+    - `might still be`
+- [x] 本轮同步迁移的旧测试契约：
+  - 不再保护：
+    - `missing_immediate_micro_outcome_evidence`
+    - `missing_later_outcome_evidence`
+      这类按 answer family 拆开的 gap 名
+  - 改为保护：
+    - `mixed_horizon_outcome_unresolved`
+      必须只由 observation-side mixed horizon residue 触发
+    - 换掉 choice 文本后，
+      同一 observation text 不得改变 mixed-horizon gap 判定
+    - 一旦 observation text 已明确闭合 immediate outcome，
+      generic mixed-horizon gap 必须退出
+- [x] 本轮新增负约束测试：
+  - `test_graph_agent_action_intent_unresolved_semantic_gap_mixed_horizon_ignores_choice_categories`
+  - `test_graph_agent_action_intent_unresolved_semantic_gap_mixed_horizon_clears_after_explicit_observed_outcome`
+- [x] 本轮定向回归：
+  - `pytest -q tests/test_graph_agent.py -k 'weak_check_label_vs_put_back_close_call or keeps_generic_make_space_when_hidden_target_remains_speculative or unresolved_semantic_gap_mixed_horizon or unresolved_rerank_withholds_open_bottle_claim_without_visible_opening_outcome or unresolved_rerank_keeps_open_bottle_when_opening_is_visible'`
+  - 结果：`6 passed, 1159 deselected`
+- [x] 本轮合并回归：
+  - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+  - 结果：`712 passed, 453 deselected`
 
 ---
 

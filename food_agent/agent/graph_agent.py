@@ -1634,6 +1634,12 @@ class GraphAgent:
                 "not shown",
                 "cannot tell",
                 "can't tell",
+                "could still be",
+                "may still be",
+                "might still be",
+                "could still go",
+                "may still go",
+                "might still go",
                 "not yet visible whether",
                 "it is not yet visible whether",
                 "later destination is still unresolved",
@@ -1713,6 +1719,64 @@ class GraphAgent:
                 "顺手放在旁边",
                 "放到一边",
                 "附近",
+            )
+        )
+
+    def _action_intent_support_has_local_continuation_anchor(self, text: str) -> bool:
+        text_lc = str(text or "").lower()
+        return any(
+            term in text_lc
+            for term in (
+                "held in hand",
+                "stays in hand",
+                "remains in hand",
+                "still in hand",
+                "remains held",
+                "still held",
+                "continues to be held",
+                "held near",
+                "held up",
+                "拿在手里",
+                "仍拿在手里",
+                "还拿着",
+                "继续拿着",
+            )
+        )
+
+    def _action_intent_support_has_followup_horizon_reference(self, text: str) -> bool:
+        text_lc = str(text or "").lower()
+        return any(
+            term in text_lc
+            for term in (
+                "later",
+                "shortly after",
+                "afterward",
+                "afterwards",
+                "next",
+                "final location",
+                "destination",
+                "goes back",
+                "put back",
+                "returned",
+                "used shortly after",
+                "used on the scale",
+                "placed on the scale",
+                "tipped toward",
+                "toward the sink",
+                "served",
+                "poured",
+                "emptied",
+                "之后",
+                "稍后",
+                "接下来",
+                "最终位置",
+                "目的地",
+                "放回",
+                "回到",
+                "用于称量",
+                "朝水槽",
+                "倒出",
+                "端上",
             )
         )
 
@@ -2718,13 +2782,14 @@ class GraphAgent:
             if not self._action_intent_support_has_exact_measurement_role_evidence(context_lc):
                 gaps.append("missing_exact_measurement_role_evidence")
         if self._action_intent_unresolved_candidate_spans_mixed_horizon(state=state, candidate_rows=candidate_rows, best_index=best_index):
-            categories = selected_choice_categories([str(choice) for choice in getattr(state, "choices", [])], [best_index])
-            best_categories = set(categories.get(best_index) or set())
-            if self._action_intent_choice_is_immediate_micro_outcome_candidate(choice_lc, best_categories):
-                if not self._action_intent_choice_has_explicit_immediate_micro_outcome_evidence(choice_lc, support_lc):
-                    gaps.append("missing_immediate_micro_outcome_evidence")
-            elif not self._action_intent_choice_has_explicit_later_outcome_evidence(choice_lc, best_categories, support_lc):
-                gaps.append("missing_later_outcome_evidence")
+            has_exact_observed_outcome = (
+                self._action_intent_support_has_exclusive_immediate_micro_outcome_evidence(context_lc)
+                or self._action_intent_support_has_explicit_final_location_evidence(context_lc)
+                or self._action_intent_support_has_explicit_followup_outcome_evidence(context_lc)
+                or self._action_intent_support_has_exact_downstream_chain(context_lc)
+            )
+            if self._action_intent_support_has_mixed_horizon_uncertainty(context_lc) and not has_exact_observed_outcome:
+                gaps.append("mixed_horizon_outcome_unresolved")
         if any(term in choice_lc for term in ("access", "behind", "reveal", "expose", "拿到后面", "看到后面", "露出", "取到后面")):
             if any(term in support_lc for term in ("reveals the hidden area", "revealed", "hidden area behind", "shows what is behind", "露出后方", "看到后方")):
                 gaps.append("generic_access_direct_effect")
@@ -2831,7 +2896,7 @@ class GraphAgent:
                 "timeline_review_revealed_target_gap",
                 "exact_workspace_without_exact_use",
                 "generic_make_space_hidden_target_still_speculative",
-                "missing_immediate_micro_outcome_evidence",
+                "mixed_horizon_outcome_unresolved",
             )
         ):
             return True
@@ -2876,8 +2941,7 @@ class GraphAgent:
                         "missing_exact_measurement_role_evidence",
                         "missing_dry_hands_evidence",
                         "missing_simple_relocation_evidence",
-                        "missing_immediate_micro_outcome_evidence",
-                        "missing_later_outcome_evidence",
+                        "mixed_horizon_outcome_unresolved",
                     }
                 )
             if weak_gap_count >= 2:
@@ -2902,7 +2966,7 @@ class GraphAgent:
                     )
                     or "missing_measurement_meta_evidence" in gaps
                     or "missing_exact_measurement_role_evidence" in gaps
-                    or "missing_immediate_micro_outcome_evidence" in gaps
+                    or "mixed_horizon_outcome_unresolved" in gaps
                 )
                 for gaps in top_gap_sets
             ):
@@ -2917,39 +2981,28 @@ class GraphAgent:
         candidate_rows: list[dict[str, Any]],
         best_index: int,
     ) -> bool:
-        choices = [str(choice) for choice in getattr(state, "choices", [])]
-        candidate_indices = [
-            int(row.get("index", -1))
-            for row in candidate_rows
-            if isinstance(row, dict) and self._coerce_choice_index(row.get("index"), state.choices) is not None
-        ]
-        categories_by_index = selected_choice_categories(choices, candidate_indices)
-        best_categories = set(categories_by_index.get(best_index) or set())
-        best_choice = choices[best_index].lower() if 0 <= best_index < len(choices) else ""
-        best_is_immediate = self._action_intent_choice_is_immediate_micro_outcome_candidate(best_choice, best_categories)
-        later_outcome_categories = {
-            "final_place_return",
-            "measure_weigh",
-            "transfer_contents",
-            "serve_consume",
-            "clean_dry",
-            "food_prep",
-            "discard",
-        }
+        has_local_anchor = False
+        has_followup_horizon = False
         for row in candidate_rows:
             if not isinstance(row, dict):
                 continue
-            index = self._coerce_choice_index(row.get("index"), state.choices)
-            if index is None or index == best_index:
+            text = f"{str(row.get('support') or '').lower()} {str(row.get('contradiction') or '').lower()}".strip()
+            if not text:
                 continue
-            categories = set(categories_by_index.get(index) or set())
-            choice_lc = choices[index].lower()
-            competitor_is_immediate = self._action_intent_choice_is_immediate_micro_outcome_candidate(choice_lc, categories)
-            if (best_is_immediate and categories & later_outcome_categories) or (
-                competitor_is_immediate and best_categories & later_outcome_categories
+            if (
+                self._action_intent_support_has_nonexclusive_label_anchor(text)
+                or self._action_intent_support_has_nonexclusive_nearby_anchor(text)
+                or self._action_intent_support_has_local_continuation_anchor(text)
             ):
-                return True
-        return False
+                has_local_anchor = True
+            if (
+                self._action_intent_support_has_followup_horizon_reference(text)
+                or self._action_intent_support_has_explicit_final_location_evidence(text)
+                or self._action_intent_support_has_explicit_followup_outcome_evidence(text)
+                or self._action_intent_support_has_exact_downstream_chain(text)
+            ):
+                has_followup_horizon = True
+        return has_local_anchor and has_followup_horizon
 
     def _action_intent_choice_is_immediate_micro_outcome_candidate(
         self,
