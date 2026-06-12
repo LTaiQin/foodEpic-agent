@@ -359,9 +359,6 @@ class GraphAgentExecutor:
             pending_profile = self._action_intent_pending_resolution_profile_for_tool(decision.tool)
             if pending_profile:
                 state.add_memory(f"action_intent_pending_resolution_profile={pending_profile}")
-            candidate_indices = decision.args.get("candidate_indices") if isinstance(decision.args, dict) else None
-            if candidate_indices:
-                state.add_memory(f"action_intent_pending_candidates={candidate_indices}")
             state.add_memory("action_intent_resolution_failed_retry_pending=1")
 
     def _record_ineffective_tool_if_needed(
@@ -498,6 +495,7 @@ class GraphAgentExecutor:
                     or item.startswith("action_intent_pending_resolution=")
                     or item.startswith("action_intent_pending_resolution_profile=")
                     or item.startswith("action_intent_pending_candidates=")
+                    or item.startswith("action_intent_future_use_candidates=")
                     or item.startswith("action_intent_needed_observation=")
                 )
             )
@@ -515,10 +513,6 @@ class GraphAgentExecutor:
             pending_profile = self._action_intent_pending_resolution_profile_for_tool(tool_name)
             if pending_profile:
                 state.add_memory(f"action_intent_pending_resolution_profile={pending_profile}")
-            if result.get("candidate_indices"):
-                state.add_memory(f"action_intent_pending_candidates={result.get('candidate_indices')}")
-            if result.get("needed_observation"):
-                state.add_memory(f"action_intent_needed_observation={result.get('needed_observation')}")
             state.add_open_question("need_disambiguating_evidence")
         else:
             state.prune_open_question("need_disambiguating_evidence")
@@ -888,8 +882,6 @@ class GraphAgentExecutor:
                 state.add_evidence(f"action_intent_pairwise_reason={result.get('reason')}")
         if tool_name == "resolve_action_intent_future_use":
             self._record_action_intent_resolution_state(state, tool_name=tool_name, result=result)
-            if result.get("candidate_indices"):
-                state.add_memory(f"action_intent_future_use_candidates={result.get('candidate_indices')}")
             if result.get("decisive_observation"):
                 state.add_evidence(f"action_intent_future_use_observation={result.get('decisive_observation')}")
             if result.get("reason"):

@@ -275,6 +275,31 @@ Gap 只能来自 observation state，建议只保留以下通用类型：
 
 - [x] 已完成阶段：`7 / 9`
 - [ ] 进行中阶段：`Phase 4 / Phase 6`
+- [x] 本轮继续切掉 `executor` 里一组 still runtime-active 的 candidate marker producer：
+  - 旧行为：
+    - `executor.py` 在以下路径仍会把答案候选残影写回 `working_memory`
+      - specialized resolution `need_more_evidence`
+      - specialized resolution tool failure
+      - `resolve_action_intent_future_use` result merge
+    - 对应 marker 包括：
+      - `action_intent_pending_candidates=[...]`
+      - `action_intent_future_use_candidates=[...]`
+  - 当前变化：
+    - `executor.py` 已不再写回上述两类 candidate marker
+    - `_clear_action_intent_resolution_memory(...)` 现也会顺带清掉旧的
+      `action_intent_future_use_candidates=[...]`
+    - 这意味着：
+      - specialized resolution 的继续搜证不再依赖候选答案 marker 挂在运行态 memory
+  - 本轮迁移测试：
+    - executor 两条相关测试现改为断言：
+      - 只保留 `pending_resolution_profile`
+      - 不再写回 `pending_candidates / future_use_candidates`
+  - 本轮定向回归：
+    - `pytest -q tests/test_graph_agent.py -k 'future_use_resolution_need_more_evidence_records_pending_resolution or pairwise_failure_keeps_pending_resolution_without_generic_recovery'`
+    - `2 passed, 1135 deselected`
+  - 本轮专项回归：
+    - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+    - `684 passed, 453 deselected`
 - [x] 本轮继续把 `action_intent_pending_resolution=*` 这条旧 specialized marker 的 live producer/consumer 收成 observation-side profile：
   - 旧行为：
     - `executor.py` 在 specialized resolution `need_more_evidence / failure`
@@ -946,8 +971,10 @@ Gap 只能来自 observation state，建议只保留以下通用类型：
       也不再基于 question/choice 语义重建 pair
     - 当前 fallback pairwise 直接回到全候选集合
   - 影响：
-    - executor 目前仍可能为了 trace/debug 写回 `action_intent_pending_candidates=[...]`
-    - 但 planner 已经不再把这些答案产物当作 why 搜索主路径输入
+    - executor 现已不再写回：
+      - `action_intent_pending_candidates=[...]`
+      - `action_intent_future_use_candidates=[...]`
+    - 当前 planner/runtime 已不再把这些答案产物当作 why 搜索主路径输入
   - 同步迁移旧测试契约：
     - `fallback_action_intent_pairwise_candidates_no_longer_bootstrap_from_structured_hypotheses_without_legacy_pending_candidates`
     - 以及 pending-candidate 相关定向约束
