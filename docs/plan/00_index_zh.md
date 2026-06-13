@@ -1,4 +1,4 @@
-# foodEpic-agent 多文档实施计划索引
+# foodEpic-agent 当前有效文档索引
 
 ## 项目目标
 
@@ -19,7 +19,7 @@
 - 检测漏加、重复加、顺序异常、步骤耗时异常。
 - 为烹饪教学、饮食健康管理、家庭厨房复盘和辅助记忆提供基础系统。
 
-## 文档结构
+## 当前主文档
 
 - [01_project_scope_zh.md](01_project_scope_zh.md)：项目边界、研究价值、应用价值和不做什么。
 - [02_data_layer_plan_zh.md](02_data_layer_plan_zh.md)：HD-EPIC 数据读取、manifest、格式检查、事件索引。
@@ -29,10 +29,18 @@
 - [06_implementation_phases_zh.md](06_implementation_phases_zh.md)：逐阶段代码实现计划、模块、脚本和完成标准。
 - [07_repo_ops_and_commit_zh.md](07_repo_ops_and_commit_zh.md)：GitHub 绑定、SSH、自动验证提交、数据不入库规范。
 - [08_risks_and_decisions_zh.md](08_risks_and_decisions_zh.md)：风险、决策记录、暂缓方向和后续扩展路线。
+- [09_scoring_and_comparison_criteria_zh.md](09_scoring_and_comparison_criteria_zh.md)：评分标准、对比口径和优势判定方式。
 - [10_graph_tool_agent_execution_plan_zh.md](10_graph_tool_agent_execution_plan_zh.md)：工具驱动、图谱记忆、原始视频可回查的真实 agent 实施主线。
 - [11_tool_driven_graph_agent_architecture_zh.md](11_tool_driven_graph_agent_architecture_zh.md)：图谱只做外部记忆层、原始视频始终可回查、LLM 通过工具自主检索证据的主架构约束。
 - [12_autonomous_tool_graph_agent_plan_zh.md](12_autonomous_tool_graph_agent_plan_zh.md)：把当前系统推进成“模型只拿问题和工具，不拿整理证据”的自主检索型 agent 的详细实施文档。
 - [13_complete_agent_target_spec_zh.md](13_complete_agent_target_spec_zh.md)：完整 agent 的最终目标规范，覆盖系统形态、所有功能模块、状态字段、恢复策略、验证标准和完成定义。
+- [23_observation_centric_agent_execution_master_plan_zh.md](23_observation_centric_agent_execution_master_plan_zh.md)：当前唯一主执行清单，目标是把系统重构成 observation-centric、去答案条件化的真实 agent。
+- [24_observation_centric_agent_handoff_zh.md](24_observation_centric_agent_handoff_zh.md)：给后续接手模型使用的总览交接文档，说明真实架构、完成度、剩余工作和科研规范。
+
+## 历史审计文档
+
+- [16_logic_reasoning_goal_checklist_zh.md](16_logic_reasoning_goal_checklist_zh.md)：早期 why 专项推进记录，仅保留作历史审计，不再作为主执行清单。
+- [17_half_day_action_intent_residual_checklist_zh.md](17_half_day_action_intent_residual_checklist_zh.md)：why/action_intent 半天残差压实记录，仅保留作历史审计，不再作为主执行清单。
 
 ## 当前本地状态
 
@@ -42,6 +50,12 @@
 - 标注根目录：`/22liushoulong/agent/hd-epic/annotations/hd-epic-annotations-main`
 - 本地数据体积：约 `571G`
 - 重要约束：`data/`、`annotations/`、`.secrets/`、`outputs/` 不进入 git。
+
+## 当前执行原则
+
+- 当前主线只沿 `23` 号文档推进。
+- 后续实现先保证科研规范和证据严谨性，再考虑指标。
+- 不再保留会误导后续模型的旧 checklist、旧 goal prompt 和重复规划文档。
 
 ## 实施顺序
 

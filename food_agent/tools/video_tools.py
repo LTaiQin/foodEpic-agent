@@ -96,6 +96,43 @@ class VideoToolbox:
             )
         return paths
 
+    def extract_video_clip(
+        self,
+        *,
+        video_path: Path,
+        start_time: float,
+        end_time: float,
+        output_name: str,
+        max_duration_s: float = 30.0,
+    ) -> Path:
+        output_path = self.workspace / output_name
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        actual_start = max(0.0, float(start_time))
+        actual_end = max(actual_start + 0.1, float(end_time))
+        if actual_end - actual_start > max_duration_s:
+            actual_end = actual_start + max_duration_s
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-ss",
+                f"{actual_start:.3f}",
+                "-to",
+                f"{actual_end:.3f}",
+                "-i",
+                video_path.as_posix(),
+                "-c",
+                "copy",
+                "-avoid_negative_ts",
+                "make_zero",
+                output_path.as_posix(),
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return output_path
+
     def render_bbox_overlay(self, *, image_path: Path, bbox: list[float], output_name: str) -> Path:
         output_path = self.workspace / output_name
         image = Image.open(image_path).convert("RGB")

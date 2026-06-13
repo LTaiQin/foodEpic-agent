@@ -2732,7 +2732,7 @@ Gap 只能来自 observation state，建议只保留以下通用类型：
 
 ### 输入
 
-- 主清单：[/22liushoulong/agent/hd-epic/docs/plan/22_deanswer_conditioned_agent_checklist_zh.md](/22liushoulong/agent/hd-epic/docs/plan/22_deanswer_conditioned_agent_checklist_zh.md)
+- 主清单：当前即本文件本身，不再依赖已废弃的 `22_deanswer_conditioned_agent_checklist_zh.md`
 - 核心文件：
   - [/22liushoulong/agent/hd-epic/food_agent/agent/planner.py](/22liushoulong/agent/hd-epic/food_agent/agent/planner.py)
   - [/22liushoulong/agent/hd-epic/food_agent/agent/graph_agent.py](/22liushoulong/agent/hd-epic/food_agent/agent/graph_agent.py)

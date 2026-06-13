@@ -1246,18 +1246,30 @@ class GraphAgent:
         question = str(getattr(state, "question", "") or "").lower()
         if "<tap kitchen scale>" not in question and "tap kitchen scale" not in question:
             return False
-        index = self._coerce_choice_index(raw_result.get("best_index"), state.choices)
-        if index is None:
-            return False
-        choice_lc = str(state.choices[index]).lower()
-        if not any(term in choice_lc for term in ("zero out", "tare", "归零", "去皮")):
-            return False
         text = " ".join(
             str(raw_result.get(key) or "")
             for key in ("reason", "decisive_observation")
         ).lower()
         prior_text = self._action_intent_prior_reasoning_text(state).lower()
         combined_text = f"{prior_text} {text}".strip()
+        tare_claim_markers = (
+            "zero out",
+            "zeros the scale",
+            "tare",
+            "taring",
+            "resets the scale to zero",
+            "reset the scale",
+            "resets to zero",
+            "display shows 0",
+            "display changes to 0",
+            "display reads 0",
+            "returns to 0",
+            "归零",
+            "去皮",
+            "清零",
+        )
+        if not any(token in combined_text for token in tare_claim_markers):
+            return False
         has_on_prereq = any(
             token in combined_text
             for token in (
@@ -1321,31 +1333,34 @@ class GraphAgent:
         raw_result: dict[str, Any],
         state: AgentState,
     ) -> bool:
-        index = self._coerce_choice_index(raw_result.get("best_index"), state.choices)
-        if index is None:
-            return False
-        choice_lc = str(state.choices[index]).lower()
-        if not any(
-            token in choice_lc
-            for token in (
-                "adjust the measurements",
-                "adjust measurements",
-                "adjust the scale",
-                "record measurements",
-                "record the measurements",
-                "read the measurements",
-                "check the reading",
-                "measurement reading",
-                "调整刻度",
-                "记录读数",
-                "看读数",
-            )
-        ):
-            return False
         text = " ".join(
             str(raw_result.get(key) or "")
             for key in ("reason", "decisive_observation")
         ).lower()
+        measurement_claim_markers = (
+            "adjust the measurements",
+            "adjust measurements",
+            "adjust the scale",
+            "record measurements",
+            "record the measurements",
+            "read the measurements",
+            "check the reading",
+            "measurement reading",
+            "reads the measurement",
+            "takes a reading",
+            "measurement handling",
+            "measurement is plausible",
+            "generic measurement",
+            "near the ingredient area",
+            "remains near the ingredient",
+            "调整刻度",
+            "记录读数",
+            "看读数",
+            "读取数值",
+            "测量处理",
+        )
+        if not any(token in text for token in measurement_claim_markers):
+            return False
         if self._action_intent_text_has_negative_evidence(text):
             return True
         return not any(
@@ -1380,15 +1395,42 @@ class GraphAgent:
         action_object = self._action_intent_question_object(question)
         if not any(token in action_object for token in ("towel", "cloth", "napkin", "paper towel", "sponge")):
             return False
-        index = self._coerce_choice_index(raw_result.get("best_index"), state.choices)
-        if index is None:
-            return False
-        choice_lc = str(state.choices[index]).lower()
-        if not any(token in choice_lc for token in ("wipe", "clean")):
-            return False
-        if not any(token in choice_lc for token in ("surface", "counter", "countertop", "worktop", "table", "台面", "桌")):
-            return False
         text = self._action_intent_observation_support_text(raw_result).lower()
+        surface_wipe_claim_markers = (
+            "wipes the counter",
+            "wipes the surface",
+            "wipes the worktop",
+            "cleans the counter",
+            "cleans the surface",
+            "cleans the worktop",
+            "wipes down the counter",
+            "wipes down the surface",
+            "wiping the counter",
+            "wiping the surface",
+            "wiping the worktop",
+            "cleaning the counter",
+            "cleaning the surface",
+            "cleaning the worktop",
+            "cleanup",
+            "surface wiping",
+            "near the counter",
+            "near the surface",
+            "near the worktop",
+            "onto the counter",
+            "onto the surface",
+            "onto the worktop",
+            "pressed onto the counter",
+            "reaches the counter",
+            "next to crumbs",
+            "beside crumbs",
+            "擦拭台面",
+            "清洁台面",
+            "擦桌子",
+            "靠近台面",
+            "碰到台面",
+        )
+        if not any(token in text for token in surface_wipe_claim_markers):
+            return False
         if self._action_intent_text_has_negative_evidence(text):
             return True
         return not self._action_intent_support_has_strong_surface_wiping_evidence(text)
@@ -2392,21 +2434,39 @@ class GraphAgent:
         raw_result: dict[str, Any],
         state: AgentState,
     ) -> bool:
-        index = self._coerce_choice_index(raw_result.get("best_index"), state.choices)
-        if index is None:
-            return False
-        choices = [str(choice) for choice in getattr(state, "choices", [])]
-        best_choice = choices[index].lower()
-        question = str(getattr(state, "question", "") or "").lower()
-        action_object = self._action_intent_question_object(question)
-        global_context = self._action_intent_scoped_global_context(state).lower()
         text = self._action_intent_observation_support_text(raw_result).lower()
-        best_is_generic_workspace = self._action_intent_choice_is_generic_direct_space_purpose(best_choice)
-        best_is_exact_workspace = self._action_intent_choice_is_exact_workspace_or_downstream_candidate(
-            best_choice
+        if not text:
+            return False
+        workspace_claim_markers = (
+            "more open",
+            "open counter space",
+            "clears some room",
+            "clears space",
+            "free space",
+            "workspace",
+            "counter space",
+            "worktop",
+            "opens up",
+            "makes room",
+            "空出",
+            "腾出",
+            "更空",
+            "台面空间",
         )
-        best_is_final_placement = self._action_intent_choice_is_final_placement_candidate(best_choice)
-        if not any((best_is_generic_workspace, best_is_exact_workspace, best_is_final_placement)):
+        placement_claim_markers = (
+            "put back",
+            "placed back",
+            "return to",
+            "returned to",
+            "back in place",
+            "proper place",
+            "放回",
+            "归位",
+            "放回原处",
+        )
+        has_workspace_claim = any(token in text for token in workspace_claim_markers)
+        has_placement_claim = any(token in text for token in placement_claim_markers)
+        if not has_workspace_claim and not has_placement_claim:
             return False
         has_observation_gap = self._action_intent_resolution_has_long_horizon_gap(state) or self._action_intent_has_unresolved_timeline_review_gap(state)
         if self._action_intent_text_has_negative_evidence(text):
@@ -2430,40 +2490,16 @@ class GraphAgent:
             )
         ):
             return True
-        if best_is_generic_workspace and not has_observation_gap:
-            if not text:
-                return False
-            generic_workspace_markers = (
-                "more open",
-                "open counter space",
-                "clears some room",
-                "clears space",
-                "free space",
-                "workspace",
-                "counter space",
-                "worktop",
-                "空出",
-                "腾出",
-                "更空",
-                "台面空间",
-            )
-            if not any(token in text for token in generic_workspace_markers):
+        if has_workspace_claim and not has_observation_gap:
+            exact_downstream = self._action_intent_support_has_exact_downstream_chain(text)
+            if exact_downstream:
                 return False
             return True
-        if best_is_generic_workspace:
+        if has_workspace_claim:
             return not self._action_intent_text_explicitly_rules_out_exact_downstream_chain(text)
-        if best_is_final_placement:
-            if not text:
-                return False
-            return not self._action_intent_choice_has_explicit_final_placement_evidence(best_choice, text)
-        if best_is_exact_workspace:
-            return not self._action_intent_choice_has_explicit_workspace_or_downstream_chain(
-                question=question,
-                choice=best_choice,
-                text=text,
-                action_object=action_object,
-                global_context=global_context,
-            )
+        if has_placement_claim:
+            explicit_location = self._action_intent_support_has_explicit_final_location_evidence(text)
+            return not explicit_location
         return False
 
     def _latest_action_intent_timeline_review_entry(
@@ -3167,7 +3203,6 @@ class GraphAgent:
         )
         if target_row is None:
             return []
-        choice_lc = str(target_row.get("choice") or "").lower()
         support_lc = str(target_row.get("support") or "").lower()
         context_lc = f"{support_lc} {str(target_row.get('contradiction') or '').lower()}"
         gaps: list[str] = []
@@ -3180,9 +3215,6 @@ class GraphAgent:
         if self._action_intent_text_has_negative_evidence(context_lc) and has_modal_generic_support:
             gaps.append("candidate_explicitly_lacks_observed_support")
         has_direct_positive_support = self._action_intent_text_has_direct_positive_evidence(support_lc)
-        question_lc = str(getattr(state, "question", "") or "").lower()
-        action_object = self._action_intent_question_object(question_lc)
-        global_context = self._action_intent_scoped_global_context(state).lower()
         if self._action_intent_support_has_hand_drying_purpose_uncertainty(context_lc):
             gaps.append("hand_drying_purpose_unresolved")
         if self._action_intent_support_has_unresolved_relocation_purpose(context_lc):
@@ -3215,44 +3247,42 @@ class GraphAgent:
                 gaps.append("exact_workspace_without_exact_use")
         if self._action_intent_support_has_surface_contact_cleanup_uncertainty(context_lc):
             gaps.append("surface_cleanup_purpose_unresolved")
-        if any(term in choice_lc for term in ("turn on", "switch on", "power on", "打开", "开启")):
-            if not has_direct_positive_support and not any(
-                term in support_lc
-                for term in ("display turns on", "screen lights", "scale wakes", "powered on", "turned on", "亮起", "开机", "显示屏亮")
-            ):
-                gaps.append("missing_power_on_state_change_evidence")
-        if any(term in choice_lc for term in ("zero out", "tare", "reset the scale", "归零", "去皮")):
-            if not has_direct_positive_support and not any(
-                term in support_lc
-                for term in ("zero", "tare", "reset", "returns to 0", "container on the scale", "归零", "去皮", "回到0", "放到秤上")
-            ):
-                gaps.append("missing_zero_out_measurement_evidence")
-        if self._action_intent_choice_is_generic_measurement_meta_purpose(choice_lc):
-            if not any(
+        if not has_direct_positive_support:
+            if any(
                 term in context_lc
                 for term in (
-                    "reading",
-                    "check the reading",
-                    "tare",
-                    "zero",
-                    "returns to 0",
-                    "display changes",
-                    "display turns on",
-                    "screen lights",
-                    "update is entered",
-                    "records the measurement",
-                    "读数",
-                    "归零",
-                    "去皮",
-                    "显示变化",
-                    "记录读数",
-                    "录入",
+                    "display turns on", "screen lights", "scale wakes", "powered on", "turned on",
+                    "亮起", "开机", "显示屏亮",
                 )
             ):
-                gaps.append("missing_measurement_meta_evidence")
-        if self._action_intent_choice_is_exact_measurement_role_purpose(choice_lc):
-            if not self._action_intent_support_has_exact_measurement_role_evidence(context_lc):
-                gaps.append("missing_exact_measurement_role_evidence")
+                pass
+            elif any(
+                term in context_lc
+                for term in (
+                    "zero", "tare", "reset", "returns to 0", "container on the scale",
+                    "归零", "去皮", "回到0", "放到秤上",
+                )
+            ):
+                pass
+            else:
+                measurement_claim_in_context = any(
+                    term in context_lc
+                    for term in (
+                        "adjust the measurements", "adjust measurements", "adjust the scale",
+                        "record measurements", "read the measurements", "check the reading",
+                        "measurement reading", "调整刻度", "记录读数", "看读数",
+                    )
+                )
+                if measurement_claim_in_context and not any(
+                    term in context_lc
+                    for term in (
+                        "reading", "check the reading", "tare", "zero", "returns to 0",
+                        "display changes", "display turns on", "screen lights",
+                        "update is entered", "records the measurement",
+                        "读数", "归零", "去皮", "显示变化", "记录读数", "录入",
+                    )
+                ):
+                    gaps.append("missing_measurement_meta_evidence")
         if self._action_intent_unresolved_candidate_spans_mixed_horizon(state=state, candidate_rows=candidate_rows, best_index=best_index):
             has_exact_observed_outcome = (
                 self._action_intent_support_has_exclusive_immediate_micro_outcome_evidence(context_lc)
@@ -3262,38 +3292,23 @@ class GraphAgent:
             )
             if self._action_intent_support_has_mixed_horizon_uncertainty(context_lc) and not has_exact_observed_outcome:
                 gaps.append("mixed_horizon_outcome_unresolved")
-        if any(term in choice_lc for term in ("access", "behind", "reveal", "expose", "拿到后面", "看到后面", "露出", "取到后面")):
-            if any(term in support_lc for term in ("reveals the hidden area", "revealed", "hidden area behind", "shows what is behind", "露出后方", "看到后方")):
-                gaps.append("generic_access_direct_effect")
-        if self._action_intent_choice_is_generic_direct_space_purpose(choice_lc):
-            if any(
-                term in context_lc
-                for term in (
-                    "behind",
-                    "reveals",
-                    "revealed",
-                    "hidden area",
-                    "hidden item",
-                    "item behind",
-                    "underneath",
-                    "后面",
-                    "下面",
-                    "露出",
-                    "挪开后",
-                )
-            ) and any(
-                term in context_lc
-                for term in (
-                    "no hidden item is then picked up",
-                    "no item behind is actually taken",
-                    "no actual hidden item is retrieved",
-                    "no concrete next target is shown",
-                    "direct next target remains unclear",
-                    "没有实际取出",
-                    "没有明确下一目标",
-                )
-            ):
-                gaps.append("generic_make_space_hidden_target_still_speculative")
+        if any(
+            term in support_lc
+            for term in ("reveals the hidden area", "revealed", "hidden area behind", "shows what is behind", "露出后方", "看到后方")
+        ):
+            gaps.append("generic_access_direct_effect")
+        if any(
+            term in context_lc
+            for term in ("behind", "reveals", "revealed", "hidden area", "hidden item", "item behind", "underneath", "后面", "下面", "露出", "挪开后")
+        ) and any(
+            term in context_lc
+            for term in (
+                "no hidden item is then picked up", "no item behind is actually taken",
+                "no actual hidden item is retrieved", "no concrete next target is shown",
+                "direct next target remains unclear", "没有实际取出", "没有明确下一目标",
+            )
+        ):
+            gaps.append("generic_make_space_hidden_target_still_speculative")
         gaps.extend(
             self._action_intent_unresolved_timeline_review_bias_gaps(
                 state=state,
@@ -3701,11 +3716,8 @@ class GraphAgent:
         contradiction: str,
         state: AgentState,
     ) -> float:
-        question_lc = question.lower()
         support_lc = support.lower()
         contradiction_lc = contradiction.lower()
-        choice_lc = choice.lower()
-        action_object = self._action_intent_question_object(question)
         global_context = self._action_intent_scoped_global_context(state).lower()
         adjusted = max(0.0, min(float(base_score), 1.0))
         if self._action_intent_text_has_negative_evidence(contradiction_lc):
@@ -3716,562 +3728,33 @@ class GraphAgent:
             adjusted -= 0.08
         if any(term in support_lc for term in ("least contradicted", "broadest", "最不矛盾", "最宽泛")):
             adjusted -= 0.18
-        if self._action_intent_choice_is_generic_cleaning_tool_goal(
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            action_object=action_object,
-            global_context=global_context,
-        ):
-            adjusted -= 0.26
-        if self._action_intent_choice_is_generic_postwash_cleaning(
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            action_object=action_object,
-            global_context=global_context,
-        ):
-            adjusted -= 0.22
-            if any(
-                token in f"{support_lc} {contradiction_lc}"
-                for token in (
-                    "remaining soap",
-                    "soap suds",
-                    "washing away the remaining soap",
-                    "remove the remaining soap",
-                    "肥皂",
-                    "泡沫",
-                )
-            ):
+        if self._action_intent_support_has_explicit_final_location_evidence(support_lc):
+            adjusted += 0.1
+        if self._action_intent_support_has_explicit_followup_outcome_evidence(support_lc):
+            adjusted += 0.1
+        if self._action_intent_support_has_exact_downstream_chain(support_lc):
+            adjusted += 0.12
+        if self._action_intent_support_has_broad_access_or_space_effect(support_lc):
+            if not self._action_intent_support_has_exact_downstream_chain(support_lc):
+                adjusted -= 0.14
+        if self._action_intent_support_has_broad_relocation_or_storage_effect(support_lc):
+            if not self._action_intent_support_has_explicit_final_location_evidence(support_lc):
                 adjusted -= 0.12
-        if self._action_intent_choice_is_generic_drying_without_wet_context(
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            action_object=action_object,
-            global_context=global_context,
+        if self._action_intent_support_has_mixed_horizon_uncertainty(support_lc):
+            adjusted -= 0.1
+        if self._action_intent_support_has_relocation_outcome_uncertainty(support_lc):
+            adjusted -= 0.1
+        if self._action_intent_support_has_surface_contact_cleanup_uncertainty(support_lc):
+            adjusted -= 0.12
+        if self._action_intent_support_has_hand_drying_purpose_uncertainty(support_lc):
+            adjusted -= 0.1
+        if self._action_intent_support_has_cooking_inspection_purpose_uncertainty(
+            text=support_lc, action_object=self._action_intent_question_object(question),
         ):
-            adjusted -= 0.2
-        if self._action_intent_choice_is_premature_drying_before_cleanup(
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            action_object=action_object,
-            global_context=global_context,
-        ):
-            adjusted -= 0.24
-        if self._action_intent_choice_is_generic_space_side_effect(
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-        ):
-            adjusted -= 0.18
-        if self._action_intent_choice_is_generic_workspace_effect_over_exact_path_or_destination(
-            question=question_lc,
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            action_object=action_object,
-            global_context=global_context,
-        ):
-            adjusted -= 0.22
-        if self._action_intent_choice_is_direct_space_without_exact_next_use(
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-        ):
-            adjusted += 0.24
-        if any(term in choice_lc for term in ("access", "behind", "reveal", "expose", "后面", "露出")) and any(
-            term in support_lc for term in ("reveals the hidden area", "revealed", "hidden area behind", "shows what is behind", "露出后方", "看到后方")
-        ):
-            adjusted += 0.26
-        if "clean" in choice_lc and any(term in contradiction_lc for term in ("no actual cleaning", "no visible wiping", "没有任何明确清洁", "没有擦")):
-            adjusted -= 0.16
-        if "away" in choice_lc and any(term in contradiction_lc for term in ("not stored", "not put", "counter", "没有看到把", "暂时", "台面")):
-            adjusted -= 0.14
-        if "dry" in choice_lc and "hand" in choice_lc and any(term in contradiction_lc for term in ("no visible hand", "no clear wet-hand", "没有看到双手", "没有先洗手")):
-            adjusted -= 0.14
-        if self._action_intent_choice_is_temporary_relocation_not_storage(
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            action_object=action_object,
-            global_context=global_context,
-        ):
-            adjusted -= 0.24
-        if self._action_intent_choice_is_unsupported_hand_drying_goal(
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            action_object=action_object,
-            global_context=global_context,
-        ):
-            adjusted -= 0.22
-        if self._action_intent_support_is_likely_downstream_to_move_action(
-            question=question_lc,
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            global_context=global_context,
-            action_object=action_object,
-        ):
-            adjusted -= 0.36
-        if self._action_intent_choice_is_direct_same_object_manipulation(
-            choice=choice_lc,
-            support=support_lc,
-            action_object=action_object,
-            global_context=global_context,
-        ):
-            adjusted += 0.32
-        if self._action_intent_choice_is_direct_same_object_cleaning(
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            action_object=action_object,
-            global_context=global_context,
-        ):
-            adjusted += 0.46
-        if self._action_intent_choice_is_direct_same_object_role_use(
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            action_object=action_object,
-            global_context=global_context,
-        ):
-            adjusted += 0.34
-        if any(token in choice_lc for token in ("turn on the tap", "turn on tap", "turn on the faucet", "打开水龙头")) and any(
-            token in contradiction_lc
-            for token in (
-                "no explicit tap-turning action is visible",
-                "clearer evidence is the cup being kept in one hand under running water",
-                "current visible goal is rinsing the same cup",
-                "没有明确打开水龙头",
-                "更明确的是同一物体正在被冲洗",
-            )
-        ):
-            adjusted -= 0.22
-        if any(
-            token in choice_lc
-            for token in (
-                "free up the right hand",
-                "free up the left hand",
-                "free the right hand",
-                "free the left hand",
-                "to free up the right hand",
-                "to free up the left hand",
-                "so left hand is free",
-                "so right hand is free",
-                "to free one hand",
-                "腾出右手",
-                "腾出左手",
-            )
-        ) and any(
-            token in f"{support_lc} {contradiction_lc} {global_context}"
-            for token in (
-                "without yet showing a single specific retrieved object",
-                "exact next target is still ambiguous",
-                "another manipulation may happen",
-                "no bottle is directly shown as the next target",
-                "目标仍不明确",
-                "还没有明确目标",
-                "下一目标仍然模糊",
-            )
-        ):
-            adjusted += 0.24
-        if self._action_intent_choice_is_measurement_base_placement(
-            question=question_lc,
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            action_object=action_object,
-            global_context=global_context,
-        ):
-            adjusted += 0.34
-        if self._action_intent_choice_is_cleaning_placement_goal(
-            question=question_lc,
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            action_object=action_object,
-            global_context=global_context,
-        ):
-            adjusted += 0.3
-        if self._action_intent_choice_is_direct_same_object_inspection_or_alignment(
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            action_object=action_object,
-            global_context=global_context,
-        ):
-            adjusted += 0.3
-        if self._action_intent_choice_is_brief_cooking_inspection_over_disposal(
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            action_object=action_object,
-            global_context=global_context,
-        ):
-            adjusted += 0.32
-        if self._action_intent_choice_is_generic_inspection_under_hidden_target_context(
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            global_context=global_context,
-        ):
-            adjusted -= 0.22
-        if self._action_intent_choice_is_generic_hidden_reveal_or_access(
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            global_context=global_context,
-        ):
-            adjusted -= 0.24
-        if self._action_intent_choice_is_generic_hidden_access_over_exact_reveal_use(
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            global_context=global_context,
-        ):
-            adjusted -= 0.26
-        if self._action_intent_choice_is_generic_hidden_access_without_followup_use(
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            global_context=global_context,
-        ):
-            adjusted += 0.22
-        if self._action_intent_choice_is_generic_disposal_without_pour_signal(
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            action_object=action_object,
-            global_context=global_context,
-        ):
-            adjusted -= 0.26
-        if self._action_intent_choice_is_hidden_target_access_or_retrieval(
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            global_context=global_context,
-        ):
-            adjusted += 0.34
-        if self._action_intent_choice_is_exact_revealed_target_purpose(
-            question=question_lc,
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            action_object=action_object,
-            global_context=global_context,
-        ):
-            adjusted += 0.28
-        if self._action_intent_choice_is_exact_reveal_then_take_or_place(
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            global_context=global_context,
-        ):
-            adjusted += 0.26
-        if self._action_intent_choice_is_generic_underneath_cleaning_under_hidden_target_context(
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            global_context=global_context,
-        ):
-            adjusted -= 0.2
-        if self._action_intent_choice_is_exact_workspace_creation(
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            action_object=action_object,
-            global_context=global_context,
-        ):
-            adjusted += 0.4
-        if self._action_intent_choice_is_exact_downstream_targeted_placement(
-            question=question_lc,
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            action_object=action_object,
-            global_context=global_context,
-        ):
-            adjusted += 0.36
-        if self._action_intent_choice_is_exact_pickup_path_enablement(
-            question=question_lc,
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            action_object=action_object,
-            global_context=global_context,
-        ):
-            adjusted += 0.32
-        if self._action_intent_choice_is_exact_immediate_downstream_use(
-            question=question_lc,
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            action_object=action_object,
-            global_context=global_context,
-        ):
-            adjusted += 0.32
-        if self._action_intent_choice_is_cleaning_tool_specific_target_use(
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            action_object=action_object,
-            global_context=global_context,
-        ):
-            adjusted += 0.34
-        if self._action_intent_choice_is_cleaning_supply_retrieval(
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            action_object=action_object,
-            global_context=global_context,
-        ):
-            adjusted += 0.36
-        if self._action_intent_choice_is_cleaning_workflow_initiation(
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            action_object=action_object,
-            global_context=global_context,
-        ):
-            adjusted += 0.32
-        if self._action_intent_choice_is_surface_wipe_preparation(
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            action_object=action_object,
-            global_context=global_context,
-        ):
-            adjusted += 0.28
-        if self._action_intent_choice_is_weak_surface_contact_cleanup_claim(
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            action_object=action_object,
-            global_context=global_context,
-        ):
-            adjusted -= 0.34
-        if self._action_intent_choice_is_explicit_hand_drying_goal(
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            action_object=action_object,
-            global_context=global_context,
-        ):
-            adjusted += 0.3
-        if self._action_intent_choice_is_explicit_both_hands_wiping_goal(
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            action_object=action_object,
-            global_context=global_context,
-        ):
-            adjusted += 0.38
-        if self._action_intent_choice_is_direct_disposal_path(
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            action_object=action_object,
-            global_context=global_context,
-        ):
-            adjusted += 0.34
-        if self._action_intent_choice_lacks_direct_relocation_outcome_evidence(
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-        ):
-            adjusted -= 0.2
-        if self._action_intent_choice_is_postwash_residue_or_water_removal(
-            question=question_lc,
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            action_object=action_object,
-            global_context=global_context,
-        ):
-            adjusted += 0.3
-        if self._action_intent_choice_is_postwash_drying_goal(
-            question=question_lc,
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            action_object=action_object,
-            global_context=global_context,
-        ):
-            adjusted += 0.28
-        if self._action_intent_choice_is_immediate_reuse_staging(
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            action_object=action_object,
-            global_context=global_context,
-        ):
-            adjusted += 0.26
-        if self._action_intent_choice_is_hygiene_surface_protection_staging(
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            action_object=action_object,
-            global_context=global_context,
-        ):
-            adjusted += 0.24
-        if self._action_intent_choice_is_unfinished_cleanup_context_for_finished_or_storage(
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            action_object=action_object,
-            global_context=global_context,
-        ):
-            adjusted -= 0.24
-        finished_goal = self._action_intent_choice_is_finished_with_object_goal(
-            question=question_lc,
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            action_object=action_object,
-            global_context=global_context,
-        )
-        if finished_goal:
-            adjusted += 0.26
-            if any(
-                token in support_lc
-                for token in ("no longer needed", "simply placed aside", "set aside", "put down", "placed aside")
-            ):
-                adjusted += 0.12
-            if any(
-                token in contradiction_lc
-                for token in ("no further", "no more", "no further spoon-use", "no further use", "no washing-followup")
-            ):
-                adjusted += 0.18
-        if self._action_intent_choice_is_temporary_set_aside_not_finished(
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            action_object=action_object,
-            global_context=global_context,
-        ):
-            adjusted -= 0.22
-        if self._action_intent_choice_is_glove_removal_enablement(
-            question=question_lc,
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            action_object=action_object,
-            global_context=global_context,
-        ):
-            adjusted += 0.3
-        if self._action_intent_choice_is_surface_mess_avoidance_goal(
-            question=question_lc,
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            action_object=action_object,
-            global_context=global_context,
-        ):
-            adjusted += 0.28
-        if self._action_intent_choice_is_direct_hazard_avoidance(
-            question=question_lc,
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            action_object=action_object,
-            global_context=global_context,
-        ):
-            adjusted += 0.34
-        if self._action_intent_choice_is_generic_mixing_under_hazard_context(
-            question=question_lc,
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            global_context=global_context,
-        ):
-            adjusted -= 0.26
-        if any(token in choice_lc for token in ("pick up", "pickup", "take", "retrieve", "拿", "取")) and any(
-            token in contradiction_lc
-            for token in (
-                "downstream pickup after the transfer",
-                "rather than the direct purpose of the transfer itself",
-                "later downstream effect",
-                "this is a downstream pickup",
-                "不是当前转移动作的直接目的",
-                "只是转移动作之后的下游拿取",
-            )
-        ):
-            adjusted -= 0.28
-        if any(token in choice_lc for token in ("empty", "pour out", "drain", "倒掉", "倒出", "沥")) and all(
-            token in support_lc
-            for token in ("sink", "tilted")
-        ) and any(
-            token in f"{support_lc} {contradiction_lc}"
-            for token in (
-                "pour the water out",
-                "emptying motion",
-                "poured out",
-                "drain the water",
-                "倒水",
-                "倒掉",
-                "沥出",
-            )
-        ):
-            adjusted += 0.18
-        if self._action_intent_choice_is_direct_residue_release(
-            question=question_lc,
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            action_object=action_object,
-            global_context=global_context,
-        ):
-            adjusted += 0.3
-        if self._action_intent_choice_is_receptacle_oriented_residue_release(
-            question=question_lc,
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            action_object=action_object,
-            global_context=global_context,
-        ):
-            adjusted += 0.18
-        if self._action_intent_choice_is_side_switch_without_immediate_reuse(
-            question=question_lc,
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            action_object=action_object,
-            global_context=global_context,
-        ):
-            adjusted -= 0.18
-        if self._action_intent_choice_is_direct_enablement(
-            choice=choice_lc,
-            support=support_lc,
-            global_context=global_context,
-        ):
-            adjusted += 0.34
-        if self._action_intent_choice_is_direct_tap_enablement(
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            global_context=global_context,
-        ):
-            adjusted += 0.18
-        if self._action_intent_choice_is_dual_object_rinse(
-            choice=choice_lc,
-            support=support_lc,
-            global_context=global_context,
-        ):
-            adjusted += 0.44
+            adjusted -= 0.1
         if any(
             token in contradiction_lc
-            for token in (
-                "already in hand",
-                "downstream",
-                "later downstream",
-                "后续",
-                "下游",
-                "结果性后续",
-            )
+            for token in ("already in hand", "downstream", "later downstream", "后续", "下游", "结果性后续")
         ):
             adjusted -= 0.18
         if any(
@@ -4286,25 +3769,6 @@ class GraphAgent:
             )
         ):
             adjusted -= 0.2
-        if self._action_intent_choice_is_weak_drainage_rearrangement(
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-        ):
-            adjusted -= 0.22
-        if self._action_intent_choice_is_tap_state_switch(
-            choice=choice_lc,
-            support=support_lc,
-            global_context=global_context,
-        ):
-            adjusted += 0.28
-        if self._action_intent_choice_is_generic_fill_limit_without_match(
-            choice=choice_lc,
-            support=support_lc,
-            contradiction=contradiction_lc,
-            global_context=global_context,
-        ):
-            adjusted -= 0.24
         if self._action_intent_text_has_direct_positive_evidence(support_lc):
             adjusted += 0.1
         if self._action_intent_text_has_direct_positive_evidence(contradiction_lc):

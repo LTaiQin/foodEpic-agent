@@ -113,6 +113,69 @@ class OpenAICompatibleModelClient:
                 return response
         raise RuntimeError(f"vision request returned empty content for modes={tried_modes}")
 
+    def inspect_videos(self, *, prompt: str, video_paths: list[Path], temperature: float = 0.0) -> ModelResponse:
+        if not video_paths:
+            raise ValueError("inspect_videos requires at least one video path")
+        timeout_seconds = max(
+            float(getattr(self.config, "vision_timeout_seconds", self.config.request_timeout_seconds)),
+            120.0,
+        )
+        preferred_mode = self._preferred_vision_mode()
+        tried_modes: list[str] = []
+        for mode in self._vision_request_modes(preferred_mode):
+            tried_modes.append(mode)
+            messages = self._video_messages_for_mode(mode=mode, prompt=prompt, video_paths=video_paths)
+            response = self._complete_with_timeout(
+                messages,
+                temperature=temperature,
+                timeout_seconds=timeout_seconds,
+                vision_request=True,
+                request_mode=mode,
+            )
+            if not self._is_empty_vision_response(response):
+                self._remember_working_vision_mode(mode)
+                return response
+        raise RuntimeError(f"video request returned empty content for modes={tried_modes}")
+
+    def inspect_images_and_videos(
+        self,
+        *,
+        prompt: str,
+        image_paths: list[Path] | None = None,
+        video_paths: list[Path] | None = None,
+        temperature: float = 0.0,
+    ) -> ModelResponse:
+        images = list(image_paths or [])
+        videos = list(video_paths or [])
+        if not images and not videos:
+            raise ValueError("inspect_images_and_videos requires at least one image or video path")
+        if videos and not images:
+            return self.inspect_videos(prompt=prompt, video_paths=videos, temperature=temperature)
+        if images and not videos:
+            return self.inspect_images(prompt=prompt, image_paths=images, temperature=temperature)
+        timeout_seconds = max(
+            float(getattr(self.config, "vision_timeout_seconds", self.config.request_timeout_seconds)),
+            120.0,
+        )
+        preferred_mode = self._preferred_vision_mode()
+        tried_modes: list[str] = []
+        for mode in self._vision_request_modes(preferred_mode):
+            tried_modes.append(mode)
+            messages = self._mixed_media_messages_for_mode(
+                mode=mode, prompt=prompt, image_paths=images, video_paths=videos,
+            )
+            response = self._complete_with_timeout(
+                messages,
+                temperature=temperature,
+                timeout_seconds=timeout_seconds,
+                vision_request=True,
+                request_mode=mode,
+            )
+            if not self._is_empty_vision_response(response):
+                self._remember_working_vision_mode(mode)
+                return response
+        raise RuntimeError(f"mixed media request returned empty content for modes={tried_modes}")
+
     def _request(self, messages: list[dict[str, Any]], temperature: float) -> Any:
         return self._request_with_timeout(messages, temperature=temperature, timeout_seconds=self.config.request_timeout_seconds)
 
@@ -315,6 +378,26 @@ class OpenAICompatibleModelClient:
         content.extend(self._chat_image_part(path) for path in image_paths)
         return [{"role": "user", "content": content}]
 
+    def _video_messages_for_mode(self, *, mode: str, prompt: str, video_paths: list[Path]) -> list[dict[str, Any]]:
+        content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+        for path in video_paths:
+            content.append(self._chat_video_part(path))
+        return [{"role": "user", "content": content}]
+
+    def _mixed_media_messages_for_mode(
+        self, *, mode: str, prompt: str, image_paths: list[Path], video_paths: list[Path],
+    ) -> list[dict[str, Any]]:
+        content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+        for path in image_paths:
+            content.append(self._chat_image_part(path))
+        for path in video_paths:
+            content.append(self._chat_video_part(path))
+        return [{"role": "user", "content": content}]
+
+    def _chat_video_part(self, path: Path) -> dict[str, Any]:
+        payload = _video_to_data_url(path)
+        return {"type": "video_url", "video_url": {"url": payload}}
+
     def _vision_request_modes(self, preferred_mode: str) -> list[str]:
         normalized = preferred_mode if preferred_mode in {"chat_completions", "responses"} else "chat_completions"
         fallback = "responses" if normalized == "chat_completions" else "chat_completions"
@@ -328,6 +411,8 @@ class OpenAICompatibleModelClient:
         if configured in {"chat_completions", "responses"}:
             return configured
         base_url = str(getattr(self.config, "base_url", "") or "").lower()
+        if "right.codes/codex" in base_url:
+            return "chat_completions"
         if "cctq.ai" in base_url:
             return "responses"
         return (self.config.provider_mode or "chat_completions").strip().lower()
@@ -416,7 +501,16 @@ def _extract_sse_text(raw: str) -> str:
             payload = json.loads(line)
         except json.JSONDecodeError:
             continue
-        text = _extract_response_output_text(payload.get("output")) if isinstance(payload, dict) else ""
+        text = ""
+        if isinstance(payload, dict):
+            text = _extract_response_output_text(payload.get("output"))
+            if not text and isinstance(payload.get("output_text"), str):
+                text = str(payload.get("output_text") or "")
+            response_payload = payload.get("response")
+            if not text and isinstance(response_payload, dict):
+                text = _extract_response_output_text(response_payload.get("output"))
+                if not text and isinstance(response_payload.get("output_text"), str):
+                    text = str(response_payload.get("output_text") or "")
         if text:
             text_parts.append(text)
             continue
@@ -466,6 +560,16 @@ def _image_to_data_url(path: Path) -> str:
 
     suffix = path.suffix.lower()
     media_type = "image/png" if suffix == ".png" else "image/jpeg"
+    payload = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{media_type};base64,{payload}"
+
+
+def _video_to_data_url(path: Path) -> str:
+    import base64
+
+    suffix = path.suffix.lower()
+    media_type_map = {".mp4": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime", ".avi": "video/x-msvideo"}
+    media_type = media_type_map.get(suffix, "video/mp4")
     payload = base64.b64encode(path.read_bytes()).decode("ascii")
     return f"data:{media_type};base64,{payload}"
 

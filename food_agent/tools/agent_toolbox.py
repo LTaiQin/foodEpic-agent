@@ -186,6 +186,11 @@ class AgentToolbox:
                 "arguments": {"start_time": "float", "end_time": "float", "sample_count": "int", "tag": "str"},
             },
             {
+                "name": "extract_video_clip",
+                "description": "从原视频截取指定时间段的短视频片段，用于直接送入多模态模型理解动作过程。",
+                "arguments": {"start_time": "float", "end_time": "float", "tag": "str", "max_duration_s": "float"},
+            },
+            {
                 "name": "extract_input_reference_frames",
                 "description": "根据 inputs_json 中给出的 image/video 引用，跨视频提取对应参考帧。",
                 "arguments": {"tag": "str"},
@@ -1293,6 +1298,20 @@ class AgentToolbox:
             prefix=self._safe_tag(tag),
         )
         return {"artifact_paths": [path.as_posix() for path in paths], "start_time": start_time, "end_time": end_time, "count": len(paths)}
+
+    def extract_video_clip(
+        self, start_time: float, end_time: float, tag: str = "clip", max_duration_s: float = 30.0,
+    ) -> dict[str, Any]:
+        video_path = self._video_path()
+        output_name = f"{self._safe_tag(tag)}_{start_time:09.3f}_{end_time:09.3f}.mp4"
+        path = self.video.extract_video_clip(
+            video_path=video_path,
+            start_time=start_time,
+            end_time=end_time,
+            output_name=output_name,
+            max_duration_s=max_duration_s,
+        )
+        return {"artifact_path": path.as_posix(), "start_time": start_time, "end_time": end_time}
 
     def extract_input_reference_frames(self, tag: str = "inputs") -> dict[str, Any]:
         payload = self.default_hints(self.runtime_question, self.runtime_inputs_json).get("inputs")
@@ -7722,8 +7741,14 @@ class AgentToolbox:
         )
         return {"node_id": node["node_id"], "node": node}
 
-    def finish(self, prediction: int, answer: str, confidence: float = 0.0) -> dict[str, Any]:
-        return {"prediction": int(prediction), "answer": str(answer), "confidence": float(confidence), "done": True}
+    def finish(self, prediction: int | None, answer: str, confidence: float = 0.0) -> dict[str, Any]:
+        normalized_prediction = None if prediction is None else int(prediction)
+        return {
+            "prediction": normalized_prediction,
+            "answer": str(answer),
+            "confidence": float(confidence),
+            "done": True,
+        }
 
     def default_hints(self, question: str, inputs_json: str) -> dict[str, Any]:
         try:
@@ -8178,6 +8203,13 @@ class AgentToolbox:
 
     def _fallback_rank_choices(self, *, question: str, choices: list[str], evidence: list[str], working_memory: list[str]) -> dict[str, Any]:
         corpus = " ".join([question, *evidence, *working_memory]).lower()
+        if self._looks_like_action_intent_question(question=question, choices=choices):
+            return self._fallback_rank_action_intent_choices(
+                question=question,
+                choices=choices,
+                evidence=evidence,
+                working_memory=working_memory,
+            )
         scores: list[dict[str, Any]] = []
         best_index = 0
         best_score = float("-inf")
@@ -8194,6 +8226,104 @@ class AgentToolbox:
                 best_score = score
                 best_index = index
         confidence = 0.2 if best_score <= 0 else min(0.75, 0.25 + 0.1 * best_score)
+        return {
+            "scores": scores,
+            "best_index": best_index,
+            "answer": str(choices[best_index]),
+            "confidence": confidence,
+        }
+
+    def _fallback_rank_action_intent_choices(
+        self,
+        *,
+        question: str,
+        choices: list[str],
+        evidence: list[str],
+        working_memory: list[str],
+    ) -> dict[str, Any]:
+        corpus = " ".join([question, *evidence, *working_memory]).lower()
+        question_lc = str(question or "").lower()
+        control_like_action = any(token in question_lc for token in ("<turn ", "<tap ", "<press ", "<push ", "<switch ", " turn ", " tap ", " press ", " push "))
+        control_target = any(token in question_lc for token in ("dial", "button", "switch", "knob", "control"))
+        appliance_context = any(
+            token in corpus
+            for token in (
+                "appliance",
+                "dishwasher",
+                "washing machine",
+                "food processor",
+                "mixer",
+                "oven",
+                "microwave",
+                "program",
+                "temperature",
+            )
+        )
+        water_context = any(
+            token in corpus
+            for token in ("running water", "rinse", "sink", "tap", "water", "saucepan", "pan")
+        )
+        scores: list[dict[str, Any]] = []
+        best_index = 0
+        best_score = float("-inf")
+        for index, choice in enumerate(choices):
+            choice_lc = str(choice).strip().lower()
+            category_set = choice_categories(choice_lc)
+            score = 0.0
+            reasons: list[str] = []
+            if choice_lc and choice_lc in corpus:
+                score += 3.0
+                reasons.append("exact_choice_overlap")
+            for token in re.findall(r"[a-zA-Z0-9]+|[\u4e00-\u9fff]+", choice_lc):
+                if len(token) >= 2 and token in corpus:
+                    score += 1.0
+                    reasons.append(f"token={token}")
+            if control_like_action and control_target:
+                if "open_close" in category_set:
+                    score += 2.5
+                    reasons.append("control_action_prefers_state_switch")
+                if "inspect_check" in category_set:
+                    score += 1.2
+                    reasons.append("control_action_can_support_check")
+                if "transfer_contents" in category_set:
+                    score -= 1.5
+                    reasons.append("control_action_penalizes_transfer")
+                if "serve_consume" in category_set or "food_prep" in category_set:
+                    score -= 0.8
+                    reasons.append("control_action_penalizes_food_prep")
+            if appliance_context:
+                appliance_terms = (
+                    "dishwasher",
+                    "washing machine",
+                    "food processor",
+                    "mixer",
+                    "oven",
+                    "microwave",
+                    "program",
+                    "temperature",
+                    "appliance",
+                )
+                matched_terms = [token for token in appliance_terms if token in choice_lc and token in corpus]
+                if matched_terms:
+                    score += 2.2 + 0.3 * len(matched_terms)
+                    reasons.append(f"appliance_context={','.join(matched_terms[:3])}")
+            if water_context:
+                water_terms = ("water", "rinse", "sink", "tap", "saucepan", "pan")
+                matched_terms = [token for token in water_terms if token in choice_lc and token in corpus]
+                if matched_terms:
+                    score += 1.4 + 0.2 * len(matched_terms)
+                    reasons.append(f"water_context={','.join(matched_terms[:3])}")
+            scores.append(
+                {
+                    "index": index,
+                    "score": score,
+                    "reason": "fallback action_intent structured; " + ", ".join(reasons[:6]) if reasons else "fallback action_intent structured",
+                }
+            )
+            if score > best_score:
+                best_score = score
+                best_index = index
+        confidence = 0.24 if best_score <= 0 else min(0.78, 0.28 + 0.08 * best_score)
         return {
             "scores": scores,
             "best_index": best_index,
@@ -8888,6 +9018,7 @@ class AgentToolbox:
             "extract_frame_at_time": ["time_s"],
             "extract_frames_for_range": ["start_time", "end_time", "stride_s"],
             "sample_sparse_frames": ["start_time", "end_time"],
+            "extract_video_clip": ["start_time", "end_time", "max_duration_s"],
             "retrieve_cached_artifacts": ["start_time", "end_time"],
             "extract_region_with_context": ["expand_ratio"],
             "run_ocr_on_region": ["expand_ratio"],

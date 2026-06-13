@@ -456,7 +456,7 @@ def action_intent_followup_decision(
             return True, "transport_vs_cleanup_future_use_needed", 8.0, "future_use"
     if has_pairwise_outcome_conflict and candidate_count <= 2:
         return True, "outcome_dependent_pairwise_needed", 4.0, "pairwise"
-    if has_hidden_access_exact_use_conflict:
+    if has_hidden_access_exact_use_conflict and candidate_count <= 2:
         return True, "hidden_access_exact_use_pairwise_needed", 4.0, "pairwise"
     if has_future_use_conflict and (non_pairwise_future_categories or not has_pairwise_outcome_conflict):
         return True, "future_use_evidence_needed", 8.0, "future_use"
