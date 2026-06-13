@@ -5047,6 +5047,47 @@ Phase 0 审计后的最小真实缺口已经明确：
 - [x] 本轮合并回归：
   - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
   - 结果：`722 passed, 453 deselected`
+- [x] 本轮继续切掉 `graph_agent._action_intent_unresolved_semantic_gaps(...)` 里一条 still answer-conditioned 的 `exact workspace -> choice-specific target gate` 旧链：
+  - 旧行为：
+    - 只有当 `best choice` 本身先被
+      - `choice_has_specific_space_target(choice_lc)`
+      判成 `shelf/worktop/countertop` 这类 exact workspace 目标时，
+      才会进入 `exact_workspace_without_exact_use`
+  - 问题：
+    - unresolved gap 的来源仍然是 choice family，
+      不是 observation text 是否真的呈现了具体 workspace target 但仍缺 exact next use
+    - 同一段 workspace-opening observation，
+      只因为 choice 文本不同，
+      gap 判定就会变化
+- [x] 新行为：
+  - `exact_workspace_without_exact_use` 改成只看 observation-side workspace reference：
+    - `specific workspace target reference`
+    - broad-workspace-only contradiction
+    - 是否已存在 exact downstream chain
+  - 现在只允许由当前 observation text 中的以下信息触发：
+    - `more open on the worktop`
+    - `changes the nearby shelf layout`
+    - `clears some room on the counter`
+    - 同时带有
+      - `no exact next target is shown`
+      - `broader than the specific next use`
+      - `only a broad workspace effect`
+- [x] 本轮新增 observation-side helper：
+  - `specific workspace target reference`
+    - 例如：
+      - `area becomes more open on the worktop`
+      - `opens some room on the shelf`
+      - `counter room`
+      - `clears some room`
+- [x] 本轮新增负约束测试：
+  - `test_graph_agent_action_intent_unresolved_semantic_gap_exact_workspace_ignores_choice_categories`
+  - `test_graph_agent_action_intent_unresolved_semantic_gap_exact_workspace_clears_after_exact_use_chain`
+- [x] 本轮定向回归：
+  - `pytest -q tests/test_graph_agent.py -k 'unresolved_semantic_gap_exact_workspace or unresolved_rerank_withholds_exact_workspace_shelf_claim_when_only_layout_opens_up or unresolved_rerank_withholds_exact_workspace_worktop_claim_when_only_counter_opens_up or unresolved_rerank_prefers_hidden_target_retrieval_over_generic_make_space or unresolved_rerank_prefers_hidden_target_access_over_generic_search_view or unresolved_rerank_prefers_reveal_then_take_hidden_item_over_generic_access'`
+  - 结果：`7 passed, 1170 deselected`
+- [x] 本轮合并回归：
+  - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+  - 结果：`724 passed, 453 deselected`
 
 ---
 

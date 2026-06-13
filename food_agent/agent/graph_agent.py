@@ -2001,6 +2001,49 @@ class GraphAgent:
             )
         )
 
+    def _action_intent_support_has_specific_workspace_target_reference(self, text: str) -> bool:
+        text_lc = str(text or "").lower()
+        has_space_language = any(
+            token in text_lc
+            for token in (
+                "make space",
+                "make some space",
+                "create space",
+                "free up space",
+                "clear space",
+                "make room",
+                "create room",
+                "free up room",
+                "clear room",
+                "workspace",
+                "more open",
+                "opens some room",
+                "open counter space",
+                "counter room",
+                "area becomes more open",
+                "clears some room",
+                "腾空间",
+                "腾出空间",
+                "让开",
+            )
+        )
+        if not has_space_language:
+            return False
+        return any(
+            token in text_lc
+            for token in (
+                "shelf",
+                "worktop",
+                "countertop",
+                "counter",
+                "hob",
+                "rack",
+                "台面",
+                "架子",
+                "灶台",
+            )
+        )
+
     def _action_intent_support_has_explicit_cooking_transfer_or_disposal_outcome(self, text: str) -> bool:
         text_lc = str(text or "").lower()
         if self._action_intent_text_has_negative_evidence(text_lc):
@@ -3144,7 +3187,7 @@ class GraphAgent:
             gaps.append("hand_drying_purpose_unresolved")
         if self._action_intent_support_has_unresolved_relocation_purpose(context_lc):
             gaps.append("relocation_purpose_unresolved")
-        if self._action_intent_choice_has_specific_space_target(choice_lc):
+        if self._action_intent_support_has_specific_workspace_target_reference(context_lc):
             if any(
                 term in context_lc
                 for term in (
