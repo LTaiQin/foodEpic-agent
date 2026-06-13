@@ -1420,37 +1420,17 @@ class GraphAgent:
         action_object = self._action_intent_question_object(question)
         if not any(token in action_object for token in ("pot", "pan", "saucepan", "frying pan", "bowl")):
             return False
-        index = self._coerce_choice_index(raw_result.get("best_index"), state.choices)
-        if index is None:
-            return False
-        choice_lc = str(state.choices[index]).lower()
-        if not any(
-            token in choice_lc
-            for token in (
-                "check the boiling water",
-                "check the contents",
-                "check the consistency",
-                "see if it is cooked",
-                "see whether the pasta is done",
-                "boiling",
-                "contents",
-                "consistency",
-                "done",
-                "熟了",
-                "沸腾",
-                "内容物",
-            )
+        text = self._action_intent_observation_support_text(raw_result).lower()
+        if self._action_intent_support_has_explicit_brief_cooking_inspection_evidence(
+            text=text,
+            action_object=action_object,
         ):
             return False
-        text = self._action_intent_observation_support_text(raw_result).lower()
         if self._action_intent_text_has_negative_evidence(text):
             return True
-        return not self._action_intent_choice_is_brief_cooking_inspection_over_disposal(
-            choice=choice_lc,
-            support=text,
-            contradiction="",
+        return self._action_intent_support_has_cooking_inspection_purpose_uncertainty(
+            text=text,
             action_object=action_object,
-            global_context="",
         )
 
     def _action_intent_resolution_should_withhold_broad_generic_claim_without_direct_evidence(
@@ -2020,6 +2000,257 @@ class GraphAgent:
                 "没有残渣掉落结果",
             )
         )
+
+    def _action_intent_support_has_explicit_cooking_transfer_or_disposal_outcome(self, text: str) -> bool:
+        text_lc = str(text or "").lower()
+        if self._action_intent_text_has_negative_evidence(text_lc):
+            return False
+        return any(
+            token in text_lc
+            for token in (
+                "tilted to pour",
+                "tilted toward the sink",
+                "brought to the sink",
+                "emptied into the sink",
+                "poured into the sink",
+                "poured out",
+                "carried over the plate",
+                "carried over the bowl",
+                "served onto the plate",
+                "served into the bowl",
+                "moved to a serving destination",
+                "taken to the serving destination",
+                "倒向水槽",
+                "倒进水槽",
+                "倒出",
+                "端到盘子上",
+                "端到碗里",
+                "盛到盘子里",
+                "盛到碗里",
+            )
+        )
+
+    def _action_intent_support_has_explicit_brief_cooking_inspection_evidence(
+        self,
+        *,
+        text: str,
+        action_object: str,
+    ) -> bool:
+        text_lc = str(text or "").lower()
+        if not action_object or not self._signal_mentions_action_object(text_lc, action_object):
+            return False
+        has_cooking_context = any(
+            token in text_lc
+            for token in (
+                "hob",
+                "stove",
+                "burner",
+                "boiling",
+                "water",
+                "steam",
+                "contents",
+                "liquid",
+                "simmer",
+                "cooking",
+                "pan",
+                "pot",
+                "saucepan",
+                "bowl",
+                "灶",
+                "锅",
+                "碗",
+                "沸腾",
+                "水",
+                "蒸汽",
+                "内容物",
+            )
+        )
+        if not has_cooking_context:
+            return False
+        if any(
+            token in text_lc
+            for token in (
+                "scale",
+                "weigh",
+                "weighing",
+                "butter",
+                "kitchen scale",
+                "秤",
+                "称量",
+                "黄油",
+            )
+        ):
+            return False
+        if any(
+            token in text_lc
+            for token in (
+                "not yet visible whether",
+                "still does not show a settled direct purpose",
+                "not yet a decisive inspection-only cue",
+                "inspection chain is not yet fully shown",
+                "inspection chain is not yet fully decisive",
+                "brief inspection chain is not yet fully shown",
+                "still unclear whether",
+                "could still be emptied",
+                "could later be used to serve",
+                "may only be checked briefly",
+                "may only be briefly lifted",
+                "还看不出是否只是短暂检查",
+                "检查链条还未完全显示",
+                "当前用途仍未完全确定",
+            )
+        ):
+            return False
+        inspection_action_markers = (
+            "check the boiling water",
+            "check the contents",
+            "check the consistency",
+            "see whether the pasta is done",
+            "see if it is cooked",
+            "look inside",
+            "looks inside",
+            "check inside",
+            "brief inspection",
+            "quick inspection",
+            "quick check",
+            "briefly lifted beside the hob",
+            "briefly raised near the hob",
+            "briefly lifted near the hob",
+            "raised near the hob",
+            "before cooking continues",
+            "before continuing cooking",
+            "检查是否沸腾",
+            "查看内容物",
+            "看一下里面",
+            "快速检查",
+            "短暂拿起",
+        )
+        non_disposal_markers = (
+            "not tilted",
+            "no tilt",
+            "no pouring",
+            "not poured",
+            "not moved to a plate",
+            "not moved to a bowl",
+            "not moved to a serving destination",
+            "not carried away from the stove",
+            "not taken away from the hob",
+            "not toward the sink",
+            "not carried to the sink",
+            "rather than emptying",
+            "rather than serving",
+            "rather than pouring out",
+            "stays near the hob",
+            "kept near the hob",
+            "remains above the hob",
+            "没有倾倒",
+            "没有倒出",
+            "没有拿去盘子里",
+            "没有拿去碗里",
+            "没有拿去水槽",
+            "放回灶台附近",
+            "仍在灶台附近",
+        )
+        has_inspection_action = any(token in text_lc for token in inspection_action_markers)
+        has_non_disposal_constraint = any(token in text_lc for token in non_disposal_markers)
+        return has_inspection_action and (
+            has_non_disposal_constraint
+            or not self._action_intent_support_has_explicit_cooking_transfer_or_disposal_outcome(text_lc)
+        )
+
+    def _action_intent_support_has_cooking_inspection_purpose_uncertainty(
+        self,
+        *,
+        text: str,
+        action_object: str,
+    ) -> bool:
+        text_lc = str(text or "").lower()
+        if self._action_intent_support_has_explicit_brief_cooking_inspection_evidence(
+            text=text_lc,
+            action_object=action_object,
+        ):
+            return False
+        if not action_object or not self._signal_mentions_action_object(text_lc, action_object):
+            return False
+        has_cooking_context = any(
+            token in text_lc
+            for token in (
+                "hob",
+                "stove",
+                "burner",
+                "boiling",
+                "water",
+                "steam",
+                "contents",
+                "liquid",
+                "simmer",
+                "cooking",
+                "pan",
+                "pot",
+                "saucepan",
+                "bowl",
+                "灶",
+                "锅",
+                "碗",
+                "沸腾",
+                "水",
+                "蒸汽",
+                "内容物",
+            )
+        )
+        if not has_cooking_context:
+            return False
+        if any(
+            token in text_lc
+            for token in (
+                "scale",
+                "weigh",
+                "weighing",
+                "butter",
+                "kitchen scale",
+                "秤",
+                "称量",
+                "黄油",
+            )
+        ):
+            return False
+        if self._action_intent_support_has_explicit_cooking_transfer_or_disposal_outcome(text_lc):
+            return False
+        has_uncertainty = any(
+            token in text_lc
+            for token in (
+                "not yet visible whether",
+                "still does not show a settled direct purpose",
+                "brief inspection chain is not yet fully shown",
+                "inspection-only cue is not yet visible",
+                "only inspected briefly",
+                "only raised to inspect",
+                "could still be emptied",
+                "could later be used to serve",
+                "not yet visible whether it is tilted toward the sink or only inspected briefly",
+                "not yet visible whether it is carried over a plate or only raised to look inside",
+                "inspection chain is not yet fully decisive",
+                "direct purpose is still unresolved",
+                "还看不出是否只是短暂检查",
+                "检查链条还未完全显示",
+                "当前用途仍未完全确定",
+            )
+        )
+        has_generic_cooking_hold_state = any(
+            token in text_lc
+            for token in (
+                "lifted while it still seems to contain hot water",
+                "pot is in hand and liquid is likely still inside",
+                "remains in hand near the hob",
+                "briefly raised near the hob while cooking continues",
+                "just briefly raised and kept over the stove",
+                "stays near the hob for only a brief inspection",
+                "锅里似乎还有热水",
+                "手里拿着锅且里面可能还有液体",
+                "仍在灶台附近",
+            )
+        )
+        return has_uncertainty or has_generic_cooking_hold_state
 
     def _action_intent_support_has_exclusive_immediate_micro_outcome_evidence(self, text: str) -> bool:
         text_lc = str(text or "").lower()

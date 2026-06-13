@@ -4990,6 +4990,63 @@ Phase 0 审计后的最小真实缺口已经明确：
 - [x] 本轮合并回归：
   - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
   - 结果：`720 passed, 453 deselected`
+- [x] 本轮继续收掉 `graph_agent.py` finalizer 里一条 still answer-conditioned 的 `weak cooking inspection -> choice text gate` 旧链：
+  - 旧行为：
+    - 只有当 `best choice` 本身带有
+      - `check the boiling water`
+      - `check the contents`
+      - `check the consistency`
+      - `done / cooked`
+      这类 inspection 语义时，
+      才会进入 `weak cooking inspection` withheld
+  - 问题：
+    - finalizer 的 withheld 决策仍来自 choice family，
+      不是 observation text 是否已经闭合 brief inspection chain
+    - 同一段锅/锅内内容 observation，
+      只因为 choice 文本不同，
+      finalizer gate 就会变化
+- [x] 新行为：
+  - `weak cooking inspection` withheld 改成只看 observation-side cooking inspection state：
+    - `explicit brief cooking inspection evidence`
+    - `cooking inspection purpose uncertainty`
+    - `explicit cooking transfer / disposal outcome`
+  - 现在只允许由当前 observation text 中的以下信息决定：
+    - 是否存在
+      - brief lift near hob
+      - look/check-inside chain
+      - cooking continues / stays near hob
+      - non-disposal / non-serving constraints
+    - 是否仍带有
+      - `not yet visible whether`
+      - `inspection chain is not yet fully shown`
+      - `still does not show a settled direct purpose`
+    - 是否已经出现
+      - sink-pour / serving-destination 的 direct outcome
+- [x] 本轮新增 observation-side helper：
+  - `explicit cooking transfer or disposal outcome`
+    - 例如：
+      - `tilted toward the sink`
+      - `poured into the sink`
+      - `carried over the plate`
+      - `served into the bowl`
+  - `explicit brief cooking inspection evidence`
+    - 例如：
+      - `briefly lifted beside the hob to check the boiling water before cooking continues`
+      - `stays near the hob and is not tilted toward the sink`
+  - `cooking inspection purpose uncertainty`
+    - 例如：
+      - `still does not show a settled direct purpose`
+      - `not yet visible whether it is carried over a plate or only raised to look inside`
+      - `inspection chain is not yet fully decisive`
+- [x] 本轮新增负约束测试：
+  - `test_graph_agent_action_intent_finalizer_weak_cooking_inspection_ignores_choice_categories`
+  - `test_graph_agent_action_intent_finalizer_weak_cooking_inspection_clears_after_explicit_observation_chain`
+- [x] 本轮定向回归：
+  - `pytest -q tests/test_graph_agent.py -k 'weak_boiling_check_without_brief_inspection_chain or weak_cooking_inspection_ignores_choice_categories or weak_cooking_inspection_clears_after_explicit_observation_chain or finalizer_does_not_override_weak_boiling_check_to_explicit_sink_emptying or finalizer_marks_plate_needed_observation_for_weak_contents_check_close_call or unresolved_rerank_prefers_brief_boiling_check_over_empty_or_serve or unresolved_rerank_prefers_cooking_doneness_check_over_emptying or unresolved_rerank_prefers_contents_check_over_serving_bowl_transfer or unresolved_rerank_prefers_consistency_check_over_pouring_out'`
+  - 结果：`9 passed, 1166 deselected`
+- [x] 本轮合并回归：
+  - `pytest -q tests/test_graph_agent.py -k 'action_intent'`
+  - 结果：`722 passed, 453 deselected`
 
 ---
 
