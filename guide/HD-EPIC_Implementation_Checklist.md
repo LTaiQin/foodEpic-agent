@@ -525,12 +525,12 @@
 
 ### D7.1 双模块协作测试
 
-- [ ] Audio + Video: 音频事件时间戳 → 提取对应帧 → 视觉分析，整条链路跑通
-- [ ] Gaze + Video: 注视点 → 裁剪区域 → 物体检测，返回注视目标
-- [ ] Hands + Grounding DINO: 手部掩码 + 检测框 → 接触物体识别
-- [ ] SLAM + Digital Twin: 位姿 + 3D 模型 → 空间关系查询
+- [x] Audio + Video: 音频事件时间戳 → 提取对应帧 → 视觉分析，整条链路跑通
+- [x] Gaze + Video: 注视点 → 裁剪区域 → 物体检测，返回注视目标
+- [x] Hands + Grounding DINO: 手部掩码 + 检测框 → 接触物体识别
+- [x] SLAM + Digital Twin: 位姿 + 3D 模型 → 空间关系查询
 - [ ] Visual + Motion: 检测框 → SAM 分割 → 视频追踪 → 运动轨迹
-- [ ] 每个测试验证: 输入→中间输出→最终输出全链路数据格式一致
+- [x] 每个测试验证: 输入→中间输出→最终输出全链路数据格式一致
 
 ### D7.2 三模块协作测试
 
@@ -541,8 +541,8 @@
 
 ### D7.3 Agent 完整闭环测试
 
-- [ ] 简单问题: "画面中有什么食材？" → Agent 调用 VisualAnalyzer → 返回答案
-- [ ] 空间问题: "水槽在哪里？" → Agent 调用 SpatialReasoner → 返回答案
+- [x] 简单问题: "画面中有什么食材？" → Agent 调用 VisualAnalyzer → 返回答案
+- [x] 空间问题: "水槽在哪里？" → Agent 调用 SpatialReasoner → 返回答案
 - [ ] 动作问题: "正在做什么？" → Agent 调用 HandInteractor + AudioAnalyzer → 融合 → 返回答案
 - [ ] 多步推理: "这道菜有多少卡路里？" → Agent 调用 VisualAnalyzer → NutritionEstimator → NutritionKB → 返回答案
 - [ ] 自适应扩展: Agent 初始证据不足 → 自动调用更多模块 → 最终生成答案
@@ -552,21 +552,21 @@
 
 - [ ] 模块超时: 某个模块 API 超时时 Agent 能跳过并用其他模块的证据
 - [ ] 证据冲突: 两个模块给出矛盾证据时 Agent 能识别并降低置信度
-- [ ] 数据缺失: 请求的时间戳没有数据时 Agent 能调整时间范围重试
+- [x] 数据缺失: 请求的时间戳没有数据时 Agent 能调整时间范围重试
 - [ ] 达到上限: 迭代次数达上限时 Agent 用已有证据生成最佳答案
 - [ ] 每个测试验证: Agent 不崩溃，返回合理答案或明确的"无法确定"
 
 ### D7.5 Prompt 优化
 
-- [ ] 定义 SCENE_GRAPH_PROMPT
+- [x] 定义 SCENE_GRAPH_PROMPT
 - [ ] 定义 ACTION_RECOGNITION_PROMPT
 - [ ] 定义 INGREDIENT_IDENTIFICATION_PROMPT
 - [ ] 定义 PORTION_ESTIMATION_PROMPT
 - [ ] 定义 SPATIAL_DESCRIPTION_PROMPT
-- [ ] 定义 ANSWER_GENERATION_PROMPT
-- [ ] 定义 QUESTION_CLASSIFICATION_PROMPT
-- [ ] 定义 SYSTEM_PROMPT (Agent 决策)
-- [ ] 定义 build_decision_prompt (Agent 状态→LLM 输入)
+- [x] 定义 ANSWER_GENERATION_PROMPT
+- [x] 定义 QUESTION_CLASSIFICATION_PROMPT
+- [x] 定义 SYSTEM_PROMPT (Agent 决策)
+- [x] 定义 build_decision_prompt (Agent 状态→LLM 输入)
 - [ ] **验证**: 每个 prompt 模板用 .format() 填充参数后无 KeyError，返回非空字符串
 
 ---
