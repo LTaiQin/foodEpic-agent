@@ -136,28 +136,28 @@
 
 - [x] 克隆 facebookresearch/sam2 仓库
 - [x] 从源码安装 (pip install -e .)
-- [ ] 下载 checkpoint (sam2.1_hiera_large.pt)
+- [x] 下载 checkpoint (sam2.1_hiera_large.pt)
 - [x] 验证 SAM 2.1 可正常导入和推理
 
 ## C3. Grounding DINO
 
 - [x] 克隆 IDEA-Research/GroundingDINO 仓库
 - [x] 从源码安装 (pip install -e .)
-- [ ] 下载权重 (groundingdino_swint_ogc.pth)
+- [x] 下载权重 (groundingdino_swint_ogc.pth)
 - [x] 验证 Grounding DINO 可正常导入和推理
 
 ## C4. CLAP
 
 - [x] pip install laion-clap
-- [ ] 下载 checkpoint (music_speech_audioset_epoch_15_esc_89.98.pt)
+- [x] 下载 checkpoint (music_speech_audioset_epoch_15_esc_89.98.pt)
 - [x] 验证 CLAP 可正常导入和推理
 
 ## C5. BEATs
 
 - [x] 从 microsoft/unilm 仓库获取 BEATs 代码
 - [x] 安装 BEATs 依赖
-- [ ] 下载权重 (BEATs_iter3_plus_AS2M_finetuned_on_AS2M_cpt2.pt)
-- [ ] 验证 BEATs 可正常加载 checkpoint
+- [x] 下载权重 (BEATs_iter3_plus_AS2M_finetuned_on_AS2M_cpt2.pt)
+- [x] 验证 BEATs 可正常加载 checkpoint
 
 ## C6. 其他依赖
 
@@ -189,58 +189,58 @@
 - [x] 创建 config/hardware.yaml (硬件配置: A800 80GB, 所有模型常驻)
 - [x] 创建所有 __init__.py
 - [x] 创建 README.md
-- [ ] **验证**: 项目可被 Python 正确识别为包 (import 无报错)
+- [x] **验证**: 项目可被 Python 正确识别为包 (import 无报错)
 
 ### D1.2 AudioLoader
 
-- [ ] 实现 AudioLoader.__init__(hdf5_dir)
-- [ ] 实现 AudioLoader.load_segment(start_time, end_time)
-- [ ] 实现 AudioLoader.get_all_events()
-- [ ] 实现 AudioLoader.get_events_in_range(start_time, end_time)
-- [ ] **验证**: 对真实 HDF5 文件调用 get_all_events()，返回非空列表，每条事件包含 type/start_time/end_time 字段
+- [x] 实现 AudioLoader.__init__(hdf5_dir)
+- [x] 实现 AudioLoader.load_segment(start_time, end_time)
+- [x] 实现 AudioLoader.get_all_events()
+- [x] 实现 AudioLoader.get_events_in_range(start_time, end_time)
+- [x] **验证**: 对真实 HDF5 文件调用 get_all_events()，返回非空列表，每条事件包含 type/start_time/end_time 字段
 
 ### D1.3 VideoLoader
 
-- [ ] 实现 VideoLoader.__init__(video_dir)
-- [ ] 实现 VideoLoader.get_frame(timestamp)
-- [ ] 实现 VideoLoader.get_frames(start_time, end_time, fps)
-- [ ] 实现 VideoLoader.get_video_info(video_path)
-- [ ] **验证**: 对真实 mp4 调用 get_frame()，返回 numpy 数组 shape 为 (H, W, 3)，dtype 为 uint8
+- [x] 实现 VideoLoader.__init__(video_dir)
+- [x] 实现 VideoLoader.get_frame(timestamp)
+- [x] 实现 VideoLoader.get_frames(start_time, end_time, fps)
+- [x] 实现 VideoLoader.get_video_info(video_path)
+- [x] **验证**: 对真实 mp4 调用 get_frame()，返回 numpy 数组 shape 为 (H, W, 3)，dtype 为 uint8
 
 ### D1.4 GazeLoader
 
-- [ ] 实现 GazeLoader.__init__(gaze_dir)
-- [ ] 实现 GazeLoader.get_gaze_at_time(timestamp)
-- [ ] 实现 GazeLoader.get_gaze_trajectory(start_time, end_time)
-- [ ] 实现 GazeLoader.get_fixations(min_duration)
-- [ ] **验证**: 对真实数据调用 get_gaze_at_time()，返回包含 x, y 坐标的对象
+- [x] 实现 GazeLoader.__init__(gaze_dir)
+- [x] 实现 GazeLoader.get_gaze_at_time(timestamp)
+- [x] 实现 GazeLoader.get_gaze_trajectory(start_time, end_time)
+- [x] 实现 GazeLoader.get_fixations(min_duration)
+- [x] **验证**: 对真实数据调用 get_gaze_at_time()，返回包含 x, y 坐标的对象
 
 ### D1.5 SLAMLoader
 
-- [ ] 实现 SLAMLoader.__init__(slam_dir)
-- [ ] 实现 SLAMLoader.get_pose(timestamp)
-- [ ] 实现 SLAMLoader.get_trajectory(start_time, end_time)
-- [ ] 实现 SLAMLoader.get_position(timestamp)
-- [ ] 实现 SLAMLoader.get_facing_direction(timestamp)
-- [ ] **验证**: 对真实数据调用 get_pose()，返回包含 position (3D) 和 rotation 的对象
+- [x] 实现 SLAMLoader.__init__(slam_dir)
+- [x] 实现 SLAMLoader.get_pose(timestamp)
+- [x] 实现 SLAMLoader.get_trajectory(start_time, end_time)
+- [x] 实现 SLAMLoader.get_position(timestamp)
+- [x] 实现 SLAMLoader.get_facing_direction(timestamp)
+- [x] **验证**: 对真实数据调用 get_pose()，返回包含 position (3D) 和 rotation 的对象
 
 ### D1.6 DigitalTwinLoader
 
-- [ ] 实现 DigitalTwinLoader.__init__(dt_dir)
-- [ ] 实现 DigitalTwinLoader.load_mesh(mesh_path)
-- [ ] 实现 DigitalTwinLoader.get_fixtures()
-- [ ] 实现 DigitalTwinLoader.get_fixture_position(fixture_id)
-- [ ] 实现 DigitalTwinLoader.get_fixture_by_type(fixture_type)
-- [ ] 实现 DigitalTwinLoader.get_spatial_relation(fixture_a, fixture_b)
-- [ ] **验证**: 对真实数据调用 get_fixtures()，返回非空列表，每个 fixture 包含 id/type/position 字段
+- [x] 实现 DigitalTwinLoader.__init__(dt_dir)
+- [x] 实现 DigitalTwinLoader.load_mesh(mesh_path)
+- [x] 实现 DigitalTwinLoader.get_fixtures()
+- [x] 实现 DigitalTwinLoader.get_fixture_position(fixture_id)
+- [x] 实现 DigitalTwinLoader.get_fixture_by_type(fixture_type)
+- [x] 实现 DigitalTwinLoader.get_spatial_relation(fixture_a, fixture_b)
+- [x] **验证**: 对真实数据调用 get_fixtures()，返回非空列表，每个 fixture 包含 id/type/position 字段
 
 ### D1.7 HandsLoader
 
-- [ ] 实现 HandsLoader.__init__(hands_dir)
-- [ ] 实现 HandsLoader.get_mask(timestamp)
-- [ ] 实现 HandsLoader.get_masks_in_range(start_time, end_time)
-- [ ] 实现 HandsLoader.has_hand_contact(mask)
-- [ ] **验证**: 对真实数据调用 get_mask()，返回 numpy 数组，unique 值包含 0 和至少一个非零值
+- [x] 实现 HandsLoader.__init__(hands_dir)
+- [x] 实现 HandsLoader.get_mask(timestamp)
+- [x] 实现 HandsLoader.get_masks_in_range(start_time, end_time)
+- [x] 实现 HandsLoader.has_hand_contact(mask)
+- [x] **验证**: 对真实数据调用 get_mask()，返回 numpy 数组，unique 值包含 0 和至少一个非零值
 
 ### D1.8 VRSLoader (可选)
 
@@ -252,9 +252,9 @@
 
 ### D1.9 工具函数
 
-- [ ] 实现 utils/time_align.py: align_timestamps, find_nearest_timestamp
-- [ ] 实现 utils/cache.py: CacheManager (get/put/invalidate)
-- [ ] **验证**: 调用 find_nearest_timestamp(1.5, [1.0, 2.0, 3.0]) 返回 1.0；CacheManager put 后 get 返回相同值
+- [x] 实现 utils/time_align.py: align_timestamps, find_nearest_timestamp
+- [x] 实现 utils/cache.py: CacheManager (get/put/invalidate)
+- [x] **验证**: 调用 find_nearest_timestamp(1.5, [1.0, 2.0, 3.0]) 返回 1.0；CacheManager put 后 get 返回相同值
 
 ---
 
@@ -262,72 +262,72 @@
 
 ### D2.1 AudioAnalyzer
 
-- [ ] 实现 AudioAnalyzer.__init__(beats_model_path, clap_model_path)
-- [ ] 实现 AudioAnalyzer.classify_audio(audio_data) — BEATs 分类
-- [ ] 实现 AudioAnalyzer.zero_shot_classify(audio_data, text_labels) — CLAP zero-shot
-- [ ] 实现 AudioAnalyzer.get_audio_events(start_time, end_time)
-- [ ] 实现 AudioAnalyzer.cluster_events(events) — 事件聚类为活动段
-- [ ] 输出格式符合统一 Evidence JSON Schema
-- [ ] **验证**: 从真实 HDF5 取一段音频，调用 classify_audio()，返回包含 type 和 confidence 的字典；调用 get_audio_events() 返回 Evidence 对象列表
+- [x] 实现 AudioAnalyzer.__init__(beats_model_path, clap_model_path)
+- [x] 实现 AudioAnalyzer.classify_audio(audio_data) — BEATs 分类
+- [x] 实现 AudioAnalyzer.zero_shot_classify(audio_data, text_labels) — CLAP zero-shot
+- [x] 实现 AudioAnalyzer.get_audio_events(start_time, end_time)
+- [x] 实现 AudioAnalyzer.cluster_events(events) — 事件聚类为活动段
+- [x] 输出格式符合统一 Evidence JSON Schema
+- [x] **验证**: 从真实 HDF5 取一段音频，调用 classify_audio()，返回包含 type 和 confidence 的字典；调用 get_audio_events() 返回 Evidence 对象列表
 
 ### D2.2 VisualAnalyzer
 
-- [ ] 实现 VisualAnalyzer.__init__(grounding_dino_model, sam2_model)
-- [ ] 实现 VisualAnalyzer.detect_objects(frame, text_prompt) — Grounding DINO 检测
-- [ ] 实现 VisualAnalyzer.segment_objects(frame, boxes) — SAM 2.1 分割
-- [ ] 实现 VisualAnalyzer.generate_scene_graph(frame, mimo_api) — 场景图生成
-- [ ] 实现 VisualAnalyzer.analyze_action(frames_sequence, mimo_api) — 动作识别
-- [ ] 输出格式符合统一 Evidence JSON Schema
+- [x] 实现 VisualAnalyzer.__init__(grounding_dino_model, sam2_model)
+- [x] 实现 VisualAnalyzer.detect_objects(frame, text_prompt) — Grounding DINO 检测
+- [x] 实现 VisualAnalyzer.segment_objects(frame, boxes) — SAM 2.1 分割
+- [x] 实现 VisualAnalyzer.generate_scene_graph(frame, mimo_api) — 场景图生成
+- [x] 实现 VisualAnalyzer.analyze_action(frames_sequence, mimo_api) — 动作识别
+- [x] 输出格式符合统一 Evidence JSON Schema
 - [ ] **验证**: 对真实视频帧调用 detect_objects("knife. plate.")，返回检测框列表非空；segment_objects 返回掩码 shape 与帧一致
 
 ### D2.3 GazeTracker
 
-- [ ] 实现 GazeTracker.__init__(gaze_loader, grounding_dino_model)
-- [ ] 实现 GazeTracker.identify_gaze_target(frame, gaze_point)
-- [ ] 实现 GazeTracker.generate_attention_heatmap(gaze_points, frame_size)
-- [ ] 实现 GazeTracker.get_fixation_targets(start_time, end_time)
-- [ ] 输出格式符合统一 Evidence JSON Schema
+- [x] 实现 GazeTracker.__init__(gaze_loader, grounding_dino_model)
+- [x] 实现 GazeTracker.identify_gaze_target(frame, gaze_point)
+- [x] 实现 GazeTracker.generate_attention_heatmap(gaze_points, frame_size)
+- [x] 实现 GazeTracker.get_fixation_targets(start_time, end_time)
+- [x] 输出格式符合统一 Evidence JSON Schema
 - [ ] **验证**: 对真实帧+注视点调用 identify_gaze_target()，返回包含 target_name 和 confidence 的字典
 
 ### D2.4 SpatialReasoner
 
-- [ ] 实现 SpatialReasoner.__init__(digital_twin_loader, slam_loader)
-- [ ] 实现 SpatialReasoner.compute_distance(pos_a, pos_b)
-- [ ] 实现 SpatialReasoner.compute_spatial_relation(pos_a, pos_b, facing)
-- [ ] 实现 SpatialReasoner.get_nearest_fixture(position)
-- [ ] 实现 SpatialReasoner.get_wearer_pose_at_time(timestamp)
-- [ ] 实现 SpatialReasoner.check_visibility(source, target)
-- [ ] 实现 SpatialReasoner.describe_spatial_layout(mimo_api)
-- [ ] 输出格式符合统一 Evidence JSON Schema
-- [ ] **验证**: compute_distance([0,0,0], [3,4,0]) 返回 5.0；compute_spatial_relation 返回包含 relation 和 distance 的字典
+- [x] 实现 SpatialReasoner.__init__(digital_twin_loader, slam_loader)
+- [x] 实现 SpatialReasoner.compute_distance(pos_a, pos_b)
+- [x] 实现 SpatialReasoner.compute_spatial_relation(pos_a, pos_b, facing)
+- [x] 实现 SpatialReasoner.get_nearest_fixture(position)
+- [x] 实现 SpatialReasoner.get_wearer_pose_at_time(timestamp)
+- [x] 实现 SpatialReasoner.check_visibility(source, target)
+- [x] 实现 SpatialReasoner.describe_spatial_layout(mimo_api)
+- [x] 输出格式符合统一 Evidence JSON Schema
+- [x] **验证**: compute_distance([0,0,0], [3,4,0]) 返回 5.0；compute_spatial_relation 返回包含 relation 和 distance 的字典
 
 ### D2.5 HandInteractor
 
-- [ ] 实现 HandInteractor.__init__(hands_loader, grounding_dino_model, sam2_model)
-- [ ] 实现 HandInteractor.detect_contact_object(frame, hand_mask)
-- [ ] 实现 HandInteractor.infer_action(contact_object, hand_motion, audio_hint)
-- [ ] 实现 HandInteractor.get_hand_interactions(start_time, end_time)
-- [ ] 输出格式符合统一 Evidence JSON Schema
+- [x] 实现 HandInteractor.__init__(hands_loader, grounding_dino_model, sam2_model)
+- [x] 实现 HandInteractor.detect_contact_object(frame, hand_mask)
+- [x] 实现 HandInteractor.infer_action(contact_object, hand_motion, audio_hint)
+- [x] 实现 HandInteractor.get_hand_interactions(start_time, end_time)
+- [x] 输出格式符合统一 Evidence JSON Schema
 - [ ] **验证**: 对真实帧+掩码调用 detect_contact_object()，返回包含 object_name 和 interaction_type 的字典
 
 ### D2.6 NutritionEstimator
 
-- [ ] 实现 NutritionEstimator.__init__(nutrition_db_path)
-- [ ] 实现 NutritionEstimator.estimate_ingredients(frame, mimo_api)
-- [ ] 实现 NutritionEstimator.estimate_portions(ingredients, frame, mimo_api)
-- [ ] 实现 NutritionEstimator.lookup_nutrition(ingredient_name)
-- [ ] 实现 NutritionEstimator.calculate_total(ingredients)
-- [ ] 输出格式符合统一 Evidence JSON Schema
+- [x] 实现 NutritionEstimator.__init__(nutrition_db_path)
+- [x] 实现 NutritionEstimator.estimate_ingredients(frame, mimo_api)
+- [x] 实现 NutritionEstimator.estimate_portions(ingredients, frame, mimo_api)
+- [x] 实现 NutritionEstimator.lookup_nutrition(ingredient_name)
+- [x] 实现 NutritionEstimator.calculate_total(ingredients)
+- [x] 输出格式符合统一 Evidence JSON Schema
 - [ ] **验证**: lookup_nutrition("tomato") 返回包含 calories_per_100g 的字典；calculate_total 返回包含 total 的字典
 
 ### D2.7 MotionTracker
 
-- [ ] 实现 MotionTracker.__init__(sam2_video_predictor, slam_loader)
-- [ ] 实现 MotionTracker.track_object(video_path, first_frame_mask)
-- [ ] 实现 MotionTracker.extract_trajectory(masks_sequence)
-- [ ] 实现 MotionTracker.lift_to_3d(trajectory_2d, slam_poses)
-- [ ] 实现 MotionTracker.classify_motion(trajectory_3d)
-- [ ] 输出格式符合统一 Evidence JSON Schema
+- [x] 实现 MotionTracker.__init__(sam2_video_predictor, slam_loader)
+- [x] 实现 MotionTracker.track_object(video_path, first_frame_mask)
+- [x] 实现 MotionTracker.extract_trajectory(masks_sequence)
+- [x] 实现 MotionTracker.lift_to_3d(trajectory_2d, slam_poses)
+- [x] 实现 MotionTracker.classify_motion(trajectory_3d)
+- [x] 输出格式符合统一 Evidence JSON Schema
 - [ ] **验证**: extract_trajectory 返回坐标列表非空；lift_to_3d 返回 3D 坐标列表
 
 ---
@@ -339,28 +339,28 @@
 ### D3.1 统一证据格式
 
 - [x] 定义 Evidence dataclass (evidence_id, source_module, evidence_type, time_range, content, confidence)
-- [ ] 实现 Evidence.to_json() 和 Evidence.from_json()
+- [x] 实现 Evidence.to_json() 和 Evidence.from_json()
 - [x] 所有感知模块的输出必须返回 Evidence 或 Evidence 列表
 - [x] **验证**: 创建 Evidence → to_json → from_json，所有字段一致
 
 ### D3.2 模块注册表
 
 - [x] 实现 ModuleRegistry: 统一管理所有感知模块的实例
-- [ ] 实现 ModuleRegistry.get(module_name) — 按名称获取模块实例
+- [x] 实现 ModuleRegistry.get(module_name) — 按名称获取模块实例
 - [x] 实现 ModuleRegistry.list_modules() — 列出所有已注册模块
 - [x] 每个感知模块初始化时自动注册到 Registry
-- [ ] **验证**: Registry 包含 7 个感知模块，get("AudioAnalyzer") 返回正确实例
+- [x] **验证**: Registry 包含 7 个感知模块，get("AudioAnalyzer") 返回正确实例
 
 ### D3.3 模块间数据流接线
 
-- [ ] AudioAnalyzer → VisualAnalyzer: 音频事件的时间戳驱动 VideoLoader 提取对应帧
-- [ ] GazeTracker → VisualAnalyzer: 注视点坐标驱动裁剪区域，辅助物体检测
-- [ ] GazeTracker → VideoLoader: 注视 fixation 时间戳作为关键帧选择依据
-- [ ] HandsLoader + Grounding DINO → HandInteractor: 手部掩码 + 检测结果 → 接触物体
-- [ ] SLAMLoader + DigitalTwinLoader → SpatialReasoner: 位姿 + 3D 模型 → 空间关系
-- [ ] VisualAnalyzer (检测框) → SAM 2.1 (分割) → MotionTracker (追踪): 检测-分割-追踪管线
-- [ ] HandInteractor (接触物体) + AudioAnalyzer (声音) → 动作推断融合
-- [ ] **验证**: 给定一个时间戳 t，AudioAnalyzer 输出事件 → 自动提取 t 对应的视频帧 → VisualAnalyzer 分析该帧，整个链路跑通
+- [x] AudioAnalyzer → VisualAnalyzer: 音频事件的时间戳驱动 VideoLoader 提取对应帧
+- [x] GazeTracker → VisualAnalyzer: 注视点坐标驱动裁剪区域，辅助物体检测
+- [x] GazeTracker → VideoLoader: 注视 fixation 时间戳作为关键帧选择依据
+- [x] HandsLoader + Grounding DINO → HandInteractor: 手部掩码 + 检测结果 → 接触物体
+- [x] SLAMLoader + DigitalTwinLoader → SpatialReasoner: 位姿 + 3D 模型 → 空间关系
+- [x] VisualAnalyzer (检测框) → SAM 2.1 (分割) → MotionTracker (追踪): 检测-分割-追踪管线
+- [x] HandInteractor (接触物体) + AudioAnalyzer (声音) → 动作推断融合
+- [x] **验证**: 给定一个时间戳 t，AudioAnalyzer 输出事件 → 自动提取 t 对应的视频帧 → VisualAnalyzer 分析该帧，整个链路跑通
 
 ### D3.4 时间对齐中枢
 
@@ -368,7 +368,7 @@
 - [x] TimeAlignHub.register_timebase(module_name, timebase) — 注册模块时间基准
 - [x] TimeAlignHub.convert(timestamp, from_module, to_module) — 跨模块时间转换
 - [x] 所有模块间传递时间戳时必须通过 TimeAlignHub 转换
-- [ ] **验证**: Audio 模块的时间戳转换为 Video 模块的时间戳后，提取的帧与音频事件对应
+- [x] **验证**: Audio 模块的时间戳转换为 Video 模块的时间戳后，提取的帧与音频事件对应
 
 ---
 
@@ -376,35 +376,35 @@
 
 ### D4.1 问题路由器
 
-- [ ] 实现 Router.classify_question(question) — 问题分类
-- [ ] 实现 Router.get_route(category) — 获取路由策略
-- [ ] 实现 Router.route(question) — 完整路由流程
-- [ ] 加载 config/routing_table.yaml
+- [x] 实现 Router.classify_question(question) — 问题分类
+- [x] 实现 Router.get_route(category) — 获取路由策略
+- [x] 实现 Router.route(question) — 完整路由流程
+- [x] 加载 config/routing_table.yaml
 - [x] **验证**: classify_question("水槽在哪里") 返回 "3d_perception"；route() 返回包含 primary 和 secondary 模块列表的字典
 
 ### D4.2 证据聚合引擎
 
-- [ ] 实现 Aggregator.add_evidence(evidence)
-- [ ] 实现 Aggregator.align_evidence() — 多模态时间对齐 (调用 TimeAlignHub)
-- [ ] 实现 Aggregator.detect_conflicts() — 冲突检测
-- [ ] 实现 Aggregator.fuse_evidence() — 加权融合
-- [ ] 实现 Aggregator.get_confidence() — 总体置信度
-- [ ] 实现 Aggregator.get_summary() — 证据摘要 (供 LLM 使用)
+- [x] 实现 Aggregator.add_evidence(evidence)
+- [x] 实现 Aggregator.align_evidence() — 多模态时间对齐 (调用 TimeAlignHub)
+- [x] 实现 Aggregator.detect_conflicts() — 冲突检测
+- [x] 实现 Aggregator.fuse_evidence() — 加权融合
+- [x] 实现 Aggregator.get_confidence() — 总体置信度
+- [x] 实现 Aggregator.get_summary() — 证据摘要 (供 LLM 使用)
 - [x] **验证**: 添加 3 条同时间戳证据 → fuse_evidence → get_confidence 返回 0-1 之间的浮点数
 
 ### D4.3 自适应深度控制
 
-- [ ] 实现 Judge.evaluate_sufficiency(evidence_list, question)
-- [ ] 实现 Judge.suggest_expansion(evidence_list, question, route) — 返回下一步应调用的模块+参数
-- [ ] 实现 Judge.should_stop(evidence_list, iteration)
+- [x] 实现 Judge.evaluate_sufficiency(evidence_list, question)
+- [x] 实现 Judge.suggest_expansion(evidence_list, question, route) — 返回下一步应调用的模块+参数
+- [x] 实现 Judge.should_stop(evidence_list, iteration)
 - [x] 实现置信度阈值逻辑 (>0.8 直接回答, 0.5-0.8 扩展, <0.5 全面搜索)
 - [x] **验证**: 输入高置信度证据 → evaluate_sufficiency 返回 "sufficient"；输入低置信度 → 返回 "insufficient" + 扩展建议 (包含具体模块名和时间范围)
 
 ### D4.4 答案生成器
 
-- [ ] 实现 Generator.generate_answer(question, evidence_list, mimo_api)
-- [ ] 实现 Generator.format_evidence_prompt(evidence_list) — 多模态证据格式化为 prompt
-- [ ] 实现 Generator.parse_answer(response)
+- [x] 实现 Generator.generate_answer(question, evidence_list, mimo_api)
+- [x] 实现 Generator.format_evidence_prompt(evidence_list) — 多模态证据格式化为 prompt
+- [x] 实现 Generator.parse_answer(response)
 - [x] **验证**: format_evidence_prompt 返回非空字符串；parse_answer 对 mock 响应返回结构化答案
 
 ### D4.5 工具定义与注册
@@ -440,12 +440,12 @@
   - [x] Step 1: 初始化 AgentState
   - [x] Step 2: Router 分类问题，获取初始路由
   - [x] Step 3: 进入循环 (最大 N 轮)
-    - [ ] 3a. 将当前 state (问题+已有证据+路由) 发送给 MiMo2.5
-    - [ ] 3b. MiMo2.5 返回下一步要调用的 tool + 参数 (自主决策)
-    - [ ] 3c. 执行 tool 调用，获得新 Evidence
-    - [ ] 3d. 将新 Evidence 加入 AgentState
-    - [ ] 3e. Judge 评估是否足够回答
-    - [ ] 3f. 如果足够 → 退出循环；如果不够 → 继续下一轮
+    - [x] 3a. 将当前 state (问题+已有证据+路由) 发送给 MiMo2.5
+    - [x] 3b. MiMo2.5 返回下一步要调用的 tool + 参数 (自主决策)
+    - [x] 3c. 执行 tool 调用，获得新 Evidence
+    - [x] 3d. 将新 Evidence 加入 AgentState
+    - [x] 3e. Judge 评估是否足够回答
+    - [x] 3f. 如果足够 → 退出循环；如果不够 → 继续下一轮
   - [x] Step 4: Generator 生成最终答案
   - [x] Step 5: 返回 answer + evidence_chain + reasoning_trace
 - [ ] **验证**: 对一个简单问题运行 agent.run()，观察 tool_call_history 至少包含 2 次不同 tool 调用，最终返回非空 answer
@@ -454,8 +454,8 @@
 
 - [x] 实现 SYSTEM_PROMPT: 告诉 LLM 它是一个厨房视频理解 Agent，可用的工具列表，决策规则
 - [x] 实现 build_decision_prompt(state) — 将 AgentState 格式化为 LLM 输入
-  - [ ] 包含: 问题、已收集证据摘要、已调用工具列表、剩余可选工具
-  - [ ] 不包含: 原始数据 (太大)，只包含摘要
+  - [x] 包含: 问题、已收集证据摘要、已调用工具列表、剩余可选工具
+  - [x] 不包含: 原始数据 (太大)，只包含摘要
 - [x] 实现 parse_tool_call(llm_response) — 从 LLM 响应中提取 tool_name + parameters
 - [x] **验证**: build_decision_prompt 返回的字符串长度 < 4000 tokens；parse_tool_call 对 mock 响应正确提取
 
@@ -473,7 +473,7 @@
   - [x] 每轮记录: 轮次、LLM 决策、tool 调用、返回结果、置信度变化
   - [x] 最终记录: 总轮次、总 tool 调用数、最终置信度、答案
 - [x] ReasoningTrace.to_json() — 输出为可读的 JSON 日志
-- [ ] ReasoningTrace可视化 — 生成决策树/流程图 (可选)
+- [x] ReasoningTrace可视化 — 生成决策树/流程图 (可选)
 - [x] **验证**: 运行一次 agent.run()，ReasoningTrace.to_json() 输出包含所有轮次的完整记录
 
 ---
@@ -482,40 +482,40 @@
 
 ### D6.1 RecipeKB
 
-- [ ] 实现 RecipeKB.__init__(recipe_data_path)
-- [ ] 实现 RecipeKB.get_recipe(name)
-- [ ] 实现 RecipeKB.get_step(recipe_name, step_number)
-- [ ] 实现 RecipeKB.search_recipes(ingredients)
-- [ ] 实现 RecipeKB.match_current_step(observations)
-- [ ] 注册为 Agent 可调用的 tool (query_recipe)
-- [ ] **验证**: get_recipe 返回包含 steps 列表的字典；通过 Agent tool-calling 调用 query_recipe 返回正确结果
+- [x] 实现 RecipeKB.__init__(recipe_data_path)
+- [x] 实现 RecipeKB.get_recipe(name)
+- [x] 实现 RecipeKB.get_step(recipe_name, step_number)
+- [x] 实现 RecipeKB.search_recipes(ingredients)
+- [x] 实现 RecipeKB.match_current_step(observations)
+- [x] 注册为 Agent 可调用的 tool (query_recipe)
+- [x] **验证**: get_recipe 返回包含 steps 列表的字典；通过 Agent tool-calling 调用 query_recipe 返回正确结果
 
 ### D6.2 NutritionKB
 
-- [ ] 实现 NutritionKB.__init__(nutrition_data_path)
-- [ ] 实现 NutritionKB.lookup(ingredient)
-- [ ] 实现 NutritionKB.calculate_dish(ingredients)
-- [ ] 注册为 Agent 可调用的 tool (query_nutrition)
+- [x] 实现 NutritionKB.__init__(nutrition_data_path)
+- [x] 实现 NutritionKB.lookup(ingredient)
+- [x] 实现 NutritionKB.calculate_dish(ingredients)
+- [x] 注册为 Agent 可调用的 tool (query_nutrition)
 - [ ] **验证**: lookup("tomato") 返回包含 calories 的字典；通过 Agent tool-calling 调用返回正确结果
 
 ### D6.3 SceneGraphKB
 
-- [ ] 实现 SceneGraphKB.__init__()
-- [ ] 实现 SceneGraphKB.add_frame_graph(timestamp, graph)
-- [ ] 实现 SceneGraphKB.query_objects(object_type)
-- [ ] 实现 SceneGraphKB.query_relations(subject, predicate)
-- [ ] 实现 SceneGraphKB.get_scene_summary(start_time, end_time)
-- [ ] 注册为 Agent 可调用的 tool (query_scene_graph)
-- [ ] **验证**: add_frame_graph 后 query_objects 返回包含该物体的时间戳列表
+- [x] 实现 SceneGraphKB.__init__()
+- [x] 实现 SceneGraphKB.add_frame_graph(timestamp, graph)
+- [x] 实现 SceneGraphKB.query_objects(object_type)
+- [x] 实现 SceneGraphKB.query_relations(subject, predicate)
+- [x] 实现 SceneGraphKB.get_scene_summary(start_time, end_time)
+- [x] 注册为 Agent 可调用的 tool (query_scene_graph)
+- [x] **验证**: add_frame_graph 后 query_objects 返回包含该物体的时间戳列表
 
 ### D6.4 CommonSenseKB
 
-- [ ] 实现 CommonSenseKB.__init__(conceptnet_url)
-- [ ] 实现 CommonSenseKB.query_relation(concept_a, relation, concept_b)
-- [ ] 实现 CommonSenseKB.get_related_concepts(concept, relation)
-- [ ] 实现 CommonSenseKB.infer_cooking_purpose(ingredients)
-- [ ] 注册为 Agent 可调用的 tool (query_commonsense)
-- [ ] **验证**: get_related_concepts("cooking", "UsedFor") 返回非空列表
+- [x] 实现 CommonSenseKB.__init__(conceptnet_url)
+- [x] 实现 CommonSenseKB.query_relation(concept_a, relation, concept_b)
+- [x] 实现 CommonSenseKB.get_related_concepts(concept, relation)
+- [x] 实现 CommonSenseKB.infer_cooking_purpose(ingredients)
+- [x] 注册为 Agent 可调用的 tool (query_commonsense)
+- [x] **验证**: get_related_concepts("cooking", "UsedFor") 返回非空列表
 
 ---
 
@@ -537,16 +537,16 @@
 - [ ] Audio + Hands + Visual: 声音事件 + 手部动作 + 视觉 → 高置信度动作识别
 - [ ] Gaze + Visual + 3D: 注视 + 视觉 + 空间 → 完整场景理解
 - [ ] Hands + Audio + Recipe: 手部动作 + 声音 + 菜谱 → 当前步骤匹配
-- [ ] 每个测试验证: 多模态证据融合后置信度高于单模态
+- [x] 每个测试验证: 多模态证据融合后置信度高于单模态
 
 ### D7.3 Agent 完整闭环测试
 
 - [x] 简单问题: "画面中有什么食材？" → Agent 调用 VisualAnalyzer → 返回答案
 - [x] 空间问题: "水槽在哪里？" → Agent 调用 SpatialReasoner → 返回答案
-- [ ] 动作问题: "正在做什么？" → Agent 调用 HandInteractor + AudioAnalyzer → 融合 → 返回答案
-- [ ] 多步推理: "这道菜有多少卡路里？" → Agent 调用 VisualAnalyzer → NutritionEstimator → NutritionKB → 返回答案
+- [x] 动作问题: "正在做什么？" → Agent 调用 HandInteractor + AudioAnalyzer → 融合 → 返回答案
+- [x] 多步推理: "这道菜有多少卡路里？" → Agent 调用 VisualAnalyzer → NutritionEstimator → NutritionKB → 返回答案
 - [ ] 自适应扩展: Agent 初始证据不足 → 自动调用更多模块 → 最终生成答案
-- [ ] 每个测试验证: ReasoningTrace 显示 Agent 自主决策过程，tool_call_history 记录完整
+- [x] 每个测试验证: ReasoningTrace 显示 Agent 自主决策过程，tool_call_history 记录完整
 
 ### D7.4 Agent 容错测试
 
@@ -554,20 +554,20 @@
 - [ ] 证据冲突: 两个模块给出矛盾证据时 Agent 能识别并降低置信度
 - [x] 数据缺失: 请求的时间戳没有数据时 Agent 能调整时间范围重试
 - [ ] 达到上限: 迭代次数达上限时 Agent 用已有证据生成最佳答案
-- [ ] 每个测试验证: Agent 不崩溃，返回合理答案或明确的"无法确定"
+- [x] 每个测试验证: Agent 不崩溃，返回合理答案或明确的"无法确定"
 
 ### D7.5 Prompt 优化
 
 - [x] 定义 SCENE_GRAPH_PROMPT
-- [ ] 定义 ACTION_RECOGNITION_PROMPT
-- [ ] 定义 INGREDIENT_IDENTIFICATION_PROMPT
-- [ ] 定义 PORTION_ESTIMATION_PROMPT
-- [ ] 定义 SPATIAL_DESCRIPTION_PROMPT
+- [x] 定义 ACTION_RECOGNITION_PROMPT
+- [x] 定义 INGREDIENT_IDENTIFICATION_PROMPT
+- [x] 定义 PORTION_ESTIMATION_PROMPT
+- [x] 定义 SPATIAL_DESCRIPTION_PROMPT
 - [x] 定义 ANSWER_GENERATION_PROMPT
 - [x] 定义 QUESTION_CLASSIFICATION_PROMPT
 - [x] 定义 SYSTEM_PROMPT (Agent 决策)
 - [x] 定义 build_decision_prompt (Agent 状态→LLM 输入)
-- [ ] **验证**: 每个 prompt 模板用 .format() 填充参数后无 KeyError，返回非空字符串
+- [x] **验证**: 每个 prompt 模板用 .format() 填充参数后无 KeyError，返回非空字符串
 
 ---
 
@@ -575,8 +575,8 @@
 
 ### D8.1 API 客户端
 
-- [ ] 实现 api_client.call_mimo_vision(image, prompt)
-- [ ] 实现 api_client.call_mimo_text(prompt)
+- [x] 实现 api_client.call_mimo_vision(image, prompt)
+- [x] 实现 api_client.call_mimo_text(prompt)
 - [x] 实现重试策略 (指数退避, 最大 3 次)
 - [x] 实现错误处理 (超时/限流/无效响应)
 - [x] 实现请求缓存
@@ -584,10 +584,10 @@
 
 ### D8.2 Benchmark 加载
 
-- [ ] 实现 BenchmarkLoader.__init__(benchmark_path)
-- [ ] 实现 BenchmarkLoader.get_questions(category)
-- [ ] 实现 BenchmarkLoader.get_question_detail(question_id)
-- [ ] 实现 BenchmarkLoader.get_categories()
+- [x] 实现 BenchmarkLoader.__init__(benchmark_path)
+- [x] 实现 BenchmarkLoader.get_questions(category)
+- [x] 实现 BenchmarkLoader.get_question_detail(question_id)
+- [x] 实现 BenchmarkLoader.get_categories()
 - [x] **验证**: get_categories() 返回 7 个类别；get_questions() 返回 26K 条非空列表
 
 ### D8.3 评估指标
@@ -605,7 +605,7 @@
 - [x] 支持按类别分别评估
 - [x] 输出 JSON + 可读文本两种格式的评估报告
 - [x] 输出 ReasoningTrace 日志 (用于分析 Agent 决策行为)
-- [ ] **验证**: 对 10 条问题运行评估脚本，输出包含总体准确率、各类别准确率、平均 tool 调用数
+- [x] **验证**: 对 10 条问题运行评估脚本，输出包含总体准确率、各类别准确率、平均 tool 调用数
 
 ### D8.5 消融实验
 
@@ -615,7 +615,7 @@
 - [ ] **消融 4: 迭代轮次** — 最大 1/3/5/10 轮，证明多轮自主探索有效
 - [ ] **消融 5: 工具集大小** — 只给 3 个工具 vs 7 个 vs 全部，证明工具越多 Agent 越强
 - [ ] 输出各实验准确率对比表 + 平均 tool 调用数对比
-- [ ] **Agent 决策质量分析** — 统计 ReasoningTrace 中 Agent 的决策模式（高频调用的工具、常见路径、失败模式）
+- [x] **Agent 决策质量分析** — 统计 ReasoningTrace 中 Agent 的决策模式（高频调用的工具、常见路径、失败模式）
 - [ ] **验证**: 每个消融实验产出一行数据，最终表格包含 7 行；决策分析产出统计图表
 
 ---
@@ -646,7 +646,7 @@
 - [ ] 主实验: Agent 在 HD-EPIC VQA 26K 上的总体准确率和各类别准确率
 - [ ] 与 SOTA 对比: SceneNet+KnowledgeNet (44.21%), EgoAdapt, EgoReasoner, Gemini Pro (38.5%)
 - [ ] 消融实验数据: 5 组消融全部跑完并整理成表
-- [ ] Agent 决策分析: ReasoningTrace 统计（工具调用频率、决策路径聚类、失败案例分析）
+- [x] Agent 决策分析: ReasoningTrace 统计（工具调用频率、决策路径聚类、失败案例分析）
 - [ ] 效率分析: 平均 tool 调用数、平均延迟、API 成本
 
 ### D9.2 论文撰写
@@ -659,7 +659,7 @@
 
 ### D9.3 可视化素材
 
-- [ ] Agent 决策流程图: 一个典型案例的 ReasoningTrace 可视化
+- [x] Agent 决策流程图: 一个典型案例的 ReasoningTrace 可视化
 - [ ] 工具调用热力图: 不同类别问题的工具调用模式
 - [ ] 多模态证据融合示例: 展示 Agent 如何综合多路证据
 - [ ] 失败案例分析: Agent 决策错误的 case study

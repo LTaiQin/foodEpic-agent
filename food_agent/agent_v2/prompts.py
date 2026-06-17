@@ -61,3 +61,34 @@ Available tools:
 Choose the most useful tool to call next. Respond with JSON:
 {{"tool": "<tool_name>", "parameters": {{...}}, "reason": "<why this tool>"}}
 """
+
+# --- Perception module prompts ---
+
+SCENE_GRAPH_PROMPT = """Analyze this kitchen scene image and return a JSON object:
+- "objects": list of objects with name and attributes
+- "relations": list of relations with subject, predicate, object
+- "scene_description": one sentence summary
+{context}"""
+
+ACTION_RECOGNITION_PROMPT = """Analyze this sequence of kitchen video frames.
+What action is being performed? Return JSON with action (short label), confidence (0-1), description (one sentence).
+Context: {context}"""
+
+INGREDIENT_IDENTIFICATION_PROMPT = """Identify all food ingredients visible in this kitchen scene image.
+For each ingredient, estimate its approximate weight in grams.
+Return a JSON array of objects with 'name' (string) and 'amount_g' (number).
+Only include food ingredients, not utensils or containers."""
+
+PORTION_ESTIMATION_PROMPT = """I identified these ingredients: {ingredients}.
+Looking at this kitchen scene, please refine the weight estimates in grams.
+Consider hand sizes and common portion sizes.
+Return a JSON array with 'name' and 'amount_g' for each."""
+
+SPATIAL_DESCRIPTION_PROMPT = """Describe the spatial layout of this kitchen scene.
+Return JSON with fixtures (list), wearer_position (string), spatial_relations (list).
+Context: {context}"""
+
+QUESTION_CLASSIFICATION_PROMPT = """Classify this question into exactly one category.
+Categories: {categories}
+Question: {question}
+Reply with only the category name."""
