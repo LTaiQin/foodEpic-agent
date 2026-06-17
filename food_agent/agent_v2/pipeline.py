@@ -82,7 +82,8 @@ class Pipeline:
                 print(f"Grounding DINO not available: {e}")
 
         # Initialize perception modules with models
-        self.audio_analyzer = AudioAnalyzer(clap_model_path=CLAP_WEIGHTS if load_models else None)
+        # Note: CLAP is loaded lazily (on first use) to speed up init
+        self.audio_analyzer = AudioAnalyzer(clap_model_path=None)
         self.visual_analyzer = VisualAnalyzer(
             mimo_client=self.mimo_client,
             sam3_segmentor=self.sam3,
@@ -208,9 +209,30 @@ class Pipeline:
         """Query gaze data in a time range."""
         ctx = self._get_context(kwargs)
         try:
-            return self.gaze_tracker.get_fixation_targets(
+            evidence_list = self.gaze_tracker.get_fixation_targets(
                 ctx["participant_id"], ctx["video_id"], start_time, end_time,
             )
+            # Enrich with gaze direction description
+            for ev in evidence_list:
+                yaw = ev.content.get("mean_yaw", 0)
+                pitch = ev.content.get("mean_pitch", 0)
+                # Describe gaze direction
+                if abs(yaw) < 0.3:
+                    h_dir = "straight ahead"
+                elif yaw < -0.3:
+                    h_dir = "to the left"
+                else:
+                    h_dir = "to the right"
+                if abs(pitch) < 0.2:
+                    v_dir = "at eye level"
+                elif pitch < -0.2:
+                    v_dir = "downward"
+                else:
+                    v_dir = "upward"
+                ev.content["gaze_direction"] = f"Looking {h_dir}, {v_dir}"
+                ev.content["yaw_degrees"] = round(float(yaw) * 57.3, 1)
+                ev.content["pitch_degrees"] = round(float(pitch) * 57.3, 1)
+            return evidence_list
         except Exception as e:
             return [Evidence(source_module="GazeTracker", evidence_type="gaze",
                            content={"error": str(e)}, confidence=0)]
@@ -219,9 +241,24 @@ class Pipeline:
         """Query 3D spatial information."""
         ctx = self._get_context(kwargs)
         try:
-            return self.spatial_reasoner.query_3d(
+            evidence = self.spatial_reasoner.query_3d(
                 ctx["participant_id"], ctx["video_id"], timestamp, query_type,
             )
+            # Enrich with clock direction for spatial queries
+            if query_type == "wearer_pose" and "position" in evidence.content:
+                pos = evidence.content.get("position", [0, 0, 0])
+                facing = evidence.content.get("facing", [0, 0, -1])
+                # Convert facing direction to clock position
+                import math
+                angle = math.degrees(math.atan2(facing[0], -facing[2]))
+                if angle < 0:
+                    angle += 360
+                clock = int(round(angle / 30))
+                if clock == 0:
+                    clock = 12
+                evidence.content["facing_clock"] = f"{clock} o'clock"
+                evidence.content["facing_angle_degrees"] = round(angle, 1)
+            return evidence
         except Exception as e:
             return Evidence(source_module="SpatialReasoner", evidence_type="spatial",
                           content={"error": str(e)}, confidence=0)
@@ -230,9 +267,23 @@ class Pipeline:
         """Query hand interactions for a frame."""
         ctx = self._get_context(kwargs)
         try:
-            return self.hand_interactor.get_hand_interactions(
+            evidence = self.hand_interactor.get_hand_interactions(
                 ctx["participant_id"], ctx["video_id"], frame_number,
             )
+            # Enrich with action inference
+            interactions = evidence.content.get("interactions", [])
+            for inter in interactions:
+                if inter.get("has_contact"):
+                    mask_area = inter.get("mask_area", 0)
+                    if mask_area > 100000:
+                        inter["likely_action"] = "rubbing or washing hands"
+                    elif mask_area > 50000:
+                        inter["likely_action"] = "holding or manipulating object"
+                    elif mask_area > 10000:
+                        inter["likely_action"] = "touching or grasping"
+                    else:
+                        inter["likely_action"] = "light contact"
+            return evidence
         except Exception as e:
             return Evidence(source_module="HandInteractor", evidence_type="hand",
                           content={"error": str(e)}, confidence=0)
