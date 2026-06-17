@@ -18,12 +18,24 @@ TOOL_SCHEMAS = {
         },
     },
     "query_video": {
-        "description": "Query video frames for visual analysis. Returns scene description and detected objects.",
+        "description": "Query video frames for visual analysis. Returns detected objects with masks and scene description.",
         "parameters": {
             "type": "object",
             "properties": {
                 "timestamp": {"type": "number", "description": "Timestamp in seconds"},
-                "text_prompt": {"type": "string", "description": "Objects to detect (period-separated)"},
+                "text_prompt": {"type": "string", "description": "What to detect (e.g. 'food ingredient', 'knife, plate')"},
+                "use_scene_graph": {"type": "boolean", "description": "Also generate scene graph via LLM"},
+            },
+            "required": ["timestamp"],
+        },
+    },
+    "segment_objects": {
+        "description": "Segment objects in a video frame using SAM3 open-vocabulary segmentation. Returns pixel-level masks.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "timestamp": {"type": "number", "description": "Timestamp in seconds"},
+                "text_prompt": {"type": "string", "description": "What to segment (e.g. 'food ingredient', 'kitchen object')"},
             },
             "required": ["timestamp"],
         },

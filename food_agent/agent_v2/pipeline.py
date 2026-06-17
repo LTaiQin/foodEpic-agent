@@ -24,6 +24,15 @@ from food_agent.knowledge import RecipeKB, NutritionKB, SceneGraphKB, CommonSens
 from food_agent.evaluation.api_client import MimoClient
 from .agent import MultimodalAgent
 
+# Model weight paths
+SAM3_WEIGHT_PATH = "/22liushoulong/sam-weight/"
+SAM2_CHECKPOINT = "/22liushoulong/agent/hd-epic/checkpoints/sam2_hiera_large.pt"
+SAM2_CONFIG = "configs/sam2.1/sam2.1_hiera_l.yaml"
+GDINO_CONFIG = "/22liushoulong/agent/hd-epic/third_party/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py"
+GDINO_WEIGHTS = "/22liushoulong/agent/hd-epic/weights/groundingdino_swint_ogc.pth"
+CLAP_WEIGHTS = "/22liushoulong/agent/hd-epic/weights/music_speech_audioset_epoch_15_esc_89.98.pt"
+BEATS_WEIGHTS = "/22liushoulong/agent/hd-epic/weights/BEATs_iter3_plus_AS2M_finetuned_on_AS2M_cpt2.pt"
+
 
 class Pipeline:
     """End-to-end pipeline that wires all modules together.
@@ -34,7 +43,7 @@ class Pipeline:
                                   video_id="P01-20240202-110250")
     """
 
-    def __init__(self, config_path: Optional[str] = None):
+    def __init__(self, config_path: Optional[str] = None, load_models: bool = True):
         from food_agent.config import ProjectConfig
         self.config = ProjectConfig.from_env()
 
@@ -50,12 +59,38 @@ class Pipeline:
         # Initialize LLM client
         self.mimo_client = MimoClient()
 
-        # Initialize perception modules
-        self.audio_analyzer = AudioAnalyzer()
-        self.visual_analyzer = VisualAnalyzer(mimo_client=self.mimo_client)
-        self.gaze_tracker = GazeTracker(self.gaze_loader)
+        # Initialize SAM3 (open-vocabulary segmentation)
+        self.sam3 = None
+        if load_models:
+            try:
+                from food_agent.perception.sam3_wrapper import SAM3Segmentor
+                self.sam3 = SAM3Segmentor(SAM3_WEIGHT_PATH)
+                print("SAM3 loaded")
+            except Exception as e:
+                print(f"SAM3 not available: {e}")
+
+        # Initialize Grounding DINO
+        self.gdino = None
+        if load_models:
+            try:
+                import sys
+                sys.path.insert(0, str(Path(GDINO_CONFIG).parent.parent.parent))
+                from groundingdino.util.inference import load_model
+                self.gdino = load_model(GDINO_CONFIG, GDINO_WEIGHTS)
+                print("Grounding DINO loaded")
+            except Exception as e:
+                print(f"Grounding DINO not available: {e}")
+
+        # Initialize perception modules with models
+        self.audio_analyzer = AudioAnalyzer(clap_model_path=CLAP_WEIGHTS if load_models else None)
+        self.visual_analyzer = VisualAnalyzer(
+            mimo_client=self.mimo_client,
+            sam3_segmentor=self.sam3,
+            grounding_dino_model=self.gdino,
+        )
+        self.gaze_tracker = GazeTracker(self.gaze_loader, self.gdino)
         self.spatial_reasoner = SpatialReasoner(self.dt_loader, self.slam_loader)
-        self.hand_interactor = HandInteractor(self.hands_loader)
+        self.hand_interactor = HandInteractor(self.hands_loader, self.gdino)
         self.nutrition_estimator = NutritionEstimator()
         self.motion_tracker = MotionTracker(slam_loader=self.slam_loader)
 
@@ -84,6 +119,7 @@ class Pipeline:
         # --- Perception tools ---
         registry.register("query_audio", self._tool_query_audio)
         registry.register("query_video", self._tool_query_video)
+        registry.register("segment_objects", self._tool_segment_objects)
         registry.register("query_gaze", self._tool_query_gaze)
         registry.register("query_3d", self._tool_query_3d)
         registry.register("query_hands", self._tool_query_hands)
@@ -124,15 +160,48 @@ class Pipeline:
             return [Evidence(source_module="AudioAnalyzer", evidence_type="audio",
                            content={"error": str(e)}, confidence=0)]
 
-    def _tool_query_video(self, timestamp: float = 10, text_prompt: str = "", **kwargs) -> Evidence:
-        """Query video frame for visual analysis."""
+    def _tool_query_video(self, timestamp: float = 10, text_prompt: str = "", use_scene_graph: bool = False, **kwargs) -> Evidence:
+        """Query video frame for visual analysis.
+
+        Uses SAM3 for object detection when available, falls back to MiMo2.5.
+        """
         ctx = self._get_context(kwargs)
         try:
             frame = self.video_loader.get_frame(ctx["video_id"], timestamp)
-            prompt = text_prompt or "knife. cutting board. tomato. pan. plate. pot. spoon. food. hand."
-            return self.visual_analyzer.analyze_frame(frame, timestamp, prompt)
+            prompt = text_prompt or "food ingredient kitchen object"
+            return self.visual_analyzer.analyze_frame(
+                frame, timestamp, prompt,
+                use_sam3=True, use_scene_graph=use_scene_graph,
+            )
         except Exception as e:
             return Evidence(source_module="VisualAnalyzer", evidence_type="visual",
+                          content={"error": str(e)}, confidence=0)
+
+    def _tool_segment_objects(self, timestamp: float = 10, text_prompt: str = "food ingredient", **kwargs) -> Evidence:
+        """Segment objects in a video frame using SAM3.
+
+        Returns pixel-level masks for detected objects.
+        """
+        ctx = self._get_context(kwargs)
+        try:
+            frame = self.video_loader.get_frame(ctx["video_id"], timestamp)
+            detections = self.visual_analyzer.detect_objects(frame, text_prompt, method="sam3")
+            return Evidence(
+                source_module="SAM3Segmentor",
+                evidence_type="visual",
+                time_range={"start": timestamp, "end": timestamp},
+                content={
+                    "objects": [
+                        {"label": d["label"], "score": d["score"], "bbox": d["bbox"], "area": d.get("area", 0)}
+                        for d in detections
+                    ],
+                    "count": len(detections),
+                    "prompt": text_prompt,
+                },
+                confidence=max((d.get("score", 0) for d in detections), default=0),
+            )
+        except Exception as e:
+            return Evidence(source_module="SAM3Segmentor", evidence_type="visual",
                           content={"error": str(e)}, confidence=0)
 
     def _tool_query_gaze(self, start_time: float = 0, end_time: float = 30, **kwargs) -> List[Evidence]:

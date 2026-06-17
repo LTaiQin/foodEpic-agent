@@ -49,13 +49,13 @@ ROUTE_TABLE = {
 
 # Keywords for rule-based classification
 CATEGORY_KEYWORDS = {
-    "recipe": ["recipe", "step", "cooking", "dish", "meal", "prepare", "cook", "which recipe", "what step"],
-    "ingredient": ["ingredient", "food", "vegetable", "fruit", "meat", "spice", "add", "put in", "what food"],
-    "nutrition": ["calorie", "nutrition", "protein", "carb", "fat", "healthy", "diet", "how many calories"],
-    "fine_grained_action": ["doing", "action", "activity", "performing", "stirring", "cutting", "chopping", "what is.*doing"],
-    "3d_perception": ["where", "location", "position", "sink", "stove", "counter", "fridge", "kitchen", "near", "next to"],
-    "object_motion": ["move", "motion", "track", "transfer", "pick up", "put down", "place", "which object"],
-    "gaze": ["looking", "watching", "gaze", "attention", "eye", "see", "look at", "stare"],
+    "recipe": ["recipe", "step", "cooking", "dish", "meal", "prepare", "cook", "which recipe", "what step", "which step"],
+    "ingredient": ["ingredient", "food item", "vegetable", "fruit", "meat", "spice", "what food", "what ingredient", "visible food", "identify"],
+    "nutrition": ["calorie", "nutrition", "protein", "carb", "fat", "healthy", "diet", "how many calories", "nutritional", "meal healthy"],
+    "fine_grained_action": ["doing", "action", "activity", "performing", "stirring", "cutting", "chopping", "what is.*doing", "what action", "or chopping"],
+    "3d_perception": ["where is", "location", "position", "sink", "stove", "counter", "fridge", "kitchen layout", "near", "next to", "spatial"],
+    "object_motion": ["move", "motion", "track", "transfer", "pick up", "put down", "place", "which object", "moved", "displaced", "where did.*go", "where did", "where.*go"],
+    "gaze": ["looking", "watching", "gaze", "attention", "eye", "see", "look at", "stare", "focus", "wearer.*looking", "person attention", "person.*attention"],
 }
 
 
