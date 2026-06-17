@@ -61,42 +61,42 @@
 
 ## B1. Audio-HDF5 探查
 
-- [ ] 确认文件数量和命名规则
-- [ ] 确认 HDF5 顶层 group 结构
-- [ ] 确认 dataset 字段名、dtype、shape
-- [ ] 确认时间戳单位 (秒/毫秒/帧号)
-- [ ] 确认音频采样率
+- [x] 确认文件数量和命名规则
+- [x] 确认 HDF5 顶层 group 结构
+- [x] 确认 dataset 字段名、dtype、shape
+- [x] 确认时间戳单位 (秒/毫秒/帧号)
+- [x] 确认音频采样率
 - [ ] 确认是否有事件标注 (类型、起止时间)
 - [ ] 输出数据结构摘要文档
 
 ## B2. Digital-Twin 探查
 
-- [ ] 确认目录结构 (按厨房/按物体)
-- [ ] 确认 3D 模型格式 (OBJ/PLY/GLTF)
+- [x] 确认目录结构 (按厨房/按物体)
+- [x] 确认 3D 模型格式 (OBJ/PLY/GLTF)
 - [ ] 确认是否有语义标注文件 (JSON/YAML/CSV)
-- [ ] 确认固定装置数量和类型
+- [x] 确认固定装置数量和类型
 - [ ] 确认 3D 坐标系和单位
 - [ ] 确认是否有材质/纹理文件
 - [ ] 输出数据结构摘要文档
 
 ## B3. SLAM-and-Gaze 探查
 
-- [ ] 确认目录结构 (SLAM 和 Gaze 分开还是合并)
-- [ ] 确认 SLAM 数据格式 (TUM/KITTI/自定义)
-- [ ] 确认 Gaze 数据格式 (CSV/JSON/二进制)
-- [ ] 确认时间戳格式 (Unix/相对时间/帧号)
-- [ ] 确认 SLAM 位姿格式 (四元数/旋转矩阵)
-- [ ] 确认 Gaze 坐标格式 (像素/归一化/3D)
+- [x] 确认目录结构 (SLAM 和 Gaze 分开还是合并)
+- [x] 确认 SLAM 数据格式 (TUM/KITTI/自定义)
+- [x] 确认 Gaze 数据格式 (CSV/JSON/二进制)
+- [x] 确认时间戳格式 (Unix/相对时间/帧号)
+- [x] 确认 SLAM 位姿格式 (四元数/旋转矩阵)
+- [x] 确认 Gaze 坐标格式 (像素/归一化/3D)
 - [ ] 确认数据粒度和视频对应关系
 - [ ] 输出数据结构摘要文档
 
 ## B4. Hands-Masks 探查
 
-- [ ] 确认掩码格式 (PNG/NPY/HDF5)
-- [ ] 确认掩码类型 (二值/多类别/实例)
-- [ ] 确认掩码分辨率
-- [ ] 确认文件命名规则和帧对应关系
-- [ ] 确认左右手是否有区分
+- [x] 确认掩码格式 (PNG/NPY/HDF5)
+- [x] 确认掩码类型 (二值/多类别/实例)
+- [x] 确认掩码分辨率
+- [x] 确认文件命名规则和帧对应关系
+- [x] 确认左右手是否有区分
 - [ ] 确认是否包含物体掩码
 - [ ] 确认是否有 3D 关节位置数据
 - [ ] 输出数据结构摘要文档
@@ -113,12 +113,12 @@
 
 ## B6. Videos (mp4) 探查
 
-- [ ] 确认视频文件数量
+- [x] 确认视频文件数量
 - [ ] 确认编码格式 (H.264/H.265/VP9)
-- [ ] 确认分辨率
-- [ ] 确认帧率
+- [x] 确认分辨率
+- [x] 确认帧率
 - [ ] 确认每个视频时长
-- [ ] 确认文件命名规则和标注对齐关系
+- [x] 确认文件命名规则和标注对齐关系
 - [ ] 确认总时长是否与论文一致 (41 小时)
 - [ ] 输出数据结构摘要文档
 
@@ -341,7 +341,7 @@
 - [x] 定义 Evidence dataclass (evidence_id, source_module, evidence_type, time_range, content, confidence)
 - [ ] 实现 Evidence.to_json() 和 Evidence.from_json()
 - [x] 所有感知模块的输出必须返回 Evidence 或 Evidence 列表
-- [ ] **验证**: 创建 Evidence → to_json → from_json，所有字段一致
+- [x] **验证**: 创建 Evidence → to_json → from_json，所有字段一致
 
 ### D3.2 模块注册表
 
@@ -380,7 +380,7 @@
 - [ ] 实现 Router.get_route(category) — 获取路由策略
 - [ ] 实现 Router.route(question) — 完整路由流程
 - [ ] 加载 config/routing_table.yaml
-- [ ] **验证**: classify_question("水槽在哪里") 返回 "3d_perception"；route() 返回包含 primary 和 secondary 模块列表的字典
+- [x] **验证**: classify_question("水槽在哪里") 返回 "3d_perception"；route() 返回包含 primary 和 secondary 模块列表的字典
 
 ### D4.2 证据聚合引擎
 
@@ -390,7 +390,7 @@
 - [ ] 实现 Aggregator.fuse_evidence() — 加权融合
 - [ ] 实现 Aggregator.get_confidence() — 总体置信度
 - [ ] 实现 Aggregator.get_summary() — 证据摘要 (供 LLM 使用)
-- [ ] **验证**: 添加 3 条同时间戳证据 → fuse_evidence → get_confidence 返回 0-1 之间的浮点数
+- [x] **验证**: 添加 3 条同时间戳证据 → fuse_evidence → get_confidence 返回 0-1 之间的浮点数
 
 ### D4.3 自适应深度控制
 
@@ -398,14 +398,14 @@
 - [ ] 实现 Judge.suggest_expansion(evidence_list, question, route) — 返回下一步应调用的模块+参数
 - [ ] 实现 Judge.should_stop(evidence_list, iteration)
 - [x] 实现置信度阈值逻辑 (>0.8 直接回答, 0.5-0.8 扩展, <0.5 全面搜索)
-- [ ] **验证**: 输入高置信度证据 → evaluate_sufficiency 返回 "sufficient"；输入低置信度 → 返回 "insufficient" + 扩展建议 (包含具体模块名和时间范围)
+- [x] **验证**: 输入高置信度证据 → evaluate_sufficiency 返回 "sufficient"；输入低置信度 → 返回 "insufficient" + 扩展建议 (包含具体模块名和时间范围)
 
 ### D4.4 答案生成器
 
 - [ ] 实现 Generator.generate_answer(question, evidence_list, mimo_api)
 - [ ] 实现 Generator.format_evidence_prompt(evidence_list) — 多模态证据格式化为 prompt
 - [ ] 实现 Generator.parse_answer(response)
-- [ ] **验证**: format_evidence_prompt 返回非空字符串；parse_answer 对 mock 响应返回结构化答案
+- [x] **验证**: format_evidence_prompt 返回非空字符串；parse_answer 对 mock 响应返回结构化答案
 
 ### D4.5 工具定义与注册
 
@@ -414,7 +414,7 @@
 - [x] 定义控制工具 JSON Schema (check_evidence, expand_search, synthesize_answer)
 - [x] 每个工具的实现函数与 Schema 绑定
 - [x] 实现 ToolRegistry: 管理所有工具的注册和调用
-- [ ] **验证**: ToolRegistry.list_tools() 返回所有工具；调用 query_audio(start=0, end=10) 返回 Evidence 列表
+- [x] **验证**: ToolRegistry.list_tools() 返回所有工具；调用 query_audio(start=0, end=10) 返回 Evidence 列表
 
 ---
 
@@ -432,7 +432,7 @@
   - [x] tool_call_history: 已调用的工具列表
   - [x] confidence_history: 每轮的置信度变化
 - [x] AgentState 的序列化/反序列化 (用于调试和日志)
-- [ ] **验证**: 创建 AgentState，添加 3 条 Evidence，迭代轮次自增，所有字段可正确访问
+- [x] **验证**: 创建 AgentState，添加 3 条 Evidence，迭代轮次自增，所有字段可正确访问
 
 ### D5.2 Agent Tool-Calling 循环
 
@@ -457,7 +457,7 @@
   - [ ] 包含: 问题、已收集证据摘要、已调用工具列表、剩余可选工具
   - [ ] 不包含: 原始数据 (太大)，只包含摘要
 - [x] 实现 parse_tool_call(llm_response) — 从 LLM 响应中提取 tool_name + parameters
-- [ ] **验证**: build_decision_prompt 返回的字符串长度 < 4000 tokens；parse_tool_call 对 mock 响应正确提取
+- [x] **验证**: build_decision_prompt 返回的字符串长度 < 4000 tokens；parse_tool_call 对 mock 响应正确提取
 
 ### D5.4 Agent 安全边界
 
@@ -465,7 +465,7 @@
 - [x] 实现单次问答最大 tool 调用次数限制 (默认 20)
 - [x] 实现重复调用检测 (同一 tool + 同一参数不重复调用)
 - [x] 实现超时保护 (单次问答总时间 < 120s)
-- [ ] **验证**: 设置 N=2 时，Agent 在 2 轮后强制退出并用已有证据生成答案
+- [x] **验证**: 设置 N=2 时，Agent 在 2 轮后强制退出并用已有证据生成答案
 
 ### D5.5 Agent 推理轨迹
 
@@ -474,7 +474,7 @@
   - [x] 最终记录: 总轮次、总 tool 调用数、最终置信度、答案
 - [x] ReasoningTrace.to_json() — 输出为可读的 JSON 日志
 - [ ] ReasoningTrace可视化 — 生成决策树/流程图 (可选)
-- [ ] **验证**: 运行一次 agent.run()，ReasoningTrace.to_json() 输出包含所有轮次的完整记录
+- [x] **验证**: 运行一次 agent.run()，ReasoningTrace.to_json() 输出包含所有轮次的完整记录
 
 ---
 
@@ -580,7 +580,7 @@
 - [x] 实现重试策略 (指数退避, 最大 3 次)
 - [x] 实现错误处理 (超时/限流/无效响应)
 - [x] 实现请求缓存
-- [ ] **验证**: call_mimo_text("回复 OK") 返回非空字符串；相同请求第二次走缓存
+- [x] **验证**: call_mimo_text("回复 OK") 返回非空字符串；相同请求第二次走缓存
 
 ### D8.2 Benchmark 加载
 
@@ -588,7 +588,7 @@
 - [ ] 实现 BenchmarkLoader.get_questions(category)
 - [ ] 实现 BenchmarkLoader.get_question_detail(question_id)
 - [ ] 实现 BenchmarkLoader.get_categories()
-- [ ] **验证**: get_categories() 返回 7 个类别；get_questions() 返回 26K 条非空列表
+- [x] **验证**: get_categories() 返回 7 个类别；get_questions() 返回 26K 条非空列表
 
 ### D8.3 评估指标
 
@@ -597,7 +597,7 @@
 - [x] 实现 average_confidence(predictions)
 - [x] 实现 average_tool_calls(predictions)
 - [x] 实现 average_latency(predictions)
-- [ ] **验证**: accuracy([1,1,0], [1,1,1]) 返回 2/3
+- [x] **验证**: accuracy([1,1,0], [1,1,1]) 返回 2/3
 
 ### D8.4 评估脚本
 
