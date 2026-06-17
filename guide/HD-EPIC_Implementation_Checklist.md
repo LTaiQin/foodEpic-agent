@@ -35,10 +35,10 @@
 
 ## A4. 模型权重
 
-- [ ] SAM 2.1 权重文件确认 (文件名 + 大小)
-- [ ] Grounding DINO Swin-T 权重下载 (groundingdino_swint_ogc.pth)
+- [x] SAM 2.1 权重文件确认 (文件名 + 大小)
+- [x] Grounding DINO Swin-T 权重下载 (groundingdino_swint_ogc.pth)
 - [ ] BEATs 权重下载 (BEATs_iter3_plus_AS2M_finetuned_on_AS2M_cpt2.pt)
-- [ ] CLAP 权重下载 (music_speech_audioset_epoch_15_esc_89.98.pt)
+- [x] CLAP 权重下载 (music_speech_audioset_epoch_15_esc_89.98.pt)
 - [ ] 所有权重文件完整性校验
 
 ## A5. API 配置
