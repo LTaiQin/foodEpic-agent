@@ -1,0 +1,40 @@
+# Core
+torch>=2.5.1
+torchvision>=0.20.1
+torchaudio>=2.5.1
+numpy>=1.24.0
+scipy>=1.10.0
+
+# SAM 2.1 (install from source: pip install -e .)
+# https://github.com/facebookresearch/sam2
+
+# Grounding DINO (install from source: pip install -e .)
+# https://github.com/IDEA-Research/GroundingDINO
+
+# Audio
+laion-clap>=1.1.0
+librosa>=0.10.0
+soundfile>=0.12.0
+
+# 3D
+open3d>=0.19.0
+trimesh>=4.0.0
+
+# Data
+h5py>=3.8.0
+opencv-python-headless>=4.8.0
+Pillow>=10.0.0
+pyarrow>=14.0.0
+pandas>=2.0.0
+
+# API
+openai>=1.0.0
+requests>=2.31.0
+
+# ML
+transformers>=4.40.0
+huggingface_hub>=0.20.0
+
+# Testing
+pytest>=7.0.0
+pycocotools>=2.0.0

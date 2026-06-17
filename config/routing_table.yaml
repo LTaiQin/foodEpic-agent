@@ -1,0 +1,43 @@
+# Question routing strategy
+# Maps question categories to primary/secondary perception modules
+
+routes:
+  recipe:
+    primary: [VisualAnalyzer, RecipeKB]
+    secondary: [AudioAnalyzer, HandInteractor]
+    description: Recipe identification, step matching
+
+  ingredient:
+    primary: [VisualAnalyzer, HandInteractor]
+    secondary: [AudioAnalyzer, MotionTracker]
+    description: Ingredient identification and detection
+
+  nutrition:
+    primary: [NutritionEstimator, VisualAnalyzer]
+    secondary: [HandInteractor]
+    description: Nutritional content estimation
+
+  fine_grained_action:
+    primary: [HandInteractor, AudioAnalyzer]
+    secondary: [VisualAnalyzer, MotionTracker]
+    description: Fine-grained action classification
+
+  3d_perception:
+    primary: [SpatialReasoner]
+    secondary: [GazeTracker, VisualAnalyzer]
+    description: 3D spatial queries and layout
+
+  object_motion:
+    primary: [MotionTracker, HandInteractor]
+    secondary: [SpatialReasoner, VisualAnalyzer]
+    description: Object tracking and state changes
+
+  gaze:
+    primary: [GazeTracker]
+    secondary: [VisualAnalyzer, SpatialReasoner]
+    description: Gaze target and attention analysis
+
+  general:
+    primary: [VisualAnalyzer, AudioAnalyzer]
+    secondary: [HandInteractor, GazeTracker, SpatialReasoner]
+    description: General kitchen scene understanding

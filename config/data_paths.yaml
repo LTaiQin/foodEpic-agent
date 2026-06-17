@@ -1,0 +1,26 @@
+# HD-EPIC data paths
+# Update these paths to match your local data layout
+
+data:
+  root: /22liushoulong/agent/hd-epic/data/HD-EPIC
+  audio_hdf5: ${data.root}/Audio-HDF5
+  videos: ${data.root}/Videos
+  slam_and_gaze: ${data.root}/SLAM-and-Gaze
+  digital_twin: ${data.root}/Digital-Twin
+  hands_masks: ${data.root}/Hands-Masks
+  vrs: ${data.root}/VRS
+
+annotations:
+  root: /22liushoulong/agent/hd-epic/annotations/hd-epic-annotations-main
+  audio_annotations: ${annotations.root}/audio-annotations
+  narrations: ${annotations.root}/narrations-and-action-segments
+  vqa_benchmark: ${annotations.root}/vqa-benchmark
+  scene_movements: ${annotations.root}/scene-and-object-movements
+  eye_gaze_priming: ${annotations.root}/eye-gaze-priming
+
+output:
+  root: /22liushoulong/agent/hd-epic/outputs
+  event_index: ${output.root}/event_index
+  graph_memory: ${output.root}/graph_memory
+  agent_runs: ${output.root}/graph_agent_runs
+  results: ${output.root}/results

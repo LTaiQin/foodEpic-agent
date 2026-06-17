@@ -1,0 +1,14 @@
+# Hardware configuration for A800 80GB
+hardware:
+  gpu: NVIDIA A800 80GB PCIe
+  vram_gb: 80
+  cuda_version: "11.8"
+  all_models_resident: true  # Keep all models in VRAM simultaneously
+
+# GPU memory allocation (approximate)
+memory:
+  sam2_large_gb: 4
+  grounding_dino_gb: 4
+  beats_gb: 2
+  clap_gb: 2
+  total_model_gb: 12  # All models fit comfortably in 80GB

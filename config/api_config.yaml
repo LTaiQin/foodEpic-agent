@@ -1,0 +1,18 @@
+# MiMo2.5 API configuration
+api:
+  base_url: https://www.cctq.ai/v1
+  model: gpt-5.4
+  provider_mode: responses
+  vision_provider_mode: auto
+  max_retries: 3
+  timeout: 60
+  cache_ttl: 3600
+
+# Model weights paths
+models:
+  sam2_checkpoint: checkpoints/sam2.1_hiera_large.pt
+  sam2_config: configs/sam2.1/sam2.1_hiera_l.yaml
+  grounding_dino_config: groundingdino/config/GroundingDINO_SwinT_OGC.py
+  grounding_dino_weights: weights/groundingdino_swint_ogc.pth
+  beats_weights: weights/BEATs_iter3_plus_AS2M_finetuned_on_AS2M_cpt2.pt
+  clap_weights: weights/music_speech_audioset_epoch_15_esc_89.98.pt

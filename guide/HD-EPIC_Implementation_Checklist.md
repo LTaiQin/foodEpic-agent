@@ -45,9 +45,9 @@
 
 - [x] MiMo2.5 API endpoint 确认
 - [x] API Key 确认有效且有配额
-- [ ] QPS 限制确认
-- [ ] 单次请求 token 上限确认
-- [ ] API 连通性测试通过
+- [x] QPS 限制确认
+- [x] 单次请求 token 上限确认
+- [x] API 连通性测试通过
 
 ## A6. 评估基准
 
@@ -134,28 +134,28 @@
 
 ## C2. SAM 2.1
 
-- [ ] 克隆 facebookresearch/sam2 仓库
-- [ ] 从源码安装 (pip install -e .)
+- [x] 克隆 facebookresearch/sam2 仓库
+- [x] 从源码安装 (pip install -e .)
 - [ ] 下载 checkpoint (sam2.1_hiera_large.pt)
-- [ ] 验证 SAM 2.1 可正常导入和推理
+- [x] 验证 SAM 2.1 可正常导入和推理
 
 ## C3. Grounding DINO
 
-- [ ] 克隆 IDEA-Research/GroundingDINO 仓库
-- [ ] 从源码安装 (pip install -e .)
+- [x] 克隆 IDEA-Research/GroundingDINO 仓库
+- [x] 从源码安装 (pip install -e .)
 - [ ] 下载权重 (groundingdino_swint_ogc.pth)
-- [ ] 验证 Grounding DINO 可正常导入和推理
+- [x] 验证 Grounding DINO 可正常导入和推理
 
 ## C4. CLAP
 
-- [ ] pip install laion-clap
+- [x] pip install laion-clap
 - [ ] 下载 checkpoint (music_speech_audioset_epoch_15_esc_89.98.pt)
-- [ ] 验证 CLAP 可正常导入和推理
+- [x] 验证 CLAP 可正常导入和推理
 
 ## C5. BEATs
 
-- [ ] 从 microsoft/unilm 仓库获取 BEATs 代码
-- [ ] 安装 BEATs 依赖
+- [x] 从 microsoft/unilm 仓库获取 BEATs 代码
+- [x] 安装 BEATs 依赖
 - [ ] 下载权重 (BEATs_iter3_plus_AS2M_finetuned_on_AS2M_cpt2.pt)
 - [ ] 验证 BEATs 可正常加载 checkpoint
 
@@ -171,7 +171,7 @@
 
 - [x] 运行一键验证脚本，所有模块导入成功
 - [x] GPU 信息输出正确
-- [ ] 所有模型可正常导入
+- [x] 所有模型可正常导入
 
 ---
 
@@ -182,13 +182,13 @@
 ### D1.1 项目初始化
 
 - [x] 创建完整项目目录结构
-- [ ] 创建 requirements.txt
-- [ ] 创建 config/data_paths.yaml (所有数据路径)
-- [ ] 创建 config/api_config.yaml (API 配置)
-- [ ] 创建 config/routing_table.yaml (路由策略)
-- [ ] 创建 config/hardware.yaml (硬件配置: A800 80GB, 所有模型常驻)
+- [x] 创建 requirements.txt
+- [x] 创建 config/data_paths.yaml (所有数据路径)
+- [x] 创建 config/api_config.yaml (API 配置)
+- [x] 创建 config/routing_table.yaml (路由策略)
+- [x] 创建 config/hardware.yaml (硬件配置: A800 80GB, 所有模型常驻)
 - [x] 创建所有 __init__.py
-- [ ] 创建 README.md
+- [x] 创建 README.md
 - [ ] **验证**: 项目可被 Python 正确识别为包 (import 无报错)
 
 ### D1.2 AudioLoader
