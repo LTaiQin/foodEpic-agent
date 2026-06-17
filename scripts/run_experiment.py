@@ -146,40 +146,25 @@ def run_experiment(
             result = {"answer": f"Error: {e}", "confidence": 0, "tool_calls": [], "iterations": 0}
         elapsed = time.time() - start
 
-        # Parse prediction - robust matching
-        pred_answer = result.get("answer", "").strip()
+        # Parse prediction - the Generator now returns the full choice text
+        pred_answer = result.get("answer", "")
+        if isinstance(pred_answer, list):
+            pred_answer = pred_answer[0] if pred_answer else ""
+        pred_answer = str(pred_answer).strip()
         pred_idx = -1
         if q["choices"]:
-            # Method 1: Check for letter at start (e.g., "A.", "A)", "A ")
+            # The Generator.parse_answer should return the choice text directly
+            # So we match it back to the index
             for j, choice in enumerate(q["choices"]):
-                letter = chr(65 + j)
-                if pred_answer.upper().startswith(letter) and len(pred_answer) < 5:
+                if pred_answer == choice or pred_answer.lower() == choice.lower():
                     pred_idx = j
                     break
-
-            # Method 2: Check for "option X" or "answer X" pattern
+            # Fallback: check if pred starts with the choice
             if pred_idx == -1:
-                import re
-                m = re.search(r'(?:option|answer|choice)\s*[:=]?\s*([A-E])', pred_answer, re.IGNORECASE)
-                if m:
-                    pred_idx = ord(m.group(1).upper()) - ord("A")
-
-            # Method 3: Fuzzy match choice text in answer
-            if pred_idx == -1:
-                best_score = 0
                 for j, choice in enumerate(q["choices"]):
-                    # Compare first 30 chars of choice with answer
-                    choice_start = choice[:30].lower()
-                    if choice_start in pred_answer.lower():
+                    if choice[:30].lower() in pred_answer.lower() or pred_answer[:30].lower() in choice.lower():
                         pred_idx = j
                         break
-                    # Word overlap
-                    choice_words = set(choice.lower().split()[:8])
-                    answer_words = set(pred_answer.lower().split())
-                    overlap = len(choice_words & answer_words)
-                    if overlap > best_score and overlap >= 3:
-                        best_score = overlap
-                        pred_idx = j
 
         is_correct = pred_idx == q["correct_idx"]
         if is_correct:
