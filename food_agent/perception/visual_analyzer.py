@@ -86,17 +86,21 @@ class VisualAnalyzer:
         # Use API-based detection
         prompt = (
             f"Detect the following objects in this image: {text_prompt}\n"
-            "Return a JSON array of objects, each with 'label' and 'bbox' [x1,y1,x2,y2]."
+            "Return a JSON array of objects, each with 'label' and 'bbox' [x1,y1,x2,y2].\n"
+            "Example: [{\"label\": \"knife\", \"bbox\": [100, 200, 300, 400]}]"
         )
         response = self._mimo.call_vision(frame, prompt)
         # Parse response (best effort)
         try:
             import json
-            # Try to extract JSON from response
             start = response.find("[")
             end = response.rfind("]") + 1
             if start >= 0 and end > start:
-                return json.loads(response[start:end])
+                detections = json.loads(response[start:end])
+                # Ensure all detections have 'confidence' key
+                for d in detections:
+                    d.setdefault("confidence", 0.5)
+                return detections
         except Exception:
             pass
         return []
@@ -237,5 +241,5 @@ class VisualAnalyzer:
                 "scene_description": scene.get("scene_description", ""),
                 "detections": detections,
             },
-            confidence=max((d["confidence"] for d in detections), default=0.5),
+            confidence=max((d.get("confidence", 0) for d in detections), default=0.5),
         )

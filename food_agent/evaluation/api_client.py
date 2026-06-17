@@ -26,12 +26,18 @@ class MimoClient:
         max_retries: int = 3,
         cache_ttl: float = 3600.0,
     ):
-        from food_agent.config import ProjectConfig
-        cfg = ProjectConfig.from_env()
+        import os
+        from food_agent.config import load_env_file
+        from pathlib import Path
 
-        self.base_url = base_url or cfg.model.base_url
-        self.api_key = api_key or cfg.model.api_key
-        self.model = model or cfg.model.model_name
+        # Load .env if exists
+        env_path = Path(__file__).resolve().parent.parent.parent / ".env"
+        if env_path.exists():
+            load_env_file(env_path)
+
+        self.base_url = base_url or os.environ.get("OPENAI_BASE_URL", "")
+        self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
+        self.model = model or os.environ.get("FOOD_AGENT_MODEL", "gpt-5.4")
         self.max_retries = max_retries
         self._cache = CacheManager(default_ttl=cache_ttl)
         self._client = None
