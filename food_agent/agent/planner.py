@@ -285,7 +285,6 @@ class GraphAgentPlanner:
         if self._action_intent_result_has_direct_post_action_evidence(result) and not self._action_intent_direct_evidence_still_needs_resolution(
             state=state,
             result=result,
-            candidate_indices=candidate_indices,
         ):
             return False, "", 4.0, ""
         primary_gap = self._action_intent_primary_gap(state)
@@ -923,20 +922,8 @@ class GraphAgentPlanner:
         *,
         state: AgentState,
         result: dict[str, Any] | None = None,
-        candidate_indices: list[int] | None = None,
     ) -> bool:
-        if not self._action_intent_result_has_direct_post_action_evidence(result):
-            return False
-        if not isinstance(result, dict):
-            return False
-        indices = candidate_indices or self._latest_action_intent_candidate_indices(state, result=result)
-        if len(indices) < 2:
-            return False
-        return self._action_intent_best_choice_is_broad_relative_to_competitors(
-            state=state,
-            result=result,
-            candidate_indices=indices,
-        )
+        return False
 
     def _action_intent_result_needs_generalized_disambiguation(
         self,
@@ -945,12 +932,6 @@ class GraphAgentPlanner:
         result: dict[str, Any] | None = None,
     ) -> bool:
         if not self._is_action_intent_task(state) or not isinstance(result, dict):
-            return False
-        try:
-            best_index = int(result.get("best_index"))
-        except Exception:  # noqa: BLE001
-            return False
-        if best_index < 0 or best_index >= len(getattr(state, "choices", [])):
             return False
         primary_gap = self._action_intent_primary_gap(state)
         primary_gap_type = str(primary_gap.get("gap_type") or "").strip() if isinstance(primary_gap, dict) else ""
@@ -961,11 +942,9 @@ class GraphAgentPlanner:
             "future_gap_family",
         }:
             return False
-        candidate_indices = self._latest_action_intent_candidate_indices(state, result=result)
         if self._action_intent_result_has_direct_post_action_evidence(result) and not self._action_intent_direct_evidence_still_needs_resolution(
             state=state,
             result=result,
-            candidate_indices=candidate_indices,
         ):
             return False
         if primary_gap_type == "precondition":
@@ -984,12 +963,6 @@ class GraphAgentPlanner:
             return confidence < 0.9
         if primary_gap_type in {"immediate_outcome", "state_transition_unconfirmed", "workspace_change_unconfirmed"}:
             if not self._action_intent_result_has_direct_post_action_evidence(result):
-                return True
-            if self._action_intent_best_choice_is_broad_relative_to_competitors(
-                state=state,
-                result=result,
-                candidate_indices=candidate_indices,
-            ):
                 return True
             return confidence < 0.9
         if blocker_hint == "future_gap_family":
@@ -2427,6 +2400,20 @@ class GraphAgentPlanner:
             return True
         return self._action_intent_result_is_weak_generic_claim(state=state, result=latest_intent)
 
+    def _action_intent_clip_time_range(self, state: AgentState) -> tuple[float, float] | None:
+        visited = sorted(float(t) for t in (getattr(state, "visited_times", []) or []) if t is not None)
+        if len(visited) < 2:
+            return None
+        start = max(0.0, visited[0] - 1.0)
+        end = visited[-1] + 1.0
+        if end - start < 0.5:
+            end = start + 2.0
+        if end - start > 20.0:
+            mid = (start + end) / 2.0
+            start = mid - 10.0
+            end = mid + 10.0
+        return start, end
+
     def _action_intent_timeline_review_prompt(self, *, state: AgentState) -> str:
         choices = "\n".join(f"{index}. {choice}" for index, choice in enumerate(getattr(state, "choices", []) or []))
         return (
@@ -3669,7 +3656,6 @@ class GraphAgentPlanner:
         if self._action_intent_result_has_direct_post_action_evidence(result) and not self._action_intent_direct_evidence_still_needs_resolution(
             state=state,
             result=result,
-            candidate_indices=candidate_indices,
         ):
             return False
         indices = candidate_indices or self._latest_action_intent_candidate_indices(state, result=result)
@@ -5171,6 +5157,19 @@ class GraphAgentPlanner:
                     require_current_scope=True,
                 )
             if image_paths and self._action_intent_has_post_action_frames(state=state, hints=hints, frames=image_paths):
+                clip_times = self._action_intent_clip_time_range(state)
+                if clip_times is not None:
+                    start_t, end_t = clip_times
+                    return PlannerDecision(
+                        thought="why 题当前已有动作前后关键帧；直接用视频片段做时序证据复核，比看单帧更准确。",
+                        tool="inspect_video_evidence",
+                        args={
+                            "prompt": self._action_intent_timeline_review_prompt(state=state),
+                            "start_time": start_t,
+                            "end_time": end_t,
+                            "max_duration_s": 15.0,
+                        },
+                    )
                 return PlannerDecision(
                     thought="why 题当前已有动作前后关键帧，但仍不能只凭局部瞬间定答；先做短时序证据复核，再回到因果判断。",
                     tool="inspect_visual_evidence",
@@ -11623,6 +11622,24 @@ class GraphAgentPlanner:
                 return False
             finish_mode = str(sufficiency_decision.get("finish_mode") or "").strip()
             if finish_mode == "finish_confident":
+                tool_steps = int((getattr(state, "search_budget", {}) or {}).get("tool_steps_used") or 0)
+                has_visual = any(
+                    isinstance(e, dict) and e.get("tool") in {"inspect_visual_evidence", "inspect_video_evidence"}
+                    for e in (getattr(state, "tool_trace", []) or [])
+                )
+                has_evidenced_best_index = any(
+                    isinstance(e, dict)
+                    and isinstance(e.get("raw_result"), dict)
+                    and e["raw_result"].get("best_index") is not None
+                    and e.get("tool") in {
+                        "inspect_video_evidence", "inspect_visual_evidence",
+                        "resolve_action_intent_pairwise", "resolve_action_intent_future_use",
+                        "rank_choices_from_state", "infer_action_intent",
+                    }
+                    for e in (getattr(state, "tool_trace", []) or [])
+                )
+                if tool_steps < 3 or not has_visual or not has_evidenced_best_index:
+                    return True
                 return False
             recommended_next_step = str(sufficiency_decision.get("recommended_next_step") or "").strip()
             missing_gap_types = [
@@ -15666,6 +15683,25 @@ class GraphAgentPlanner:
         if gap_type == "relation_confirmation":
             target_object = str(primary_gap.get("target_object") or "").strip()
             target_fixture = str(primary_gap.get("target_fixture") or "").strip()
+            clip_times = self._action_intent_clip_time_range(state)
+            if clip_times is not None:
+                start_t, end_t = clip_times
+                focus = target_object or target_fixture or "动作目的和物体关系"
+                return finalize(PlannerDecision(
+                    thought=(
+                        f"why 题当前主缺口是关系确认（{focus}）；"
+                        "直接用视频片段观察连续动作过程，让模型先评估证据是否充分再决定下一步。"
+                    ),
+                    tool="inspect_video_evidence",
+                    args={
+                        "prompt": "",
+                        "start_time": start_t,
+                        "end_time": end_t,
+                        "max_duration_s": 8.0,
+                        "question": str(getattr(state, "question", "") or ""),
+                        "choices": list(getattr(state, "choices", []) or []),
+                    },
+                ))
             if target_object:
                 if self._action_intent_should_defer_long_horizon_gap_query_until_window_expands(
                     state=state,

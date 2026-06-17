@@ -146,8 +146,8 @@ class AgentState:
             return
         self.search_budget = {
             "max_tool_steps": int(self.max_steps),
-            "max_new_frames": 24,
-            "max_long_horizon_expansions": 2,
+            "max_new_frames": 40,
+            "max_long_horizon_expansions": 5,
             "window_level": 0,
             "tool_steps_used": 0,
             "new_frames_observed": 0,

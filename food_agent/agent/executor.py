@@ -319,6 +319,7 @@ class GraphAgentExecutor:
             "query_state": ("need_state_evidence",),
             "write_state_change": ("need_state_evidence",),
             "inspect_visual_evidence": ("need_state_evidence",),
+            "inspect_video_evidence": ("need_state_evidence",),
             "query_location": ("need_location_evidence",),
             "infer_viewpoint_choice": ("need_location_evidence",),
             "infer_named_fixture_direction": ("need_location_evidence",),
@@ -367,7 +368,7 @@ class GraphAgentExecutor:
             if self._has_ocr_evidence(state, result):
                 state.prune_open_question("need_ocr_reading")
                 state.add_hypothesis("ocr_evidence_collected")
-        if tool_name in {"query_state", "inspect_visual_evidence", "write_state_change"}:
+        if tool_name in {"query_state", "inspect_visual_evidence", "inspect_video_evidence", "write_state_change"}:
             if self._has_state_evidence(state):
                 state.prune_open_question("need_state_evidence")
                 state.add_hypothesis("state_evidence_collected")
@@ -752,6 +753,39 @@ class GraphAgentExecutor:
                 state.add_evidence(summary)
                 state.add_memory(summary)
             self._auto_write_visual_observation(state, result)
+        if tool_name == "inspect_video_evidence":
+            if result.get("vision_disabled"):
+                reason = str(result.get("error_message") or result.get("error_type") or "vision_disabled")
+                state.add_memory(f"vision_disabled={reason}")
+                state.add_hypothesis("vision_evidence_unavailable")
+                state.add_open_question("need_alternative_evidence_path")
+            if result.get("needs_more_evidence"):
+                state.add_open_question("need_disambiguating_evidence")
+                state.add_memory("visual_review_needs_more_evidence=1")
+            if result.get("can_distinguish") is False:
+                missing = str(result.get("missing_evidence") or "").strip()
+                if missing:
+                    state.add_open_question("need_disambiguating_evidence")
+                    state.add_memory("video_evidence_insufficient: {}".format(missing[:120]))
+                observations = result.get("observations")
+                if isinstance(observations, list):
+                    for obs in observations:
+                        if isinstance(obs, str) and obs.strip():
+                            state.add_evidence(obs.strip())
+                eliminated = result.get("eliminated")
+                if isinstance(eliminated, list):
+                    for item in eliminated:
+                        if isinstance(item, dict) and item.get("reason"):
+                            state.add_evidence("排除选项[{}]: {}".format(item.get("index","?"), item["reason"]))
+            self._record_semantic_conflicts_from_payload(state, result)
+            summary = self._inspection_summary(result)
+            if summary:
+                state.add_evidence(summary)
+                state.add_memory(summary)
+            clip_path = result.get("video_clip_path")
+            if clip_path:
+                state.add_artifact(str(clip_path))
+            self._auto_write_visual_observation(state, result)
         if tool_name in {"run_ocr_on_image", "run_ocr_on_region"}:
             reading = result.get("reading")
             text = result.get("text")
@@ -1096,16 +1130,6 @@ class GraphAgentExecutor:
         )
         budget = dict(getattr(state, "search_budget", {}) or {})
         finish_reason = str(sufficiency_decision.get("finish_mode") or "")
-        blocking_hypotheses = [
-            str(item).strip()
-            for item in sufficiency_decision.get("blocking_hypotheses", [])
-            if isinstance(item, str) and str(item).strip()
-        ]
-        blocking_comparisons = [
-            dict(item)
-            for item in sufficiency_decision.get("blocking_comparisons", [])
-            if isinstance(item, dict) and item
-        ]
         if not finish_reason:
             structured_requires_more_evidence = (
                 isinstance(sufficiency_decision, dict)
@@ -1113,8 +1137,6 @@ class GraphAgentExecutor:
                     sufficiency_decision.get("sufficient") is False
                     or bool(sufficiency_decision.get("missing_gap_types"))
                     or bool(str(sufficiency_decision.get("recommended_next_step") or "").strip())
-                    or bool(blocking_hypotheses)
-                    or bool(blocking_comparisons)
                     or bool(verification.evidence_gaps)
                 )
             )
@@ -1127,8 +1149,6 @@ class GraphAgentExecutor:
             elif (
                 verification.missing_evidence_types
                 or verification.evidence_gaps
-                or blocking_hypotheses
-                or blocking_comparisons
             ):
                 finish_reason = "needs_more_evidence"
             else:

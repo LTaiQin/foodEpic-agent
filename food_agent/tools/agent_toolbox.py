@@ -41,6 +41,8 @@ class AgentToolbox:
         self.spatial_store = SpatialContextStore(self.paths.output_root / "event_index")
         self.workspace = self.paths.graph_agent_artifacts_root / video_id
         self.video = VideoToolbox(self.workspace)
+        self._video_evidence_cache: dict[str, dict[str, Any]] = {}
+        self._video_clip_cache: dict[str, Path] = {}
 
     def tool_schemas(self) -> list[dict[str, Any]]:
         return [
@@ -234,6 +236,11 @@ class AgentToolbox:
                 "name": "inspect_visual_evidence",
                 "description": "让模型查看指定图片并输出保守的结构化观察结果。",
                 "arguments": {"prompt": "str", "image_paths": "list[str]"},
+            },
+            {
+                "name": "inspect_video_evidence",
+                "description": "从原视频截取指定时间段的短视频片段，送入多模态模型直接理解动作过程。比抽帧更准确地捕捉连续动作和状态变化。",
+                "arguments": {"prompt": "str", "start_time": "float", "end_time": "float", "max_duration_s": "float"},
             },
             {
                 "name": "rank_choices_from_state",
@@ -1562,6 +1569,90 @@ class AgentToolbox:
         except Exception:  # noqa: BLE001
             payload = {"raw_output": text}
         payload["raw_output"] = text
+        return payload
+
+    def inspect_video_evidence(
+        self,
+        prompt: str,
+        start_time: float,
+        end_time: float,
+        max_duration_s: float = 15.0,
+        question: str = "",
+        choices: list[str] | None = None,
+    ) -> dict[str, Any]:
+        cache_key = "{}_{:.1f}_{:.1f}_{:.0f}_{}".format(
+            self.video_id,
+            float(start_time),
+            float(end_time),
+            float(max_duration_s),
+            hash(question + str(choices)) if question else hash(prompt),
+        )
+        if cache_key in self._video_evidence_cache:
+            cached = dict(self._video_evidence_cache[cache_key])
+            cached["cache_hit"] = True
+            return cached
+        video_path = self._video_path()
+        clip_cache_key = "{}_{:.1f}_{:.1f}".format(self.video_id, float(start_time), float(end_time))
+        if clip_cache_key in self._video_clip_cache:
+            clip_path = self._video_clip_cache[clip_cache_key]
+        else:
+            clip_path = self.video.extract_video_clip(
+                video_path=video_path,
+                start_time=max(0.0, float(start_time)),
+                end_time=max(float(start_time) + 0.1, float(end_time)),
+                output_name=f"video_evidence_{start_time:09.3f}_{end_time:09.3f}.mp4",
+                max_duration_s=float(max_duration_s),
+            )
+            self._video_clip_cache[clip_cache_key] = clip_path
+        if question and choices:
+            choices_text = "\n".join("[{}] {}".format(i, c) for i, c in enumerate(choices))
+            full_prompt = (
+                "请仔细观察视频中的动作过程。\n\n"
+                "问题: {}\n\n"
+                "选项:\n{}\n\n"
+                "请按以下步骤分析：\n"
+                "1. 先描述你观察到的关键事实：涉及哪些物体、做了什么动作、有什么状态变化\n"
+                "2. 列出可以排除的选项及排除理由\n"
+                "3. 对剩余选项，判断你能否从视频中区分它们。如果能，给出答案；如果不能，说明还缺什么证据\n\n"
+                "输出 JSON：\n"
+                '{{"observations": ["观察到的事实1", "事实2"], '
+                '"eliminated": [{{"index": 0, "reason": "排除理由"}}], '
+                '"remaining": [1, 2], '
+                '"can_distinguish": false, '
+                '"missing_evidence": "需要看到XXX才能区分", '
+                '"best_index": -1, '
+                '"confidence": 0.0}}'
+            ).format(question, choices_text)
+        else:
+            full_prompt = prompt
+        try:
+            response = self.model_client.inspect_videos(
+                prompt=full_prompt,
+                video_paths=[clip_path],
+                temperature=0.0,
+            )
+        except RuntimeError as exc:
+            message = str(exc)
+            if "vision_not_supported" in message:
+                return {
+                    "raw_output": "",
+                    "tool_failed": True,
+                    "error_type": "VisionNotSupported",
+                    "error_message": message,
+                    "vision_disabled": True,
+                }
+            raise
+        text = response.content.strip()
+        payload: dict[str, Any]
+        try:
+            payload = self.model_client._extract_json_object(text)
+        except Exception:  # noqa: BLE001
+            payload = {"raw_output": text}
+        payload["raw_output"] = text
+        payload["video_clip_path"] = clip_path.as_posix()
+        payload["clip_start_time"] = start_time
+        payload["clip_end_time"] = end_time
+        self._video_evidence_cache[cache_key] = dict(payload)
         return payload
 
     def rank_choices_from_state(
@@ -7741,7 +7832,7 @@ class AgentToolbox:
         )
         return {"node_id": node["node_id"], "node": node}
 
-    def finish(self, prediction: int | None, answer: str, confidence: float = 0.0) -> dict[str, Any]:
+    def finish(self, prediction: int | None, answer: str, confidence: float = 0.0, **kwargs: Any) -> dict[str, Any]:
         normalized_prediction = None if prediction is None else int(prediction)
         return {
             "prediction": normalized_prediction,
@@ -9023,6 +9114,7 @@ class AgentToolbox:
             "extract_region_with_context": ["expand_ratio"],
             "run_ocr_on_region": ["expand_ratio"],
             "detect_audio_peaks": ["start_time", "end_time", "window_s"],
+            "inspect_video_evidence": ["start_time", "end_time", "max_duration_s"],
             "sample_frames_around_peaks": ["radius_s"],
             "write_observation": ["start_time", "end_time"],
             "write_frame_observation": ["time_s"],

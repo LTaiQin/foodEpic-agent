@@ -239,6 +239,7 @@ class GraphAgentVideoSession:
         state.verification_history = []
         state.action_intent_hypotheses = []
         state.hypotheses = []
+        state.search_budget = {}
 
         relevant_tokens = {
             str(item).strip().lower()

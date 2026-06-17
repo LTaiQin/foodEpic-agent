@@ -68,7 +68,7 @@ def parse_args() -> argparse.Namespace:
         default=defaults.output_root / "results" / "graph_agent_small_real_why_eval_evidence_sufficiency",
     )
     parser.add_argument("--limit", type=int, default=6)
-    parser.add_argument("--max-steps", type=int, default=8)
+    parser.add_argument("--max-steps", type=int, default=15)
     parser.add_argument("--resume", action="store_true")
     return parser.parse_args()
 

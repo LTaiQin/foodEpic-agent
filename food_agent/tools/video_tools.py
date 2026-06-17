@@ -104,6 +104,7 @@ class VideoToolbox:
         end_time: float,
         output_name: str,
         max_duration_s: float = 30.0,
+        compress: bool = True,
     ) -> Path:
         output_path = self.workspace / output_name
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -111,26 +112,51 @@ class VideoToolbox:
         actual_end = max(actual_start + 0.1, float(end_time))
         if actual_end - actual_start > max_duration_s:
             actual_end = actual_start + max_duration_s
-        subprocess.run(
-            [
-                "ffmpeg",
-                "-y",
-                "-ss",
-                f"{actual_start:.3f}",
-                "-to",
-                f"{actual_end:.3f}",
-                "-i",
-                video_path.as_posix(),
-                "-c",
-                "copy",
-                "-avoid_negative_ts",
-                "make_zero",
-                output_path.as_posix(),
-            ],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        if compress:
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-ss",
+                    f"{actual_start:.3f}",
+                    "-to",
+                    f"{actual_end:.3f}",
+                    "-i",
+                    video_path.as_posix(),
+                    "-vf",
+                    "scale=720:-2",
+                    "-c:v",
+                    "mpeg4",
+                    "-b:v",
+                    "500k",
+                    "-an",
+                    output_path.as_posix(),
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        else:
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-ss",
+                    f"{actual_start:.3f}",
+                    "-to",
+                    f"{actual_end:.3f}",
+                    "-i",
+                    video_path.as_posix(),
+                    "-c",
+                    "copy",
+                    "-avoid_negative_ts",
+                    "make_zero",
+                    output_path.as_posix(),
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
         return output_path
 
     def render_bbox_overlay(self, *, image_path: Path, bbox: list[float], output_name: str) -> Path:
