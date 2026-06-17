@@ -11,26 +11,26 @@
 
 ## A1. 硬件环境
 
-- [ ] GPU 确认: A800 80GB VRAM
-- [ ] CUDA 版本确认 (nvcc --version)
-- [ ] 系统内存 >= 32GB
-- [ ] 磁盘可用空间 >= 200GB
+- [x] GPU 确认: A800 80GB VRAM
+- [x] CUDA 版本确认 (nvcc --version)
+- [x] 系统内存 >= 32GB
+- [x] 磁盘可用空间 >= 200GB
 
 ## A2. 软件环境
 
-- [ ] Python >= 3.10
-- [ ] PyTorch >= 2.5.1 且 CUDA 可用
-- [ ] torchvision >= 0.20.1
-- [ ] CUDA toolkit 与 PyTorch 版本匹配
+- [x] Python >= 3.10
+- [x] PyTorch >= 2.5.1 且 CUDA 可用
+- [x] torchvision >= 0.20.1
+- [x] CUDA toolkit 与 PyTorch 版本匹配
 
 ## A3. 数据访问
 
-- [ ] HD-EPIC 数据集路径确认
-- [ ] Audio-HDF5 可用 h5py 正常读取
-- [ ] Videos (mp4) 可用 OpenCV 正常解码
-- [ ] SLAM-and-Gaze 文件可正常打开
-- [ ] Digital-Twin 3D 模型可正常加载
-- [ ] Hands-Masks 掩码文件可正常读取
+- [x] HD-EPIC 数据集路径确认
+- [x] Audio-HDF5 可用 h5py 正常读取
+- [x] Videos (mp4) 可用 OpenCV 正常解码
+- [x] SLAM-and-Gaze 文件可正常打开
+- [x] Digital-Twin 3D 模型可正常加载
+- [x] Hands-Masks 掩码文件可正常读取
 - [ ] VRS 文件可用 vrs 库正常解析
 
 ## A4. 模型权重
@@ -43,8 +43,8 @@
 
 ## A5. API 配置
 
-- [ ] MiMo2.5 API endpoint 确认
-- [ ] API Key 确认有效且有配额
+- [x] MiMo2.5 API endpoint 确认
+- [x] API Key 确认有效且有配额
 - [ ] QPS 限制确认
 - [ ] 单次请求 token 上限确认
 - [ ] API 连通性测试通过
@@ -128,9 +128,9 @@
 
 ## C1. 基础环境
 
-- [ ] 创建 conda 环境 (python=3.10)
-- [ ] 安装 PyTorch + torchvision + torchaudio (匹配 CUDA 版本)
-- [ ] 验证 PyTorch CUDA 可用
+- [x] 创建 conda 环境 (python=3.10)
+- [x] 安装 PyTorch + torchvision + torchaudio (匹配 CUDA 版本)
+- [x] 验证 PyTorch CUDA 可用
 
 ## C2. SAM 2.1
 
@@ -161,16 +161,16 @@
 
 ## C6. 其他依赖
 
-- [ ] 安装 Open3D + trimesh (3D 处理)
-- [ ] 安装 h5py + opencv-python + Pillow + librosa + soundfile + scipy
-- [ ] 安装 matplotlib (可视化, 可选)
-- [ ] 安装 requests (API 调用)
-- [ ] 安装 huggingface_hub (可选, 快速加载模型)
+- [x] 安装 Open3D + trimesh (3D 处理)
+- [x] 安装 h5py + opencv-python + Pillow + librosa + soundfile + scipy
+- [x] 安装 matplotlib (可视化, 可选)
+- [x] 安装 requests (API 调用)
+- [x] 安装 huggingface_hub (可选, 快速加载模型)
 
 ## C7. 环境验证
 
-- [ ] 运行一键验证脚本，所有模块导入成功
-- [ ] GPU 信息输出正确
+- [x] 运行一键验证脚本，所有模块导入成功
+- [x] GPU 信息输出正确
 - [ ] 所有模型可正常导入
 
 ---
@@ -181,13 +181,13 @@
 
 ### D1.1 项目初始化
 
-- [ ] 创建完整项目目录结构
+- [x] 创建完整项目目录结构
 - [ ] 创建 requirements.txt
 - [ ] 创建 config/data_paths.yaml (所有数据路径)
 - [ ] 创建 config/api_config.yaml (API 配置)
 - [ ] 创建 config/routing_table.yaml (路由策略)
 - [ ] 创建 config/hardware.yaml (硬件配置: A800 80GB, 所有模型常驻)
-- [ ] 创建所有 __init__.py
+- [x] 创建所有 __init__.py
 - [ ] 创建 README.md
 - [ ] **验证**: 项目可被 Python 正确识别为包 (import 无报错)
 
@@ -338,17 +338,17 @@
 
 ### D3.1 统一证据格式
 
-- [ ] 定义 Evidence dataclass (evidence_id, source_module, evidence_type, time_range, content, confidence)
+- [x] 定义 Evidence dataclass (evidence_id, source_module, evidence_type, time_range, content, confidence)
 - [ ] 实现 Evidence.to_json() 和 Evidence.from_json()
-- [ ] 所有感知模块的输出必须返回 Evidence 或 Evidence 列表
+- [x] 所有感知模块的输出必须返回 Evidence 或 Evidence 列表
 - [ ] **验证**: 创建 Evidence → to_json → from_json，所有字段一致
 
 ### D3.2 模块注册表
 
-- [ ] 实现 ModuleRegistry: 统一管理所有感知模块的实例
+- [x] 实现 ModuleRegistry: 统一管理所有感知模块的实例
 - [ ] 实现 ModuleRegistry.get(module_name) — 按名称获取模块实例
-- [ ] 实现 ModuleRegistry.list_modules() — 列出所有已注册模块
-- [ ] 每个感知模块初始化时自动注册到 Registry
+- [x] 实现 ModuleRegistry.list_modules() — 列出所有已注册模块
+- [x] 每个感知模块初始化时自动注册到 Registry
 - [ ] **验证**: Registry 包含 7 个感知模块，get("AudioAnalyzer") 返回正确实例
 
 ### D3.3 模块间数据流接线
@@ -364,10 +364,10 @@
 
 ### D3.4 时间对齐中枢
 
-- [ ] 实现 TimeAlignHub: 所有模块共享的时间对齐服务
-- [ ] TimeAlignHub.register_timebase(module_name, timebase) — 注册模块时间基准
-- [ ] TimeAlignHub.convert(timestamp, from_module, to_module) — 跨模块时间转换
-- [ ] 所有模块间传递时间戳时必须通过 TimeAlignHub 转换
+- [x] 实现 TimeAlignHub: 所有模块共享的时间对齐服务
+- [x] TimeAlignHub.register_timebase(module_name, timebase) — 注册模块时间基准
+- [x] TimeAlignHub.convert(timestamp, from_module, to_module) — 跨模块时间转换
+- [x] 所有模块间传递时间戳时必须通过 TimeAlignHub 转换
 - [ ] **验证**: Audio 模块的时间戳转换为 Video 模块的时间戳后，提取的帧与音频事件对应
 
 ---
@@ -397,7 +397,7 @@
 - [ ] 实现 Judge.evaluate_sufficiency(evidence_list, question)
 - [ ] 实现 Judge.suggest_expansion(evidence_list, question, route) — 返回下一步应调用的模块+参数
 - [ ] 实现 Judge.should_stop(evidence_list, iteration)
-- [ ] 实现置信度阈值逻辑 (>0.8 直接回答, 0.5-0.8 扩展, <0.5 全面搜索)
+- [x] 实现置信度阈值逻辑 (>0.8 直接回答, 0.5-0.8 扩展, <0.5 全面搜索)
 - [ ] **验证**: 输入高置信度证据 → evaluate_sufficiency 返回 "sufficient"；输入低置信度 → 返回 "insufficient" + 扩展建议 (包含具体模块名和时间范围)
 
 ### D4.4 答案生成器
@@ -409,11 +409,11 @@
 
 ### D4.5 工具定义与注册
 
-- [ ] 定义感知工具 JSON Schema (query_audio, query_video, query_gaze, query_3d, query_hands, query_nutrition, query_motion)
-- [ ] 定义分析工具 JSON Schema (generate_scene_graph, compute_spatial, infer_action, predict_next)
-- [ ] 定义控制工具 JSON Schema (check_evidence, expand_search, synthesize_answer)
-- [ ] 每个工具的实现函数与 Schema 绑定
-- [ ] 实现 ToolRegistry: 管理所有工具的注册和调用
+- [x] 定义感知工具 JSON Schema (query_audio, query_video, query_gaze, query_3d, query_hands, query_nutrition, query_motion)
+- [x] 定义分析工具 JSON Schema (generate_scene_graph, compute_spatial, infer_action, predict_next)
+- [x] 定义控制工具 JSON Schema (check_evidence, expand_search, synthesize_answer)
+- [x] 每个工具的实现函数与 Schema 绑定
+- [x] 实现 ToolRegistry: 管理所有工具的注册和调用
 - [ ] **验证**: ToolRegistry.list_tools() 返回所有工具；调用 query_audio(start=0, end=10) 返回 Evidence 列表
 
 ---
@@ -424,55 +424,55 @@
 
 ### D5.1 Agent 状态管理
 
-- [ ] 实现 AgentState: 维护单次问答的完整状态
-  - [ ] question: 原始问题
-  - [ ] route: Router 返回的路由策略
-  - [ ] evidence_list: 已收集的所有 Evidence
-  - [ ] iteration: 当前迭代轮次
-  - [ ] tool_call_history: 已调用的工具列表
-  - [ ] confidence_history: 每轮的置信度变化
-- [ ] AgentState 的序列化/反序列化 (用于调试和日志)
+- [x] 实现 AgentState: 维护单次问答的完整状态
+  - [x] question: 原始问题
+  - [x] route: Router 返回的路由策略
+  - [x] evidence_list: 已收集的所有 Evidence
+  - [x] iteration: 当前迭代轮次
+  - [x] tool_call_history: 已调用的工具列表
+  - [x] confidence_history: 每轮的置信度变化
+- [x] AgentState 的序列化/反序列化 (用于调试和日志)
 - [ ] **验证**: 创建 AgentState，添加 3 条 Evidence，迭代轮次自增，所有字段可正确访问
 
 ### D5.2 Agent Tool-Calling 循环
 
-- [ ] 实现 Agent.run(question) — 核心自主循环
-  - [ ] Step 1: 初始化 AgentState
-  - [ ] Step 2: Router 分类问题，获取初始路由
-  - [ ] Step 3: 进入循环 (最大 N 轮)
+- [x] 实现 Agent.run(question) — 核心自主循环
+  - [x] Step 1: 初始化 AgentState
+  - [x] Step 2: Router 分类问题，获取初始路由
+  - [x] Step 3: 进入循环 (最大 N 轮)
     - [ ] 3a. 将当前 state (问题+已有证据+路由) 发送给 MiMo2.5
     - [ ] 3b. MiMo2.5 返回下一步要调用的 tool + 参数 (自主决策)
     - [ ] 3c. 执行 tool 调用，获得新 Evidence
     - [ ] 3d. 将新 Evidence 加入 AgentState
     - [ ] 3e. Judge 评估是否足够回答
     - [ ] 3f. 如果足够 → 退出循环；如果不够 → 继续下一轮
-  - [ ] Step 4: Generator 生成最终答案
-  - [ ] Step 5: 返回 answer + evidence_chain + reasoning_trace
+  - [x] Step 4: Generator 生成最终答案
+  - [x] Step 5: 返回 answer + evidence_chain + reasoning_trace
 - [ ] **验证**: 对一个简单问题运行 agent.run()，观察 tool_call_history 至少包含 2 次不同 tool 调用，最终返回非空 answer
 
 ### D5.3 Agent 决策 Prompt
 
-- [ ] 实现 SYSTEM_PROMPT: 告诉 LLM 它是一个厨房视频理解 Agent，可用的工具列表，决策规则
-- [ ] 实现 build_decision_prompt(state) — 将 AgentState 格式化为 LLM 输入
+- [x] 实现 SYSTEM_PROMPT: 告诉 LLM 它是一个厨房视频理解 Agent，可用的工具列表，决策规则
+- [x] 实现 build_decision_prompt(state) — 将 AgentState 格式化为 LLM 输入
   - [ ] 包含: 问题、已收集证据摘要、已调用工具列表、剩余可选工具
   - [ ] 不包含: 原始数据 (太大)，只包含摘要
-- [ ] 实现 parse_tool_call(llm_response) — 从 LLM 响应中提取 tool_name + parameters
+- [x] 实现 parse_tool_call(llm_response) — 从 LLM 响应中提取 tool_name + parameters
 - [ ] **验证**: build_decision_prompt 返回的字符串长度 < 4000 tokens；parse_tool_call 对 mock 响应正确提取
 
 ### D5.4 Agent 安全边界
 
-- [ ] 实现最大迭代轮次限制 (默认 N=10)
-- [ ] 实现单次问答最大 tool 调用次数限制 (默认 20)
-- [ ] 实现重复调用检测 (同一 tool + 同一参数不重复调用)
-- [ ] 实现超时保护 (单次问答总时间 < 120s)
+- [x] 实现最大迭代轮次限制 (默认 N=10)
+- [x] 实现单次问答最大 tool 调用次数限制 (默认 20)
+- [x] 实现重复调用检测 (同一 tool + 同一参数不重复调用)
+- [x] 实现超时保护 (单次问答总时间 < 120s)
 - [ ] **验证**: 设置 N=2 时，Agent 在 2 轮后强制退出并用已有证据生成答案
 
 ### D5.5 Agent 推理轨迹
 
-- [ ] 实现 ReasoningTrace: 记录 Agent 的完整决策过程
-  - [ ] 每轮记录: 轮次、LLM 决策、tool 调用、返回结果、置信度变化
-  - [ ] 最终记录: 总轮次、总 tool 调用数、最终置信度、答案
-- [ ] ReasoningTrace.to_json() — 输出为可读的 JSON 日志
+- [x] 实现 ReasoningTrace: 记录 Agent 的完整决策过程
+  - [x] 每轮记录: 轮次、LLM 决策、tool 调用、返回结果、置信度变化
+  - [x] 最终记录: 总轮次、总 tool 调用数、最终置信度、答案
+- [x] ReasoningTrace.to_json() — 输出为可读的 JSON 日志
 - [ ] ReasoningTrace可视化 — 生成决策树/流程图 (可选)
 - [ ] **验证**: 运行一次 agent.run()，ReasoningTrace.to_json() 输出包含所有轮次的完整记录
 
@@ -577,9 +577,9 @@
 
 - [ ] 实现 api_client.call_mimo_vision(image, prompt)
 - [ ] 实现 api_client.call_mimo_text(prompt)
-- [ ] 实现重试策略 (指数退避, 最大 3 次)
-- [ ] 实现错误处理 (超时/限流/无效响应)
-- [ ] 实现请求缓存
+- [x] 实现重试策略 (指数退避, 最大 3 次)
+- [x] 实现错误处理 (超时/限流/无效响应)
+- [x] 实现请求缓存
 - [ ] **验证**: call_mimo_text("回复 OK") 返回非空字符串；相同请求第二次走缓存
 
 ### D8.2 Benchmark 加载
@@ -592,19 +592,19 @@
 
 ### D8.3 评估指标
 
-- [ ] 实现 accuracy(predictions, ground_truth)
-- [ ] 实现 accuracy_per_category(predictions, ground_truth, categories)
-- [ ] 实现 average_confidence(predictions)
-- [ ] 实现 average_tool_calls(predictions)
-- [ ] 实现 average_latency(predictions)
+- [x] 实现 accuracy(predictions, ground_truth)
+- [x] 实现 accuracy_per_category(predictions, ground_truth, categories)
+- [x] 实现 average_confidence(predictions)
+- [x] 实现 average_tool_calls(predictions)
+- [x] 实现 average_latency(predictions)
 - [ ] **验证**: accuracy([1,1,0], [1,1,1]) 返回 2/3
 
 ### D8.4 评估脚本
 
-- [ ] 实现 run_eval.py 主脚本 (加载 benchmark → 调用 Agent.run() → 收集结果 → 计算指标 → 输出报告)
-- [ ] 支持按类别分别评估
-- [ ] 输出 JSON + 可读文本两种格式的评估报告
-- [ ] 输出 ReasoningTrace 日志 (用于分析 Agent 决策行为)
+- [x] 实现 run_eval.py 主脚本 (加载 benchmark → 调用 Agent.run() → 收集结果 → 计算指标 → 输出报告)
+- [x] 支持按类别分别评估
+- [x] 输出 JSON + 可读文本两种格式的评估报告
+- [x] 输出 ReasoningTrace 日志 (用于分析 Agent 决策行为)
 - [ ] **验证**: 对 10 条问题运行评估脚本，输出包含总体准确率、各类别准确率、平均 tool 调用数
 
 ### D8.5 消融实验
