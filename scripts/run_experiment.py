@@ -156,13 +156,15 @@ def run_experiment(
             # The Generator.parse_answer should return the choice text directly
             # So we match it back to the index
             for j, choice in enumerate(q["choices"]):
-                if pred_answer == choice or pred_answer.lower() == choice.lower():
+                choice_str = str(choice).strip() if not isinstance(choice, str) else choice
+                if pred_answer == choice_str or pred_answer.lower() == choice_str.lower():
                     pred_idx = j
                     break
             # Fallback: check if pred starts with the choice
             if pred_idx == -1:
                 for j, choice in enumerate(q["choices"]):
-                    if choice[:30].lower() in pred_answer.lower() or pred_answer[:30].lower() in choice.lower():
+                    choice_str = str(choice).strip() if not isinstance(choice, str) else choice
+                    if choice_str[:30].lower() in pred_answer.lower() or pred_answer[:30].lower() in choice_str.lower():
                         pred_idx = j
                         break
 
