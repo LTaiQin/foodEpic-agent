@@ -148,6 +148,7 @@ class Pipeline:
         registry.register("identify_ingredients", self._tool_identify_ingredients)
         registry.register("query_gaze", self._tool_query_gaze)
         registry.register("query_3d", self._tool_query_3d)
+        registry.register("fixture_clock_position", self._tool_fixture_clock_position)
         registry.register("query_hands", self._tool_query_hands)
         registry.register("query_nutrition", self._tool_query_nutrition)
         registry.register("query_motion", self._tool_query_motion)
@@ -368,6 +369,85 @@ class Pipeline:
                 evidence.content["facing_clock"] = f"{clock} o'clock"
                 evidence.content["facing_angle_degrees"] = round(angle, 1)
             return evidence
+        except Exception as e:
+            return Evidence(source_module="SpatialReasoner", evidence_type="spatial",
+                          content={"error": str(e)}, confidence=0)
+
+    def _tool_fixture_clock_position(self, fixture_name: str = "", timestamp: float = 10, **kwargs) -> Evidence:
+        """Compute the clock position of a fixture relative to the wearer.
+
+        Returns the fixture's position as a clock direction (e.g., "3 o'clock").
+        """
+        ctx = self._get_context(kwargs)
+        try:
+            import math
+            import numpy as np
+
+            # Get wearer pose - try the requested timestamp first, then find nearest available
+            pose = self.slam_loader.get_pose(ctx["participant_id"], ctx["video_id"], timestamp)
+            if pose is None:
+                # Try to find the nearest available timestamp
+                df = self.slam_loader._load_df(ctx["participant_id"], ctx["video_id"])
+                if df is not None and len(df) > 0:
+                    ts_us = df['tracking_timestamp_us'].values
+                    nearest_idx = np.argmin(np.abs(ts_us - timestamp * 1e6))
+                    nearest_ts = ts_us[nearest_idx] / 1e6
+                    pose = self.slam_loader.get_pose(ctx["participant_id"], ctx["video_id"], nearest_ts)
+                    if pose is None:
+                        return Evidence(source_module="SpatialReasoner", evidence_type="spatial",
+                                      content={"error": "no pose data available"}, confidence=0)
+
+            wearer_pos = pose.position
+            facing = pose.facing_direction
+
+            # Find the fixture
+            fixtures = self.dt_loader.get_fixtures(ctx["participant_id"])
+            target = None
+            for f in fixtures:
+                if fixture_name.lower() in f.fixture_type.lower() or fixture_name.lower() in f.id.lower():
+                    target = f
+                    break
+
+            if target is None:
+                return Evidence(source_module="SpatialReasoner", evidence_type="spatial",
+                              content={"error": f"fixture '{fixture_name}' not found"}, confidence=0)
+
+            # Compute direction from wearer to fixture
+            dx = target.position[0] - wearer_pos[0]
+            dz = target.position[2] - wearer_pos[2]
+
+            # Compute angle from facing direction
+            facing_angle = math.atan2(facing[0], -facing[2])
+            target_angle = math.atan2(dx, -dz)
+
+            relative_angle = target_angle - facing_angle
+            # Normalize to 0-2pi
+            while relative_angle < 0:
+                relative_angle += 2 * math.pi
+            while relative_angle > 2 * math.pi:
+                relative_angle -= 2 * math.pi
+
+            # Convert to clock position
+            clock = int(round(relative_angle / (2 * math.pi) * 12))
+            if clock == 0:
+                clock = 12
+
+            distance = float(np.linalg.norm(target.position - wearer_pos))
+
+            return Evidence(
+                source_module="SpatialReasoner",
+                evidence_type="spatial",
+                time_range={"start": timestamp, "end": timestamp},
+                content={
+                    "fixture_name": target.id,
+                    "fixture_type": target.fixture_type,
+                    "clock_position": f"{clock} o'clock",
+                    "clock_number": clock,
+                    "distance_meters": round(distance, 2),
+                    "wearer_facing_clock": f"{int(round(math.degrees(facing_angle) / 30))} o'clock",
+                },
+                confidence=0.85,
+            )
         except Exception as e:
             return Evidence(source_module="SpatialReasoner", evidence_type="spatial",
                           content={"error": str(e)}, confidence=0)

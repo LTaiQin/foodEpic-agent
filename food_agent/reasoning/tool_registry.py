@@ -83,6 +83,17 @@ TOOL_SCHEMAS = {
             "required": ["query_type"],
         },
     },
+    "fixture_clock_position": {
+        "description": "Compute the clock position of a kitchen fixture (sink, stove, boiler, etc.) relative to the wearer. Returns clock direction like '3 o'clock'.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "fixture_name": {"type": "string", "description": "Name of the fixture (e.g., 'boiler', 'sink', 'stove')"},
+                "timestamp": {"type": "number", "description": "Timestamp in seconds"},
+            },
+            "required": ["fixture_name", "timestamp"],
+        },
+    },
     "query_hands": {
         "description": "Query hand-object interactions. Returns what the hands are doing.",
         "parameters": {

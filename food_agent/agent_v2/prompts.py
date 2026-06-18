@@ -26,8 +26,11 @@ CRITICAL DECISION RULES:
    - The tool will tell you which ingredients are in the recipe and which are NOT
    - For "which is NOT used" questions: the answer is the ingredient NOT in the recipe
    - Do NOT rely on video frames for recipe questions - the video may show a different scene
-2. For spatial questions (where is X, what direction):
-   - Call query_3d to get spatial information
+2. For spatial questions with clock directions (where is X, X o'clock):
+   - Extract the fixture name from the question (e.g., "boiler", "sink")
+   - Extract the timestamp from the question (e.g., "<TIME 00:00:27.2>")
+   - Call fixture_clock_position with fixture_name and timestamp
+   - The tool returns the exact clock position
 3. For action questions (what is the person doing):
    - Call query_hands and query_audio
 4. For visual questions (what do you see):
