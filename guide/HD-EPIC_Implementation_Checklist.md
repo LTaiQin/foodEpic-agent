@@ -448,7 +448,7 @@
     - [x] 3f. 如果足够 → 退出循环；如果不够 → 继续下一轮
   - [x] Step 4: Generator 生成最终答案
   - [x] Step 5: 返回 answer + evidence_chain + reasoning_trace
-- [ ] **验证**: 对一个简单问题运行 agent.run()，观察 tool_call_history 至少包含 2 次不同 tool 调用，最终返回非空 answer
+- [x] **验证**: 对一个简单问题运行 agent.run()，观察 tool_call_history 至少包含 2 次不同 tool 调用，最终返回非空 answer
 
 ### D5.3 Agent 决策 Prompt
 
@@ -496,7 +496,7 @@
 - [x] 实现 NutritionKB.lookup(ingredient)
 - [x] 实现 NutritionKB.calculate_dish(ingredients)
 - [x] 注册为 Agent 可调用的 tool (query_nutrition)
-- [ ] **验证**: lookup("tomato") 返回包含 calories 的字典；通过 Agent tool-calling 调用返回正确结果
+- [x] **验证**: lookup("tomato") 返回包含 calories 的字典；通过 Agent tool-calling 调用返回正确结果
 
 ### D6.3 SceneGraphKB
 
@@ -529,7 +529,7 @@
 - [x] Gaze + Video: 注视点 → 裁剪区域 → 物体检测，返回注视目标
 - [x] Hands + Grounding DINO: 手部掩码 + 检测框 → 接触物体识别
 - [x] SLAM + Digital Twin: 位姿 + 3D 模型 → 空间关系查询
-- [ ] Visual + Motion: 检测框 → SAM 分割 → 视频追踪 → 运动轨迹
+- [x] Visual + Motion: 检测框 → SAM 分割 → 视频追踪 → 运动轨迹
 - [x] 每个测试验证: 输入→中间输出→最终输出全链路数据格式一致
 
 ### D7.2 三模块协作测试
@@ -550,10 +550,10 @@
 
 ### D7.4 Agent 容错测试
 
-- [ ] 模块超时: 某个模块 API 超时时 Agent 能跳过并用其他模块的证据
-- [ ] 证据冲突: 两个模块给出矛盾证据时 Agent 能识别并降低置信度
+- [x] 模块超时: 某个模块 API 超时时 Agent 能跳过并用其他模块的证据
+- [x] 证据冲突: 两个模块给出矛盾证据时 Agent 能识别并降低置信度
 - [x] 数据缺失: 请求的时间戳没有数据时 Agent 能调整时间范围重试
-- [ ] 达到上限: 迭代次数达上限时 Agent 用已有证据生成最佳答案
+- [x] 达到上限: 迭代次数达上限时 Agent 用已有证据生成最佳答案
 - [x] 每个测试验证: Agent 不崩溃，返回合理答案或明确的"无法确定"
 
 ### D7.5 Prompt 优化
@@ -609,8 +609,8 @@
 
 ### D8.5 消融实验
 
-- [ ] **消融 1: 自主 vs 固定** — Agent 自主循环 vs 固定路由管线，证明自主决策更优
-- [ ] **消融 2: Skill 引导 vs 无引导** — 有 skill prompt vs 纯自主（无任何指导），证明 skill 有效
+- [x] **消融 1: 自主 vs 固定** — Agent 自主循环 vs 固定路由管线，证明自主决策更优
+- [x] **消融 2: Skill 引导 vs 无引导** — 有 skill prompt vs 纯自主（无任何指导），证明 skill 有效
 - [ ] **消融 3: 维度递增** — Video+Audio → +Gaze → +3D → +Hands → +Nutrition → +Motion，证明每增加一个维度都有提升
 - [ ] **消融 4: 迭代轮次** — 最大 1/3/5/10 轮，证明多轮自主探索有效
 - [ ] **消融 5: 工具集大小** — 只给 3 个工具 vs 7 个 vs 全部，证明工具越多 Agent 越强
