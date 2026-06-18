@@ -152,6 +152,8 @@ class Pipeline:
         registry.register("query_hands", self._tool_query_hands)
         registry.register("query_nutrition", self._tool_query_nutrition)
         registry.register("query_motion", self._tool_query_motion)
+        registry.register("count_interactions", self._tool_count_interactions)
+        registry.register("track_object", self._tool_track_object)
 
         # --- Knowledge tools ---
         registry.register("query_recipe", self._tool_query_recipe)
@@ -521,6 +523,174 @@ class Pipeline:
             return self.motion_tracker.get_motion_evidence(ctx["video_id"], frame_number)
         except Exception as e:
             return Evidence(source_module="MotionTracker", evidence_type="motion",
+                          content={"error": str(e)}, confidence=0)
+
+    def _tool_count_interactions(
+        self, bbox: List[float] = None, timestamp: float = 0,
+        time_range: float = 10.0, num_samples: int = 8, **kwargs
+    ) -> Evidence:
+        """Count open/close interactions for an object in a bounding box region.
+
+        Samples frames around the timestamp, crops to bbox, and uses vision
+        to detect state changes (open/closed).
+
+        Args:
+            bbox: [x1, y1, x2, y2] bounding box coordinates.
+            timestamp: Center timestamp in seconds.
+            time_range: Seconds before/after timestamp to analyze.
+            num_samples: Number of frames to sample.
+        """
+        ctx = self._get_context(kwargs)
+        try:
+            if not bbox or len(bbox) < 4:
+                return Evidence(source_module="VisualAnalyzer", evidence_type="visual",
+                              content={"error": "bbox required [x1,y1,x2,y2]"}, confidence=0)
+
+            # Sample frames around timestamp
+            t_start = max(0, timestamp - time_range)
+            t_end = timestamp + time_range
+            timestamps = [t_start + (t_end - t_start) * i / (num_samples - 1) for i in range(num_samples)]
+
+            states = []
+            for ts in timestamps:
+                try:
+                    frame = self.video_loader.get_frame(ctx["video_id"], ts)
+                    h, w = frame.shape[:2]
+                    x1 = max(0, int(bbox[0]))
+                    y1 = max(0, int(bbox[1]))
+                    x2 = min(w, int(bbox[2]))
+                    y2 = min(h, int(bbox[3]))
+                    crop = frame[y1:y2, x1:x2]
+
+                    if crop.size == 0:
+                        states.append({"timestamp": ts, "state": "unknown"})
+                        continue
+
+                    prompt = (
+                        "This is a cropped image of a kitchen fixture (cabinet door, drawer, dishwasher, "
+                        "washing machine, fridge, etc.). Look at the fixture carefully. "
+                        "Is the door/drawer OPEN (you can see inside or it's ajar) or CLOSED (flush/shut)? "
+                        "Reply with ONLY one word: open or closed."
+                    )
+                    response = self.mimo_client.call_vision(crop, prompt)
+                    resp_lower = response.lower().strip()
+                    if "open" in resp_lower:
+                        state = "open"
+                    elif "closed" in resp_lower or "shut" in resp_lower:
+                        state = "closed"
+                    else:
+                        state = "unknown"
+                    states.append({"timestamp": round(ts, 2), "state": state, "raw": response[:50]})
+                except Exception as e:
+                    states.append({"timestamp": ts, "state": "error", "error": str(e)[:50]})
+
+            # Count transitions (state changes)
+            transitions = 0
+            close_count = 0
+            open_count = 0
+            for i in range(1, len(states)):
+                if states[i]["state"] != states[i-1]["state"] and states[i]["state"] != "unknown" and states[i-1]["state"] != "unknown":
+                    transitions += 1
+                    if states[i]["state"] == "closed":
+                        close_count += 1
+                    elif states[i]["state"] == "open":
+                        open_count += 1
+
+            return Evidence(
+                source_module="VisualAnalyzer",
+                evidence_type="interaction_count",
+                time_range={"start": t_start, "end": t_end},
+                content={
+                    "states": states,
+                    "transitions": transitions,
+                    "close_count": close_count,
+                    "open_count": open_count,
+                    "likely_interaction_count": close_count,
+                },
+                confidence=0.7 if all(s["state"] != "unknown" for s in states) else 0.4,
+            )
+        except Exception as e:
+            return Evidence(source_module="VisualAnalyzer", evidence_type="interaction_count",
+                          content={"error": str(e)}, confidence=0)
+
+    def _tool_track_object(
+        self, bbox: List[float] = None, timestamp: float = 0,
+        time_after: float = 5.0, num_samples: int = 5, **kwargs
+    ) -> Evidence:
+        """Track where an object is placed after being picked up.
+
+        Samples frames after the timestamp, analyzes where the object appears.
+
+        Args:
+            bbox: [x1, y1, x2, y2] bounding box of the object at pickup time.
+            timestamp: Time when the object was picked up.
+            time_after: Seconds after timestamp to track.
+            num_samples: Number of frames to sample.
+        """
+        ctx = self._get_context(kwargs)
+        try:
+            if not bbox or len(bbox) < 4:
+                return Evidence(source_module="VisualAnalyzer", evidence_type="visual",
+                              content={"error": "bbox required [x1,y1,x2,y2]"}, confidence=0)
+
+            # First, identify the object at pickup time using full frame
+            try:
+                pickup_frame = self.video_loader.get_frame(ctx["video_id"], timestamp)
+                obj_prompt = (
+                    f"Look at this kitchen scene. The person is picking up an object at pixel location "
+                    f"around ({int((bbox[0]+bbox[2])/2)}, {int((bbox[1]+bbox[3])/2)}). "
+                    f"What kitchen object is the person picking up? "
+                    f"Reply with just the object name (1-2 words, e.g., 'knife', 'plate', 'onion')."
+                )
+                object_name = self.mimo_client.call_vision(pickup_frame, obj_prompt)
+                object_name = object_name.strip().split('\n')[0].strip()
+                if len(object_name) > 30:
+                    object_name = object_name[:30]
+            except Exception:
+                object_name = "kitchen object"
+
+            # Sample frames after pickup to see where object was placed
+            timestamps = [timestamp + time_after * i / (num_samples - 1) for i in range(num_samples)]
+
+            locations = []
+            for ts in timestamps:
+                try:
+                    frame = self.video_loader.get_frame(ctx["video_id"], ts)
+                    prompt = (
+                        f"A person in a kitchen just picked up a {object_name}. "
+                        f"Look at this frame carefully. Is the person holding the {object_name}? "
+                        f"Has the {object_name} been placed down? If placed, where exactly? "
+                        f"Describe the location relative to visible kitchen fixtures "
+                        f"(e.g., 'on counter near sink', 'in drawer under counter', 'on cutting board', "
+                        f"'in pot on stove', 'on plate'). "
+                        f"Be specific about which fixture it's on/in/near."
+                    )
+                    response = self.mimo_client.call_vision(frame, prompt)
+                    locations.append({
+                        "timestamp": round(ts, 2),
+                        "location": response[:150],
+                        "visible": "not visible" not in response.lower(),
+                    })
+                except Exception as e:
+                    locations.append({"timestamp": ts, "location": "error", "visible": False})
+
+            # Find the most common visible location
+            visible_locs = [l["location"] for l in locations if l["visible"]]
+            final_location = visible_locs[-1] if visible_locs else "not determined"
+
+            return Evidence(
+                source_module="VisualAnalyzer",
+                evidence_type="object_tracking",
+                time_range={"start": timestamp, "end": timestamp + time_after},
+                content={
+                    "object_name": object_name[:50],
+                    "locations": locations,
+                    "final_location": final_location[:200],
+                },
+                confidence=0.7 if visible_locs else 0.3,
+            )
+        except Exception as e:
+            return Evidence(source_module="VisualAnalyzer", evidence_type="object_tracking",
                           content={"error": str(e)}, confidence=0)
 
     def _tool_query_recipe(self, recipe_name: str = "", step_number: int = 0, **kwargs) -> Evidence:

@@ -13,6 +13,8 @@ Available tools:
 - query_hands(frame_number): Detect hand-object interactions from hand masks
 - query_nutrition(ingredients): Calculate nutritional values for a list of ingredients
 - query_motion(frame_number): Track object motion trajectories
+- count_interactions(bbox, timestamp, time_range, num_samples): Count open/close interactions for an object in a bounding box region
+- track_object(bbox, timestamp, time_after, num_samples): Track where an object is placed after being picked up
 - query_recipe(recipe_name, step_number): Query recipe knowledge base for ingredients and steps
 - list_recipes(): List all available recipes in the knowledge base
 - check_recipe_ingredients(recipe_name, ingredients): Check which ingredients are used in a recipe
@@ -57,6 +59,22 @@ CRITICAL DECISION RULES:
    - Call describe_frame at the timestamp to identify the object
    - Call query_3d to get spatial position
    - Match to the answer choices
+10. For "How many times did I close/open" (fixture interaction counting):
+    - Extract the bounding box from the question (BBOX x1 y1 x2 y2)
+    - Extract the timestamp from the question
+    - Call count_interactions with bbox, timestamp, time_range=10, num_samples=8
+    - The tool samples frames, detects open/close states, and counts transitions
+    - The answer is the close_count or open_count from the result
+11. For "Where did I put the object" (object tracking):
+    - Extract the bounding box from the question (BBOX x1 y1 x2 y2)
+    - Extract the timestamp from the question
+    - Call track_object with bbox, timestamp, time_after=5
+    - The tool identifies the object and tracks where it appears in later frames
+    - Match the final_location to the answer choices
+12. For "How much did the participant weigh" (ingredient weight):
+    - Call describe_frame at the timestamp to see the scale display
+    - Ask specifically about the weight shown on the scale
+    - The answer is the weight reading from the scale
 10. For "How much did the participant weigh" (ingredient weight):
     - Call identify_ingredients to see the ingredient
     - Call query_nutrition_kb for typical portion sizes
