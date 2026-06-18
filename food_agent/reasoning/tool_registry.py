@@ -40,6 +40,27 @@ TOOL_SCHEMAS = {
             "required": ["timestamp"],
         },
     },
+    "describe_frame": {
+        "description": "Describe what's visible in a video frame using vision AI. Useful for open-ended questions about the scene.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "timestamp": {"type": "number", "description": "Timestamp in seconds"},
+                "question": {"type": "string", "description": "Specific question about the frame"},
+            },
+            "required": ["timestamp"],
+        },
+    },
+    "identify_ingredients": {
+        "description": "Identify all food ingredients visible in a video frame. Returns ingredient names, locations, and states.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "timestamp": {"type": "number", "description": "Timestamp in seconds"},
+            },
+            "required": ["timestamp"],
+        },
+    },
     "query_gaze": {
         "description": "Query gaze/eye-tracking data. Returns fixation targets and attention info.",
         "parameters": {

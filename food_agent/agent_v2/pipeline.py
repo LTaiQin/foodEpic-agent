@@ -121,6 +121,8 @@ class Pipeline:
         registry.register("query_audio", self._tool_query_audio)
         registry.register("query_video", self._tool_query_video)
         registry.register("segment_objects", self._tool_segment_objects)
+        registry.register("describe_frame", self._tool_describe_frame)
+        registry.register("identify_ingredients", self._tool_identify_ingredients)
         registry.register("query_gaze", self._tool_query_gaze)
         registry.register("query_3d", self._tool_query_3d)
         registry.register("query_hands", self._tool_query_hands)
@@ -176,6 +178,89 @@ class Pipeline:
             )
         except Exception as e:
             return Evidence(source_module="VisualAnalyzer", evidence_type="visual",
+                          content={"error": str(e)}, confidence=0)
+
+    def _tool_describe_frame(self, timestamp: float = 10, question: str = "", **kwargs) -> Evidence:
+        """Describe a video frame using MiMo2.5 Vision API.
+
+        Useful for open-ended questions about what's happening in the scene.
+        """
+        ctx = self._get_context(kwargs)
+        try:
+            frame = self.video_loader.get_frame(ctx["video_id"], timestamp)
+            if self.mimo_client is None:
+                return Evidence(source_module="VisualAnalyzer", evidence_type="visual",
+                              content={"error": "No LLM client"}, confidence=0)
+
+            prompt = (
+                f"Look at this kitchen scene image carefully. {question}\n"
+                "Describe what you see in detail, focusing on:\n"
+                "- What objects are visible\n"
+                "- What actions are being performed\n"
+                "- Any food ingredients or utensils\n"
+                "- The spatial arrangement of objects\n"
+                "Be specific and factual."
+            )
+            response = self.mimo_client.call_vision(frame, prompt)
+
+            return Evidence(
+                source_module="VisualAnalyzer",
+                evidence_type="visual",
+                time_range={"start": timestamp, "end": timestamp},
+                content={"description": response, "timestamp": timestamp},
+                confidence=0.7,
+            )
+        except Exception as e:
+            return Evidence(source_module="VisualAnalyzer", evidence_type="visual",
+                          content={"error": str(e)}, confidence=0)
+
+    def _tool_identify_ingredients(self, timestamp: float = 10, **kwargs) -> Evidence:
+        """Identify food ingredients in a video frame using MiMo Vision.
+
+        Specifically designed for ingredient recognition tasks.
+        """
+        ctx = self._get_context(kwargs)
+        try:
+            frame = self.video_loader.get_frame(ctx["video_id"], timestamp)
+            if self.mimo_client is None:
+                return Evidence(source_module="NutritionEstimator", evidence_type="nutrition",
+                              content={"error": "No LLM client"}, confidence=0)
+
+            prompt = (
+                "Look at this kitchen scene image. Identify ALL food ingredients visible.\n"
+                "For each ingredient, provide:\n"
+                "- name: the ingredient name\n"
+                "- location: where it is in the frame\n"
+                "- state: raw/cooked/chopped/etc.\n"
+                "Return a JSON array of ingredients. Example:\n"
+                '[{"name": "tomato", "location": "on cutting board", "state": "being sliced"}]'
+            )
+            response = self.mimo_client.call_vision(frame, prompt)
+
+            # Parse ingredients
+            ingredients = []
+            try:
+                import json
+                start = response.find("[")
+                end = response.rfind("]") + 1
+                if start >= 0 and end > start:
+                    ingredients = json.loads(response[start:end])
+            except Exception:
+                pass
+
+            return Evidence(
+                source_module="NutritionEstimator",
+                evidence_type="nutrition",
+                time_range={"start": timestamp, "end": timestamp},
+                content={
+                    "ingredients": ingredients,
+                    "ingredient_count": len(ingredients),
+                    "raw_response": response[:500],
+                },
+                confidence=0.7 if ingredients else 0.3,
+            )
+        except Exception as e:
+            return Evidence(source_module="NutritionEstimator", evidence_type="nutrition",
                           content={"error": str(e)}, confidence=0)
 
     def _tool_segment_objects(self, timestamp: float = 10, text_prompt: str = "food ingredient", **kwargs) -> Evidence:
