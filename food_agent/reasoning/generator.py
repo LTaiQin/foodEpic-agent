@@ -117,7 +117,10 @@ class Generator:
             parsed = self.parse_answer(response, choices)
 
             # If parse failed and we have choices, retry with simpler prompt
-            if choices and (not parsed["answer"] or parsed["answer"].strip() == ""):
+            ans = parsed.get("answer", "")
+            if isinstance(ans, list):
+                ans = ans[0] if ans else ""
+            if choices and (not ans or str(ans).strip() == ""):
                 retry_prompt = (
                     f"Question: {question}\n\n"
                     + "\n".join(f"  {chr(65+i)}. {c}" for i, c in enumerate(choices))
@@ -136,7 +139,7 @@ class Generator:
 
     def parse_answer(
         self,
-        response: str,
+        response,
         choices: Optional[List[str]] = None,
     ) -> Dict:
         """Parse LLM response into structured answer.
@@ -144,7 +147,9 @@ class Generator:
         For multiple choice: returns the full choice text matching the letter.
         For free text: returns the response as-is.
         """
-        response = response.strip()
+        if isinstance(response, list):
+            response = response[0] if response else ""
+        response = str(response).strip()
 
         if choices:
             # Extract letter from response
@@ -159,9 +164,11 @@ class Generator:
 
         return {"answer": response, "confidence": 0.5}
 
-    def _extract_choice_letter(self, response: str, num_choices: int) -> int:
+    def _extract_choice_letter(self, response, num_choices: int) -> int:
         """Extract a choice letter (A-E) from the response."""
-        response = response.strip().upper()
+        if isinstance(response, list):
+            response = response[0] if response else ""
+        response = str(response).strip().upper()
 
         # Direct single letter
         if len(response) <= 3 and response and response[0] in "ABCDE"[:num_choices]:
@@ -184,9 +191,11 @@ class Generator:
 
         return -1
 
-    def _fuzzy_match_choice(self, response: str, choices: List[str]) -> int:
+    def _fuzzy_match_choice(self, response, choices: List[str]) -> int:
         """Fuzzy match response text to choice text."""
-        response_lower = response.lower()
+        if isinstance(response, list):
+            response = response[0] if response else ""
+        response_lower = str(response).lower()
         best_idx = -1
         best_overlap = 0
 

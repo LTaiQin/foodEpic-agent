@@ -155,6 +155,7 @@ class Pipeline:
 
         # --- Knowledge tools ---
         registry.register("query_recipe", self._tool_query_recipe)
+        registry.register("list_recipes", self._tool_list_recipes)
         registry.register("check_recipe_ingredients", self._tool_check_recipe_ingredients)
         registry.register("query_nutrition_kb", self._tool_query_nutrition_kb)
         registry.register("query_scene_graph", self._tool_query_scene_graph)
@@ -342,6 +343,29 @@ class Pipeline:
                 ev.content["gaze_direction"] = f"Looking {h_dir}, {v_dir}"
                 ev.content["yaw_degrees"] = round(float(yaw) * 57.3, 1)
                 ev.content["pitch_degrees"] = round(float(pitch) * 57.3, 1)
+
+            # Also get gaze priming data (what the person will interact with next)
+            try:
+                priming = self.gaze_tracker.get_gaze_priming(
+                    ctx["participant_id"], ctx["video_id"], start_time, end_time,
+                )
+                if priming:
+                    evidence_list.append(Evidence(
+                        source_module="GazeTracker",
+                        evidence_type="gaze_priming",
+                        time_range={"start": start_time, "end": end_time},
+                        content={
+                            "priming_events": [
+                                {"object": p.get("object_name", ""), "time": p.get("time", 0)}
+                                for p in priming[:5]
+                            ],
+                            "next_likely_interaction": priming[0].get("object_name", "") if priming else "",
+                        },
+                        confidence=0.7,
+                    ))
+            except Exception:
+                pass
+
             return evidence_list
         except Exception as e:
             return [Evidence(source_module="GazeTracker", evidence_type="gaze",
@@ -522,6 +546,23 @@ class Pipeline:
                 evidence_type="recipe",
                 content={"error": "recipe not found", "available": []},
                 confidence=0.0,
+            )
+        except Exception as e:
+            return Evidence(source_module="RecipeKB", evidence_type="recipe",
+                          content={"error": str(e)}, confidence=0)
+
+    def _tool_list_recipes(self, **kwargs) -> Evidence:
+        """List all available recipes in the knowledge base."""
+        try:
+            recipes = list(self.recipe_kb._recipes.keys()) if hasattr(self.recipe_kb, '_recipes') else []
+            return Evidence(
+                source_module="RecipeKB",
+                evidence_type="recipe",
+                content={
+                    "recipe_count": len(recipes),
+                    "recipes": recipes[:20],
+                },
+                confidence=0.9,
             )
         except Exception as e:
             return Evidence(source_module="RecipeKB", evidence_type="recipe",

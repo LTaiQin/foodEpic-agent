@@ -11,9 +11,13 @@ Available tools:
 - query_gaze(start_time, end_time): Get gaze fixation data and attention targets
 - query_3d(query_type, timestamp): Query kitchen layout, wearer position, spatial relations
 - query_hands(frame_number): Detect hand-object interactions from hand masks
-- query_nutrition(ingredients): Calculate nutritional values
+- query_nutrition(ingredients): Calculate nutritional values for a list of ingredients
 - query_motion(frame_number): Track object motion trajectories
 - query_recipe(recipe_name, step_number): Query recipe knowledge base for ingredients and steps
+- list_recipes(): List all available recipes in the knowledge base
+- check_recipe_ingredients(recipe_name, ingredients): Check which ingredients are used in a recipe
+- fixture_clock_position(fixture_name, timestamp): Get clock direction of a kitchen fixture
+- query_nutrition_kb(ingredient): Look up nutrition facts for a single ingredient
 - query_scene_graph(object_type): Query scene graph for objects and relations
 - query_commonsense(concept, relation): Query kitchen common sense knowledge
 - expand_search(modules, start_time, end_time): Expand search to more modules
@@ -35,10 +39,32 @@ CRITICAL DECISION RULES:
    - Call query_hands and query_audio
 4. For visual questions (what do you see):
    - Call describe_frame or identify_ingredients
-5. Use evidence from tools to answer - do NOT fabricate information.
-6. When sufficient evidence exists, select the best matching choice.
-7. Never call the same tool with the same parameters twice.
-8. Be efficient: 2-3 tool calls total is optimal.
+5. For "What is the person looking at" (gaze estimation):
+   - Call query_gaze with the time range from the question
+   - The gaze data includes gaze_direction (yaw/pitch) and fixation targets
+   - Match the gaze direction to visible objects in the scene
+6. For "Which recipe was carried out" (recipe recognition):
+   - Call query_recipe with each candidate recipe name
+   - Check if the recipe steps match what's visible in the video
+   - Use identify_ingredients to see what ingredients are present
+7. For "Which ingredient has higher carbs/protein" (nutrition comparison):
+   - For each ingredient, call query_nutrition_kb to get nutrition facts
+   - Compare the relevant nutrient values across ingredients
+8. For "Which ingredients were used" (ingredient retrieval):
+   - Call identify_ingredients at the timestamps mentioned in the question
+   - Compare with the answer choices
+9. For "Where is the stationary object" (object localization):
+   - Call describe_frame at the timestamp to identify the object
+   - Call query_3d to get spatial position
+   - Match to the answer choices
+10. For "How much did the participant weigh" (ingredient weight):
+    - Call identify_ingredients to see the ingredient
+    - Call query_nutrition_kb for typical portion sizes
+    - Estimate based on visual size
+11. Use evidence from tools to answer - do NOT fabricate information.
+12. When sufficient evidence exists, select the best matching choice.
+13. Never call the same tool with the same parameters twice.
+14. Be efficient: 2-3 tool calls total is optimal.
 """
 
 DECISION_PROMPT_TEMPLATE = """Current state for question answering:
