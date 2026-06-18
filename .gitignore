@@ -4,6 +4,8 @@ data-test/
 annotations/
 outputs/
 .secrets/
+weights/
+checkpoints/
 *.duckdb
 *.parquet
 *.hdf5
@@ -16,6 +18,8 @@ outputs/
 *.tar.gz
 *.tgz
 *.gz
+*.pt
+*.pth
 
 # Download/extraction logs and transient states
 *.out
