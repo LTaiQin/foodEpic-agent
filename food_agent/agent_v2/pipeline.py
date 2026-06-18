@@ -696,6 +696,9 @@ class Pipeline:
     def _tool_query_recipe(self, recipe_name: str = "", step_number: int = 0, **kwargs) -> Evidence:
         """Query recipe knowledge base."""
         try:
+            if isinstance(recipe_name, list):
+                recipe_name = recipe_name[0] if recipe_name else ""
+            recipe_name = str(recipe_name)
             if recipe_name:
                 recipe = self.recipe_kb.get_recipe(recipe_name) if hasattr(self, 'recipe_kb') else None
                 if recipe:
@@ -744,6 +747,9 @@ class Pipeline:
         Directly compares ingredient list against recipe steps.
         """
         try:
+            if isinstance(recipe_name, list):
+                recipe_name = recipe_name[0] if recipe_name else ""
+            recipe_name = str(recipe_name)
             if not recipe_name or not ingredients:
                 return Evidence(source_module="RecipeKB", evidence_type="recipe",
                               content={"error": "need recipe_name and ingredients"}, confidence=0)
@@ -769,7 +775,9 @@ class Pipeline:
 
             results = []
             for ing in ingredients:
-                ing_lower = ing.lower()
+                if isinstance(ing, list):
+                    ing = ing[0] if ing else ""
+                ing_lower = str(ing).lower()
                 # Check direct match
                 found = ing_lower in all_text
                 # Check aliases
@@ -801,6 +809,9 @@ class Pipeline:
 
     def _tool_query_nutrition_kb(self, ingredient: str = "", **kwargs) -> Dict:
         """Look up nutrition facts."""
+        if isinstance(ingredient, list):
+            ingredient = ingredient[0] if ingredient else ""
+        ingredient = str(ingredient).strip()
         result = self.nutrition_kb.lookup(ingredient)
         return result or {"error": f"ingredient '{ingredient}' not in database"}
 
