@@ -128,6 +128,17 @@ TOOL_SCHEMAS = {
             },
         },
     },
+    "check_recipe_ingredients": {
+        "description": "Check which ingredients are used in a recipe. Returns which ingredients are in the recipe and which are NOT.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "recipe_name": {"type": "string", "description": "Name of the recipe"},
+                "ingredients": {"type": "array", "items": {"type": "string"}, "description": "List of ingredients to check"},
+            },
+            "required": ["recipe_name", "ingredients"],
+        },
+    },
     "query_nutrition_kb": {
         "description": "Look up nutrition facts for a specific ingredient.",
         "parameters": {

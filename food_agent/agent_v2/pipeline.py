@@ -4,6 +4,7 @@ This is the glue code that connects:
 - Data loaders → Perception modules → Reasoning engine → Agent loop → Answer
 """
 
+import json
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -100,6 +101,28 @@ class Pipeline:
         self.commonsense_kb = CommonSenseKB()
         self.scene_graph_kb = SceneGraphKB()
 
+        # Load recipe data from annotations
+        self.recipe_kb = RecipeKB()
+        try:
+            recipe_path = Path(self.config.annotation_root) / "high-level" / "complete_recipes.json"
+            if recipe_path.exists():
+                with open(recipe_path) as f:
+                    recipe_data = json.load(f)
+                # Convert to RecipeKB format
+                recipes = {}
+                for key, recipe in recipe_data.items():
+                    name = recipe.get("name", key)
+                    recipes[name.lower()] = {
+                        "name": name,
+                        "participant": recipe.get("participant", ""),
+                        "steps": list(recipe.get("steps", {}).values()),
+                        "source": recipe.get("source", ""),
+                    }
+                self.recipe_kb._recipes = recipes
+                print(f"Loaded {len(recipes)} recipes")
+        except Exception as e:
+            print(f"Failed to load recipes: {e}")
+
         # Build tool registry with real implementations
         self.tool_registry = self._build_tool_registry()
 
@@ -131,6 +154,7 @@ class Pipeline:
 
         # --- Knowledge tools ---
         registry.register("query_recipe", self._tool_query_recipe)
+        registry.register("check_recipe_ingredients", self._tool_check_recipe_ingredients)
         registry.register("query_nutrition_kb", self._tool_query_nutrition_kb)
         registry.register("query_scene_graph", self._tool_query_scene_graph)
         registry.register("query_commonsense", self._tool_query_commonsense)
@@ -395,13 +419,94 @@ class Pipeline:
             return Evidence(source_module="MotionTracker", evidence_type="motion",
                           content={"error": str(e)}, confidence=0)
 
-    def _tool_query_recipe(self, recipe_name: str = "", step_number: int = 0, **kwargs) -> Dict:
+    def _tool_query_recipe(self, recipe_name: str = "", step_number: int = 0, **kwargs) -> Evidence:
         """Query recipe knowledge base."""
-        if recipe_name:
+        try:
+            if recipe_name:
+                recipe = self.recipe_kb.get_recipe(recipe_name) if hasattr(self, 'recipe_kb') else None
+                if recipe:
+                    return Evidence(
+                        source_module="RecipeKB",
+                        evidence_type="recipe",
+                        time_range={"start": 0, "end": 0},
+                        content={
+                            "recipe_name": recipe.get("name", ""),
+                            "steps": recipe.get("steps", []),
+                            "step_count": len(recipe.get("steps", [])),
+                            "source": recipe.get("source", ""),
+                        },
+                        confidence=0.9,
+                    )
+            return Evidence(
+                source_module="RecipeKB",
+                evidence_type="recipe",
+                content={"error": "recipe not found", "available": []},
+                confidence=0.0,
+            )
+        except Exception as e:
+            return Evidence(source_module="RecipeKB", evidence_type="recipe",
+                          content={"error": str(e)}, confidence=0)
+
+    def _tool_check_recipe_ingredients(self, recipe_name: str = "", ingredients: List[str] = None, **kwargs) -> Evidence:
+        """Check which ingredients are used in a recipe.
+
+        Directly compares ingredient list against recipe steps.
+        """
+        try:
+            if not recipe_name or not ingredients:
+                return Evidence(source_module="RecipeKB", evidence_type="recipe",
+                              content={"error": "need recipe_name and ingredients"}, confidence=0)
+
             recipe = self.recipe_kb.get_recipe(recipe_name) if hasattr(self, 'recipe_kb') else None
-            if recipe:
-                return recipe
-        return {"error": "recipe not found", "available": []}
+            if not recipe:
+                return Evidence(source_module="RecipeKB", evidence_type="recipe",
+                              content={"error": f"recipe '{recipe_name}' not found"}, confidence=0)
+
+            all_text = ' '.join(recipe.get('steps', [])).lower()
+
+            # Ingredient aliases (stilton = blue cheese, cheddar = cheese, etc.)
+            aliases = {
+                'stilton': ['blue cheese', 'stilton'],
+                'cheddar': ['cheese', 'cheddar'],
+                'parmesan': ['cheese', 'parmesan', 'parmigiano'],
+                'mozzarella': ['cheese', 'mozzarella'],
+                'feta': ['cheese', 'feta'],
+                'yogurt': ['yoghurt', 'yogurt'],
+                'cilantro': ['coriander', 'cilantro'],
+                'scallion': ['green onion', 'scallion', 'spring onion'],
+            }
+
+            results = []
+            for ing in ingredients:
+                ing_lower = ing.lower()
+                # Check direct match
+                found = ing_lower in all_text
+                # Check aliases
+                if not found and ing_lower in aliases:
+                    for alias in aliases[ing_lower]:
+                        if alias in all_text:
+                            found = True
+                            break
+                results.append({
+                    "ingredient": ing,
+                    "in_recipe": found,
+                    "match_type": "direct" if found else "not_found",
+                })
+
+            return Evidence(
+                source_module="RecipeKB",
+                evidence_type="recipe",
+                content={
+                    "recipe_name": recipe.get("name", ""),
+                    "ingredient_check": results,
+                    "not_in_recipe": [r["ingredient"] for r in results if not r["in_recipe"]],
+                    "in_recipe": [r["ingredient"] for r in results if r["in_recipe"]],
+                },
+                confidence=0.95,
+            )
+        except Exception as e:
+            return Evidence(source_module="RecipeKB", evidence_type="recipe",
+                          content={"error": str(e)}, confidence=0)
 
     def _tool_query_nutrition_kb(self, ingredient: str = "", **kwargs) -> Dict:
         """Look up nutrition facts."""

@@ -15,9 +15,23 @@ Evidence:
 {evidence_summary}
 
 {choices_block}
-Instructions:
-- Analyze the evidence carefully.
-- {instruction}
+CRITICAL REASONING RULES:
+1. For "which ingredient is NOT used" questions:
+   - Look at the recipe steps in the evidence
+   - Check which ingredients are mentioned in the recipe
+   - The answer is the ingredient that is NOT mentioned
+   - IMPORTANT: Consider ingredient types - "stilton" is a type of "blue cheese", "cheddar" is a type of "cheese"
+   - If the recipe says "blue cheese", then "stilton" IS used (because stilton is a blue cheese)
+   - If the recipe says "cheese", then "cheddar" IS used (because cheddar is a cheese)
+   - The answer should be the ingredient that has NO connection to any ingredient in the recipe
+2. For spatial questions:
+   - Use the spatial data from query_3d
+   - Convert directions to clock positions if needed
+3. For action questions:
+   - Use hand interaction and audio data
+   - The answer should match what the person is actually doing
+
+{instruction}
 - Be concise and precise.
 
 Answer:"""

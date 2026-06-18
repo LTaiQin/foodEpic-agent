@@ -186,8 +186,14 @@ class MultimodalAgent:
 
     def _build_decision_prompt(self, state: AgentState) -> str:
         """Build the decision prompt from current state."""
+        # Include choices in the question if available
+        question = state.question
+        if state.choices:
+            choice_text = " ".join(f"{chr(65+i)}.{c}" for i, c in enumerate(state.choices))
+            question = f"{question}\n\nAnswer choices: {choice_text}"
+
         return DECISION_PROMPT_TEMPLATE.format(
-            question=state.question,
+            question=question,
             category=state.category,
             iteration=state.iteration,
             max_iterations=self.max_iterations,

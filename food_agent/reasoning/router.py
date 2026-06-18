@@ -6,9 +6,9 @@ from typing import Dict, List, Optional
 # Default routing table
 ROUTE_TABLE = {
     "recipe": {
-        "primary": ["VisualAnalyzer", "RecipeKB"],
+        "primary": ["RecipeKB", "VisualAnalyzer"],
         "secondary": ["AudioAnalyzer", "HandInteractor"],
-        "description": "Recipe identification, step matching",
+        "description": "Recipe identification, step matching, ingredient checking",
     },
     "ingredient": {
         "primary": ["VisualAnalyzer", "HandInteractor"],
@@ -49,7 +49,7 @@ ROUTE_TABLE = {
 
 # Keywords for rule-based classification
 CATEGORY_KEYWORDS = {
-    "recipe": ["recipe", "step", "cooking", "dish", "meal", "prepare", "cook", "which recipe", "what step", "which step"],
+    "recipe": ["recipe", "step", "cooking", "dish", "meal", "prepare", "cook", "which recipe", "what step", "which step", "not used in", "used in"],
     "ingredient": ["ingredient", "food item", "vegetable", "fruit", "meat", "spice", "what food", "what ingredient", "visible food", "identify"],
     "nutrition": ["calorie", "nutrition", "protein", "carb", "fat", "healthy", "diet", "how many calories", "nutritional", "meal healthy"],
     "fine_grained_action": ["doing", "action", "activity", "performing", "stirring", "cutting", "chopping", "what is.*doing", "what action", "or chopping"],

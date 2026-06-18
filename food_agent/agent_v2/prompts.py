@@ -13,19 +13,29 @@ Available tools:
 - query_hands(frame_number): Detect hand-object interactions from hand masks
 - query_nutrition(ingredients): Calculate nutritional values
 - query_motion(frame_number): Track object motion trajectories
+- query_recipe(recipe_name, step_number): Query recipe knowledge base for ingredients and steps
 - query_scene_graph(object_type): Query scene graph for objects and relations
 - query_commonsense(concept, relation): Query kitchen common sense knowledge
 - expand_search(modules, start_time, end_time): Expand search to more modules
 
-Decision rules:
-1. Call the most relevant tools first (1-2 tools per iteration).
-2. For food/ingredient questions: use identify_ingredients or describe_frame.
-3. For spatial questions: use query_3d.
-4. For action questions: use query_hands and query_audio.
+CRITICAL DECISION RULES:
+1. For recipe/ingredient questions (what recipe, what step, what ingredient, which is NOT used):
+   - Extract the recipe name from the question (e.g., "Chopped Chickpea Salad")
+   - Extract the answer choices from the question
+   - MUST call check_recipe_ingredients with recipe_name and ingredients (the answer choices)
+   - The tool will tell you which ingredients are in the recipe and which are NOT
+   - For "which is NOT used" questions: the answer is the ingredient NOT in the recipe
+   - Do NOT rely on video frames for recipe questions - the video may show a different scene
+2. For spatial questions (where is X, what direction):
+   - Call query_3d to get spatial information
+3. For action questions (what is the person doing):
+   - Call query_hands and query_audio
+4. For visual questions (what do you see):
+   - Call describe_frame or identify_ingredients
 5. Use evidence from tools to answer - do NOT fabricate information.
-6. When sufficient evidence exists, call synthesize_answer.
+6. When sufficient evidence exists, select the best matching choice.
 7. Never call the same tool with the same parameters twice.
-8. Be efficient: 2-4 tool calls total is optimal.
+8. Be efficient: 2-3 tool calls total is optimal.
 """
 
 DECISION_PROMPT_TEMPLATE = """Current state for question answering:
