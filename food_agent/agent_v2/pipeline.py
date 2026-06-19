@@ -527,12 +527,11 @@ class Pipeline:
 
     def _tool_count_interactions(
         self, bbox: List[float] = None, timestamp: float = 0,
-        time_range: float = 10.0, num_samples: int = 8, **kwargs
+        time_range: float = 15.0, num_samples: int = 10, **kwargs
     ) -> Evidence:
         """Count open/close interactions for an object in a bounding box region.
 
-        Samples frames around the timestamp, crops to bbox, and uses vision
-        to detect state changes (open/closed).
+        Samples frames around the timestamp, analyzes the scene to detect state changes.
 
         Args:
             bbox: [x1, y1, x2, y2] bounding box coordinates.
@@ -546,6 +545,22 @@ class Pipeline:
                 return Evidence(source_module="VisualAnalyzer", evidence_type="visual",
                               content={"error": "bbox required [x1,y1,x2,y2]"}, confidence=0)
 
+            # First, identify what fixture is at the bounding box
+            try:
+                center_frame = self.video_loader.get_frame(ctx["video_id"], timestamp)
+                center_x = int((bbox[0] + bbox[2]) / 2)
+                center_y = int((bbox[1] + bbox[3]) / 2)
+                identify_prompt = (
+                    f"Look at this egocentric kitchen video frame. "
+                    f"What kitchen fixture is at pixel location ({center_x}, {center_y})? "
+                    f"Is it a fridge, cabinet, drawer, dishwasher, washing machine, or something else? "
+                    f"Reply with just the fixture name (1-2 words)."
+                )
+                fixture_name = self.mimo_client.call_vision(center_frame, identify_prompt)
+                fixture_name = fixture_name.strip().split('\n')[0].strip()[:30]
+            except Exception:
+                fixture_name = "fixture"
+
             # Sample frames around timestamp
             t_start = max(0, timestamp - time_range)
             t_end = timestamp + time_range
@@ -555,24 +570,13 @@ class Pipeline:
             for ts in timestamps:
                 try:
                     frame = self.video_loader.get_frame(ctx["video_id"], ts)
-                    h, w = frame.shape[:2]
-                    x1 = max(0, int(bbox[0]))
-                    y1 = max(0, int(bbox[1]))
-                    x2 = min(w, int(bbox[2]))
-                    y2 = min(h, int(bbox[3]))
-                    crop = frame[y1:y2, x1:x2]
-
-                    if crop.size == 0:
-                        states.append({"timestamp": ts, "state": "unknown"})
-                        continue
-
                     prompt = (
-                        "This is a cropped image of a kitchen fixture (cabinet door, drawer, dishwasher, "
-                        "washing machine, fridge, etc.). Look at the fixture carefully. "
-                        "Is the door/drawer OPEN (you can see inside or it's ajar) or CLOSED (flush/shut)? "
-                        "Reply with ONLY one word: open or closed."
+                        f"Look at this egocentric kitchen video frame. Focus on the {fixture_name} "
+                        f"at the center of the image. Is the {fixture_name} OPEN (door/drawer ajar, "
+                        f"can see inside) or CLOSED (flush, shut, door closed)? "
+                        f"Reply with ONLY one word: open or closed."
                     )
-                    response = self.mimo_client.call_vision(crop, prompt)
+                    response = self.mimo_client.call_vision(frame, prompt)
                     resp_lower = response.lower().strip()
                     if "open" in resp_lower:
                         state = "open"
@@ -601,6 +605,7 @@ class Pipeline:
                 evidence_type="interaction_count",
                 time_range={"start": t_start, "end": t_end},
                 content={
+                    "fixture_name": fixture_name,
                     "states": states,
                     "transitions": transitions,
                     "close_count": close_count,
@@ -615,7 +620,7 @@ class Pipeline:
 
     def _tool_track_object(
         self, bbox: List[float] = None, timestamp: float = 0,
-        time_after: float = 5.0, num_samples: int = 5, **kwargs
+        time_after: float = 8.0, num_samples: int = 6, **kwargs
     ) -> Evidence:
         """Track where an object is placed after being picked up.
 
@@ -636,47 +641,52 @@ class Pipeline:
             # First, identify the object at pickup time using full frame
             try:
                 pickup_frame = self.video_loader.get_frame(ctx["video_id"], timestamp)
+                center_x = int((bbox[0] + bbox[2]) / 2)
+                center_y = int((bbox[1] + bbox[3]) / 2)
                 obj_prompt = (
-                    f"Look at this kitchen scene. The person is picking up an object at pixel location "
-                    f"around ({int((bbox[0]+bbox[2])/2)}, {int((bbox[1]+bbox[3])/2)}). "
-                    f"What kitchen object is the person picking up? "
-                    f"Reply with just the object name (1-2 words, e.g., 'knife', 'plate', 'onion')."
+                    f"Look at this egocentric kitchen video frame. The person is picking up an object "
+                    f"at pixel location approximately ({center_x}, {center_y}) in the image. "
+                    f"What specific kitchen object is the person picking up? "
+                    f"Be specific: is it a utensil, ingredient, container, or appliance? "
+                    f"Reply with just the object name (1-3 words)."
                 )
                 object_name = self.mimo_client.call_vision(pickup_frame, obj_prompt)
                 object_name = object_name.strip().split('\n')[0].strip()
-                if len(object_name) > 30:
-                    object_name = object_name[:30]
+                if len(object_name) > 40:
+                    object_name = object_name[:40]
             except Exception:
                 object_name = "kitchen object"
 
             # Sample frames after pickup to see where object was placed
-            timestamps = [timestamp + time_after * i / (num_samples - 1) for i in range(num_samples)]
+            # Use more samples in the first few seconds (placement usually happens quickly)
+            timestamps = [timestamp + 1, timestamp + 2, timestamp + 3, timestamp + 4, timestamp + 6, timestamp + 8]
 
             locations = []
             for ts in timestamps:
                 try:
                     frame = self.video_loader.get_frame(ctx["video_id"], ts)
                     prompt = (
-                        f"A person in a kitchen just picked up a {object_name}. "
-                        f"Look at this frame carefully. Is the person holding the {object_name}? "
-                        f"Has the {object_name} been placed down? If placed, where exactly? "
-                        f"Describe the location relative to visible kitchen fixtures "
-                        f"(e.g., 'on counter near sink', 'in drawer under counter', 'on cutting board', "
-                        f"'in pot on stove', 'on plate'). "
-                        f"Be specific about which fixture it's on/in/near."
+                        f"An egocentric kitchen video frame. A person just picked up a {object_name} "
+                        f"at {timestamp:.0f}s. Look at this frame at {ts:.0f}s. "
+                        f"Is the person still HOLDING the {object_name} in their hand? "
+                        f"Or has the {object_name} been PLACED DOWN? "
+                        f"If placed, describe the exact location using kitchen landmarks: "
+                        f"'on [counter/drawer/cupboard/shelf/plate/cutting board] near/above/below [sink/stove/microwave/fridge]' "
+                        f"If still holding, say 'holding'."
                     )
                     response = self.mimo_client.call_vision(frame, prompt)
                     locations.append({
                         "timestamp": round(ts, 2),
-                        "location": response[:150],
-                        "visible": "not visible" not in response.lower(),
+                        "location": response[:200],
+                        "holding": "holding" in response.lower(),
+                        "placed": "placed" in response.lower() or "on " in response.lower(),
                     })
                 except Exception as e:
-                    locations.append({"timestamp": ts, "location": "error", "visible": False})
+                    locations.append({"timestamp": ts, "location": "error", "holding": False, "placed": False})
 
-            # Find the most common visible location
-            visible_locs = [l["location"] for l in locations if l["visible"]]
-            final_location = visible_locs[-1] if visible_locs else "not determined"
+            # Find the first frame where object was placed (not holding)
+            placed_locs = [l["location"] for l in locations if l["placed"] and not l["holding"]]
+            final_location = placed_locs[-1] if placed_locs else "not determined"
 
             return Evidence(
                 source_module="VisualAnalyzer",
@@ -686,8 +696,9 @@ class Pipeline:
                     "object_name": object_name[:50],
                     "locations": locations,
                     "final_location": final_location[:200],
+                    "placed_at": placed_locs[-1][:200] if placed_locs else "unknown",
                 },
-                confidence=0.7 if visible_locs else 0.3,
+                confidence=0.7 if placed_locs else 0.3,
             )
         except Exception as e:
             return Evidence(source_module="VisualAnalyzer", evidence_type="object_tracking",
