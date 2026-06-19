@@ -682,8 +682,8 @@ class Pipeline:
                 time_range={"start": timestamp, "end": timestamp + time_after},
                 content={
                     "object_name": object_name[:50],
-                    "locations": locations,
                     "final_location": final_location[:200],
+                    "placed_count": len(placed_locs),
                 },
                 confidence=0.7 if placed_locs else 0.3,
             )
