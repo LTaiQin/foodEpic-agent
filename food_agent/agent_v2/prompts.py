@@ -65,12 +65,16 @@ CRITICAL DECISION RULES:
     - Call count_interactions with bbox, timestamp, time_range=10, num_samples=8
     - The tool samples frames, detects open/close states, and counts transitions
     - The answer is the close_count or open_count from the result
-11. For "Where did I put the object" (object tracking):
+11. For "Where did I put/take the object" (object tracking):
     - Extract the bounding box from the question (BBOX x1 y1 x2 y2)
     - Extract the timestamp from the question
-    - Call track_object with bbox, timestamp, time_after=5
+    - Call track_object with bbox, timestamp
     - The tool identifies the object and tracks where it appears in later frames
-    - Match the final_location to the answer choices
+    - The tool returns final_location describing where the object was placed
+    - IMPORTANT: Match the final_location text to the closest answer choice
+    - If track_object returns "not determined", use describe_frame to analyze the scene
+    - Look for kitchen landmarks in the description: counter, drawer, cupboard, sink, hob, oven, etc.
+    - Match these landmarks to the answer choices
 12. For "How much did the participant weigh" (ingredient weight):
     - Call describe_frame at the timestamp to see the scale display
     - Ask specifically about the weight shown on the scale

@@ -30,6 +30,14 @@ CRITICAL REASONING RULES:
 3. For action questions:
    - Use hand interaction and audio data
    - The answer should match what the person is actually doing
+4. For "where did I put/take the object" questions:
+   - Look at the object_tracking evidence for final_location or placed_at
+   - Match the location description to the closest answer option
+   - Kitchen landmarks: counter, drawer, cupboard, shelf, sink, hob, oven, microwave, fridge, bin, dishwasher
+   - "counter" near "sink" matches "counter right from sink" or "counter left from sink"
+   - "on counter" could match "counter top right from dishwasher" or similar
+   - If evidence says "not determined", use describe_frame evidence to infer location
+   - ALWAYS pick the closest matching option, never leave blank
 
 {instruction}
 - Be concise and precise.

@@ -620,72 +620,60 @@ class Pipeline:
 
     def _tool_track_object(
         self, bbox: List[float] = None, timestamp: float = 0,
-        time_after: float = 8.0, num_samples: int = 6, **kwargs
+        time_after: float = 15.0, num_samples: int = 8, **kwargs
     ) -> Evidence:
-        """Track where an object is placed after being picked up.
-
-        Samples frames after the timestamp, analyzes where the object appears.
-
-        Args:
-            bbox: [x1, y1, x2, y2] bounding box of the object at pickup time.
-            timestamp: Time when the object was picked up.
-            time_after: Seconds after timestamp to track.
-            num_samples: Number of frames to sample.
-        """
+        """Track where an object is placed after being picked up."""
         ctx = self._get_context(kwargs)
         try:
             if not bbox or len(bbox) < 4:
                 return Evidence(source_module="VisualAnalyzer", evidence_type="visual",
                               content={"error": "bbox required [x1,y1,x2,y2]"}, confidence=0)
 
-            # First, identify the object at pickup time using full frame
+            # Identify object at pickup time
             try:
                 pickup_frame = self.video_loader.get_frame(ctx["video_id"], timestamp)
                 center_x = int((bbox[0] + bbox[2]) / 2)
                 center_y = int((bbox[1] + bbox[3]) / 2)
                 obj_prompt = (
                     f"Look at this egocentric kitchen video frame. The person is picking up an object "
-                    f"at pixel location approximately ({center_x}, {center_y}) in the image. "
+                    f"at pixel location approximately ({center_x}, {center_y}). "
                     f"What specific kitchen object is the person picking up? "
-                    f"Be specific: is it a utensil, ingredient, container, or appliance? "
                     f"Reply with just the object name (1-3 words)."
                 )
                 object_name = self.mimo_client.call_vision(pickup_frame, obj_prompt)
-                object_name = object_name.strip().split('\n')[0].strip()
-                if len(object_name) > 40:
-                    object_name = object_name[:40]
+                object_name = object_name.strip().split('\n')[0].strip()[:40]
             except Exception:
                 object_name = "kitchen object"
 
-            # Sample frames after pickup to see where object was placed
-            # Use more samples in the first few seconds (placement usually happens quickly)
-            timestamps = [timestamp + 1, timestamp + 2, timestamp + 3, timestamp + 4, timestamp + 6, timestamp + 8]
+            # Sample frames after pickup - more samples, wider range
+            timestamps = [timestamp + 2, timestamp + 4, timestamp + 6, timestamp + 8,
+                         timestamp + 10, timestamp + 12, timestamp + 15, timestamp + 20]
 
             locations = []
             for ts in timestamps:
                 try:
                     frame = self.video_loader.get_frame(ctx["video_id"], ts)
                     prompt = (
-                        f"An egocentric kitchen video frame. A person just picked up a {object_name} "
-                        f"at {timestamp:.0f}s. Look at this frame at {ts:.0f}s. "
-                        f"Is the person still HOLDING the {object_name} in their hand? "
-                        f"Or has the {object_name} been PLACED DOWN? "
-                        f"If placed, describe the exact location using kitchen landmarks: "
-                        f"'on [counter/drawer/cupboard/shelf/plate/cutting board] near/above/below [sink/stove/microwave/fridge]' "
-                        f"If still holding, say 'holding'."
+                        f"An egocentric kitchen video frame at {ts:.0f}s. A person picked up a {object_name} "
+                        f"at {timestamp:.0f}s. Look carefully at the person's hands and the scene. "
+                        f"Is the person still HOLDING the {object_name}? Or has it been PLACED somewhere? "
+                        f"Reply in one sentence: 'Holding [object]' or 'Placed on/in [location]'. "
+                        f"Be specific about the location (e.g., 'Placed on counter near sink', 'Placed in drawer')."
                     )
                     response = self.mimo_client.call_vision(frame, prompt)
+                    is_holding = "holding" in response.lower()[:20]
+                    is_placed = "placed" in response.lower()[:20]
                     locations.append({
                         "timestamp": round(ts, 2),
                         "location": response[:200],
-                        "holding": "holding" in response.lower(),
-                        "placed": "placed" in response.lower() or "on " in response.lower(),
+                        "holding": is_holding,
+                        "placed": is_placed,
                     })
-                except Exception as e:
+                except Exception:
                     locations.append({"timestamp": ts, "location": "error", "holding": False, "placed": False})
 
-            # Find the first frame where object was placed (not holding)
-            placed_locs = [l["location"] for l in locations if l["placed"] and not l["holding"]]
+            # Find placement location
+            placed_locs = [l["location"] for l in locations if l["placed"]]
             final_location = placed_locs[-1] if placed_locs else "not determined"
 
             return Evidence(
@@ -696,7 +684,6 @@ class Pipeline:
                     "object_name": object_name[:50],
                     "locations": locations,
                     "final_location": final_location[:200],
-                    "placed_at": placed_locs[-1][:200] if placed_locs else "unknown",
                 },
                 confidence=0.7 if placed_locs else 0.3,
             )

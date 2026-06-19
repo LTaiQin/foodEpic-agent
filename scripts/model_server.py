@@ -18,8 +18,10 @@ import os
 import signal
 import socket
 import sys
+import threading
 import time
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -46,7 +48,7 @@ def start_server():
 
     from food_agent.agent_v2.pipeline import Pipeline
     pipeline = Pipeline(load_models=False)
-    pipeline.agent.max_iterations = 5
+    pipeline.agent.max_iterations = 8
     pipeline.agent.timeout = 120
 
     print(f"Pipeline loaded in {time.time()-t0:.1f}s")
@@ -59,10 +61,10 @@ def start_server():
     # Start socket server
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     server.bind(SOCKET_PATH)
-    server.listen(1)
+    server.listen(16)  # Allow more pending connections
     server.settimeout(1.0)
 
-    print(f"Server listening on {SOCKET_PATH}")
+    print(f"Server listening on {SOCKET_PATH} (max_workers=4)")
 
     running = True
 
@@ -73,19 +75,13 @@ def start_server():
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
 
-    while running:
+    def handle_request(conn):
+        """Handle a single request in a thread."""
         try:
-            conn, _ = server.accept()
-        except socket.timeout:
-            continue
-        except Exception:
-            break
-
-        try:
-            data = conn.recv(1024 * 1024 * 10)  # 10MB max
+            data = conn.recv(1024 * 1024 * 10)
             if not data:
                 conn.close()
-                continue
+                return
 
             request = json.loads(data.decode())
             action = request.get("action", "")
@@ -111,6 +107,7 @@ def start_server():
 
             elif action == "shutdown":
                 conn.sendall(json.dumps({"status": "shutting_down"}).encode())
+                nonlocal running
                 running = False
 
             else:
@@ -123,6 +120,22 @@ def start_server():
                 pass
         finally:
             conn.close()
+
+    # Thread pool for handling concurrent requests
+    executor = ThreadPoolExecutor(max_workers=4)
+
+    while running:
+        try:
+            conn, _ = server.accept()
+        except socket.timeout:
+            continue
+        except Exception:
+            break
+
+        executor.submit(handle_request, conn)
+
+    executor.shutdown(wait=False)
+    server.close()
 
     # Cleanup
     server.close()

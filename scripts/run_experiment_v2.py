@@ -84,6 +84,24 @@ def run_experiment(
     correct = 0
     total = 0
 
+    # Load existing results for resume
+    existing_ids = set()
+    if output_file and Path(output_file).exists():
+        try:
+            with open(output_file) as f:
+                existing = json.load(f)
+            results = existing.get("results", [])
+            correct = existing.get("correct", 0)
+            total = existing.get("total", 0)
+            existing_ids = {r["id"] for r in results}
+            print(f"Resuming: {len(results)} questions already done")
+        except Exception:
+            pass
+
+    # Filter out already-answered questions
+    questions = [q for q in questions if q["id"] not in existing_ids]
+    print(f"Remaining: {len(questions)} questions")
+
     print(f"\nRunning {len(questions)} questions via model server...\n")
     print(f"{'#':>4} | {'Category':>30} | {'Pred':>5} | {'GT':>5} | {'OK':>3} | {'Conf':>5} | {'Tools':>5} | {'Time':>5}")
     print("-" * 85)
