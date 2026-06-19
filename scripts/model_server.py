@@ -114,8 +114,12 @@ def start_server():
                 conn.sendall(json.dumps({"error": f"unknown action: {action}"}).encode())
 
         except Exception as e:
+            import traceback
             try:
-                conn.sendall(json.dumps({"error": str(e)}).encode())
+                conn.sendall(json.dumps({
+                    "error": str(e),
+                    "error_traceback": traceback.format_exc(),
+                }).encode())
             except Exception:
                 pass
         finally:

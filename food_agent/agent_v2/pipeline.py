@@ -404,6 +404,9 @@ class Pipeline:
 
         Returns the fixture's position as a clock direction (e.g., "3 o'clock").
         """
+        if isinstance(fixture_name, list):
+            fixture_name = fixture_name[0] if fixture_name else ""
+        fixture_name = str(fixture_name)
         ctx = self._get_context(kwargs)
         try:
             import math

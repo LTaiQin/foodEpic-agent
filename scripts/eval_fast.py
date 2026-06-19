@@ -93,9 +93,13 @@ def answer_question(q: dict) -> dict:
                     pred_idx = j
                     break
 
-    is_correct = pred_idx == q["correct_idx"]
+        is_correct = pred_idx == q["correct_idx"]
 
-    return {
+        # Show error tracebacks for debugging
+        if "error_traceback" in result and result["error_traceback"]:
+            print(f"  TRACEBACK: {result['error_traceback'][:300]}")
+
+        return {
         "id": q["id"], "category": q["category"],
         "question": q["question"][:200], "video_id": q["video_id"],
         "prediction": pred_answer[:200], "pred_idx": pred_idx,

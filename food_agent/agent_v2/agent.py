@@ -53,6 +53,30 @@ class MultimodalAgent:
         participant_id: str = "",
         choices: Optional[List[str]] = None,
     ) -> Dict:
+        """Run the autonomous agent loop to answer a question."""
+        import traceback
+        try:
+            return self._run_impl(question, video_id, participant_id, choices)
+        except Exception as e:
+            return {
+                "answer": f"Error: {e}",
+                "confidence": 0.0,
+                "category": "",
+                "evidence_chain": [],
+                "reasoning_trace": {},
+                "tool_calls": [],
+                "iterations": 0,
+                "error_traceback": traceback.format_exc(),
+            }
+
+    def _run_impl(
+        self,
+        question: str,
+        video_id: str = "",
+        participant_id: str = "",
+        choices: Optional[List[str]] = None,
+    ) -> Dict:
+        """Implementation of the agent loop."""
         """Run the autonomous agent loop to answer a question.
 
         Args:
@@ -252,6 +276,9 @@ class MultimodalAgent:
     @staticmethod
     def _module_to_tool(module_name: str) -> str:
         """Convert a perception module name to its corresponding tool name."""
+        if isinstance(module_name, list):
+            module_name = module_name[0] if module_name else ""
+        module_name = str(module_name)
         mapping = {
             "AudioAnalyzer": "query_audio",
             "VisualAnalyzer": "query_video",
