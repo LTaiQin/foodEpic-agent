@@ -39,9 +39,50 @@ CRITICAL REASONING RULES:
    - "on counter" could match "counter top right from dishwasher" or similar
    - If evidence says "not determined", use describe_frame evidence to infer location
    - ALWAYS pick the closest matching option, never leave blank
+5. For "what is the person looking at" (gaze) questions:
+   - Use gaze evidence to determine gaze direction
+   - Match gaze direction to the closest fixture in the choices
+   - If gaze says "looking at counter near microwave", match to "counter near microwave" or similar
+   - ALWAYS pick the closest matching option
+6. For "which ingredients were used" (retrieval) questions:
+   - Use identify_ingredients evidence to find ingredients in the time range
+   - Match identified ingredients to the choices
+   - If multiple ingredients match, pick the one most clearly visible
+   - ALWAYS pick the closest matching option
+7. For "where is X located" (fixture location) questions:
+   - Use fixture_clock_position evidence for clock direction
+   - Match clock direction to the choices
+   - If evidence says "3 o'clock", pick the choice with "3 o'clock"
+   - ALWAYS pick the exact matching option
+8. For "what objects are in/on" (contents) questions:
+   - Use describe_frame evidence to identify objects
+   - Match identified objects to the choices
+   - If evidence says "Nothing", pick "Nothing" if available
+   - ALWAYS pick the closest matching option
+9. For "how much did the participant weigh" questions:
+   - Use describe_frame evidence to read scale display
+   - Match weight reading to the choices
+   - If evidence says "101 g", pick the choice with "101 g"
+   - ALWAYS pick the exact matching option
+10. For "what is the order of ingredients" questions:
+    - Use recipe steps evidence to determine ingredient order
+    - Match the first ingredient to the choices
+    - If evidence says "first ingredient is olive oil", pick "olive oil"
+    - ALWAYS pick the closest matching option
+11. For "how many times" (counting) questions:
+    - Use count_interactions or motion evidence for counts
+    - Match count to the choices
+    - If evidence says "3", pick the choice with "3"
+    - ALWAYS pick the exact matching option
+12. For "when was ingredient added" questions:
+    - Use recipe steps evidence to find ingredient addition time
+    - Match time segment to the choices
+    - If evidence says "added at 00:05:33", pick the choice with that time
+    - ALWAYS pick the closest matching option
 
 {instruction}
 - Be concise and precise.
+- IMPORTANT: NEVER leave the answer blank. Always pick the closest matching option.
 
 Answer:"""
 
