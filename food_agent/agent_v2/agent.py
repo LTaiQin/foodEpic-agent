@@ -243,6 +243,9 @@ class MultimodalAgent:
 
         try:
             response = self._mimo.call_text(SYSTEM_PROMPT + "\n\n" + prompt)
+            if isinstance(response, list):
+                response = response[0] if response else ""
+            response = str(response)
             # Parse JSON from response
             start = response.find("{")
             end = response.rfind("}") + 1

@@ -129,7 +129,10 @@ class Router:
         )
 
         try:
-            response = mimo_client.call_text(prompt).strip().lower()
+            response = mimo_client.call_text(prompt)
+            if isinstance(response, list):
+                response = response[0] if response else ""
+            response = str(response).strip().lower()
             # Match to closest category
             for cat in categories:
                 if cat in response or response in cat:

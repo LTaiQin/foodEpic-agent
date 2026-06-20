@@ -124,7 +124,13 @@ class MimoClient:
                 self._cache.put(cache_key, text)
                 return text
             except Exception as e:
-                if attempt < self.max_retries - 1:
+                error_str = str(e)
+                # Handle rate limits with longer wait
+                if "429" in error_str or "rate" in error_str.lower():
+                    wait_time = min(30, 5 * (2 ** attempt))
+                    print(f"Rate limited, waiting {wait_time}s...")
+                    time.sleep(wait_time)
+                elif attempt < self.max_retries - 1:
                     time.sleep(2 ** attempt)
                 else:
                     return f"API error: {e}"
@@ -153,7 +159,12 @@ class MimoClient:
                 self._cache.put(cache_key, text)
                 return text
             except Exception as e:
-                if attempt < self.max_retries - 1:
+                error_str = str(e)
+                if "429" in error_str or "rate" in error_str.lower():
+                    wait_time = min(30, 5 * (2 ** attempt))
+                    print(f"Rate limited, waiting {wait_time}s...")
+                    time.sleep(wait_time)
+                elif attempt < self.max_retries - 1:
                     time.sleep(2 ** attempt)
                 else:
                     return f"API error: {e}"

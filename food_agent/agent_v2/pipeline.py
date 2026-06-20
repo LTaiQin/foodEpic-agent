@@ -584,6 +584,9 @@ class Pipeline:
                         f"Reply with ONLY one word: open or closed."
                     )
                     response = self.mimo_client.call_vision(frame, prompt)
+                    if isinstance(response, list):
+                        response = response[0] if response else ""
+                    response = str(response)
                     resp_lower = response.lower().strip()
                     if "open" in resp_lower:
                         state = "open"
@@ -668,6 +671,9 @@ class Pipeline:
                         f"Be specific about the location (e.g., 'Placed on counter near sink', 'Placed in drawer')."
                     )
                     response = self.mimo_client.call_vision(frame, prompt)
+                    if isinstance(response, list):
+                        response = response[0] if response else ""
+                    response = str(response)
                     is_holding = "holding" in response.lower()[:20]
                     is_placed = "placed" in response.lower()[:20]
                     locations.append({
@@ -758,6 +764,9 @@ class Pipeline:
                         )
 
                     response = self.mimo_client.call_vision(frame, prompt)
+                    if isinstance(response, list):
+                        response = response[0] if response else ""
+                    response = str(response)
                     identified = response.strip().split('\n')[0].strip()[:30]
                     if identified and identified.lower() not in ['unknown', 'nothing', 'n/a']:
                         identified_ingredients.append(identified)
