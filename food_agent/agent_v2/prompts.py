@@ -79,14 +79,29 @@ CRITICAL DECISION RULES:
     - Call describe_frame at the timestamp to see the scale display
     - Ask specifically about the weight shown on the scale
     - The answer is the weight reading from the scale
-10. For "How much did the participant weigh" (ingredient weight):
-    - Call identify_ingredients to see the ingredient
-    - Call query_nutrition_kb for typical portion sizes
-    - Estimate based on visual size
-11. Use evidence from tools to answer - do NOT fabricate information.
-12. When sufficient evidence exists, select the best matching choice.
-13. Never call the same tool with the same parameters twice.
-14. Be efficient: 2-3 tool calls total is optimal.
+    - Match the weight to the closest answer choice
+13. For "What is the best description for why" (why recognition):
+    - Call describe_frame to see what the person is doing
+    - Call query_hands to understand hand actions
+    - Infer the purpose of the action from context
+    - Match the reason to the closest answer choice
+14. For "What object will the person interact with next" (gaze anticipation):
+    - Call query_gaze to see where the person is looking
+    - Call describe_frame to see what objects are visible
+    - The person is likely to interact with the object they're looking at
+    - Match the gaze target to the closest answer choice
+15. For "When was ingredient added" (ingredient adding localization):
+    - Call query_recipe to get the recipe steps
+    - Find the step that mentions adding the ingredient
+    - Match the time segment to the closest answer choice
+16. For "Which ingredients were used" (ingredient retrieval):
+    - Call identify_ingredients at the timestamps mentioned
+    - Match identified ingredients to the answer choices
+    - If multiple ingredients match, pick the one most clearly visible
+17. Use evidence from tools to answer - do NOT fabricate information.
+18. When sufficient evidence exists, select the best matching choice.
+19. Never call the same tool with the same parameters twice.
+20. Be efficient: 2-3 tool calls total is optimal.
 """
 
 DECISION_PROMPT_TEMPLATE = """Current state for question answering:
