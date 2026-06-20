@@ -302,28 +302,32 @@ class MimoClient:
 
     def _call_anthropic_text(self, prompt: str, system: str = "") -> str:
         client = self._get_anthropic_client()
-        response = client.messages.create(
-            model=self.model,
-            max_tokens=2048,
-            system=system if system else anthropic.NOT_GIVEN,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        kwargs = {
+            "model": self.model,
+            "max_tokens": 2048,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if system:
+            kwargs["system"] = system
+        response = client.messages.create(**kwargs)
         return self._extract_response_text(response)
 
     def _call_anthropic_vision(self, img_b64: str, prompt: str, system: str = "") -> str:
         client = self._get_anthropic_client()
-        response = client.messages.create(
-            model=self.model,
-            max_tokens=2048,
-            system=system if system else anthropic.NOT_GIVEN,
-            messages=[{
+        kwargs = {
+            "model": self.model,
+            "max_tokens": 2048,
+            "messages": [{
                 "role": "user",
                 "content": [
                     {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64}},
                     {"type": "text", "text": prompt},
                 ],
             }],
-        )
+        }
+        if system:
+            kwargs["system"] = system
+        response = client.messages.create(**kwargs)
         return self._extract_response_text(response)
 
     def _call_anthropic_with_tools(self, messages, tools, tool_executor, system, max_rounds):
