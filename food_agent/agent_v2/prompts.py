@@ -15,7 +15,7 @@ Available tools:
 - query_motion(frame_number): Track object motion trajectories
 - count_interactions(bbox, timestamp, time_range, num_samples): Count open/close interactions for an object in a bounding box region
 - track_object(bbox, timestamp, time_after, num_samples): Track where an object is placed after being picked up
-- identify_added_ingredient(start_time, end_time, candidates): Identify which ingredient is being added during a time range
+- identify_added_ingredient(start_time, end_time, candidates, recipe_name): Identify which ingredient is being added during a time range, optionally with recipe context
 - query_recipe(recipe_name, step_number): Query recipe knowledge base for ingredients and steps
 - list_recipes(): List all available recipes in the knowledge base
 - check_recipe_ingredients(recipe_name, ingredients): Check which ingredients are used in a recipe
@@ -96,8 +96,9 @@ CRITICAL DECISION RULES:
     - Find the step that mentions adding the ingredient
     - Match the time segment to the closest answer choice
 16. For "Which ingredients were used" (ingredient retrieval):
-    - Call identify_added_ingredient with start_time, end_time, and the answer choices as candidates
+    - Call identify_added_ingredient with start_time, end_time, the answer choices as candidates, and recipe_name if known
     - The tool identifies which ingredient is being added during that time range
+    - The tool uses recipe context to narrow down candidates
     - Match the identified ingredient to the answer choices
     - If the tool returns a matched_candidate, use that as the answer
     - ALWAYS pick the closest matching option

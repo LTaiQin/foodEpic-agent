@@ -697,7 +697,7 @@ class Pipeline:
 
     def _tool_identify_added_ingredient(
         self, start_time: float = 0, end_time: float = 30,
-        candidates: List[str] = None, **kwargs
+        candidates: List[str] = None, recipe_name: str = "", **kwargs
     ) -> Evidence:
         """Identify which ingredient is being added to a dish during a time range.
 
@@ -708,74 +708,102 @@ class Pipeline:
             start_time: Start of the time range in seconds.
             end_time: End of the time range in seconds.
             candidates: List of candidate ingredient names to match against.
+            recipe_name: Name of the recipe being prepared (for context).
         """
         ctx = self._get_context(kwargs)
         try:
-            # Sample frames in the middle of the time range
-            mid_time = (start_time + end_time) / 2
-            timestamps = [mid_time - 2, mid_time, mid_time + 2]
+            # Get recipe context if available
+            recipe_context = ""
+            if recipe_name:
+                try:
+                    recipe = self.recipe_kb.get_recipe(recipe_name)
+                    if recipe:
+                        steps = recipe.get("steps", [])
+                        recipe_context = f"Recipe: {recipe_name}. Steps: {' '.join(steps[:5])}"
+                except Exception:
+                    pass
 
+            # Sample more frames across the time range
+            duration = end_time - start_time
+            num_samples = min(7, max(3, int(duration / 3)))
+            timestamps = [start_time + duration * i / (num_samples - 1) for i in range(num_samples)]
+
+            identified_ingredients = []
             for ts in timestamps:
                 try:
                     frame = self.video_loader.get_frame(ctx["video_id"], ts)
                     if frame is None:
                         continue
 
-                    # Ask what ingredient is being added
-                    prompt = (
-                        "Look at this egocentric kitchen video frame. "
-                        "The person is adding an ingredient to a dish. "
-                        "What specific ingredient is being added right now? "
-                        "Look at what the person is holding in their hands. "
-                        "Reply with just the ingredient name (1-2 words)."
-                    )
+                    # Build prompt with candidates if available
+                    if candidates:
+                        candidates_str = ", ".join(candidates)
+                        prompt = (
+                            f"Look at this egocentric kitchen video frame. "
+                            f"The person is cooking and adding an ingredient to a dish. "
+                            f"Which of these ingredients is being added: {candidates_str}? "
+                            f"Look at what the person is holding, pouring, or sprinkling. "
+                            f"Reply with just the ingredient name from the list above."
+                        )
+                    else:
+                        prompt = (
+                            "Look at this egocentric kitchen video frame. "
+                            "The person is adding an ingredient to a dish. "
+                            "What specific ingredient is being added right now? "
+                            "Look at what the person is holding in their hands. "
+                            "Reply with just the ingredient name (1-2 words)."
+                        )
+
                     response = self.mimo_client.call_vision(frame, prompt)
                     identified = response.strip().split('\n')[0].strip()[:30]
+                    if identified and identified.lower() not in ['unknown', 'nothing', 'n/a']:
+                        identified_ingredients.append(identified)
+                except Exception:
+                    continue
 
-                    # Match to candidates if provided
-                    if candidates:
-                        for i, candidate in enumerate(candidates):
-                            candidate_lower = candidate.lower()
-                            identified_lower = identified.lower()
-                            # Check if identified ingredient matches a candidate
-                            if (candidate_lower in identified_lower or
-                                identified_lower in candidate_lower or
-                                any(word in candidate_lower for word in identified_lower.split())):
-                                return Evidence(
-                                    source_module="VisualAnalyzer",
-                                    evidence_type="ingredient_added",
-                                    time_range={"start": start_time, "end": end_time},
-                                    content={
-                                        "identified_ingredient": identified,
-                                        "matched_candidate": candidate,
-                                        "matched_index": i,
-                                        "timestamp": ts,
-                                    },
-                                    confidence=0.7,
-                                )
+            # Try to match identified ingredients to candidates
+            if candidates and identified_ingredients:
+                # Count votes for each candidate
+                vote_counts = {}
+                for i, candidate in enumerate(candidates):
+                    candidate_lower = candidate.lower()
+                    votes = 0
+                    for identified in identified_ingredients:
+                        identified_lower = identified.lower()
+                        if (candidate_lower in identified_lower or
+                            identified_lower in candidate_lower or
+                            any(word in candidate_lower for word in identified_lower.split() if len(word) > 2)):
+                            votes += 1
+                    if votes > 0:
+                        vote_counts[i] = votes
 
-                    # Return raw identification if no match
+                # Return the candidate with most votes
+                if vote_counts:
+                    best_idx = max(vote_counts, key=vote_counts.get)
                     return Evidence(
                         source_module="VisualAnalyzer",
                         evidence_type="ingredient_added",
                         time_range={"start": start_time, "end": end_time},
                         content={
-                            "identified_ingredient": identified,
-                            "matched_candidate": None,
-                            "matched_index": -1,
-                            "timestamp": ts,
+                            "identified_ingredients": identified_ingredients,
+                            "matched_candidate": candidates[best_idx],
+                            "matched_index": best_idx,
+                            "vote_counts": vote_counts,
                         },
-                        confidence=0.5,
+                        confidence=0.7,
                     )
-                except Exception:
-                    continue
 
+            # Return all identified ingredients if no match
             return Evidence(
                 source_module="VisualAnalyzer",
                 evidence_type="ingredient_added",
                 time_range={"start": start_time, "end": end_time},
-                content={"error": "could not identify ingredient", "identified_ingredient": "unknown"},
-                confidence=0.0,
+                content={
+                    "identified_ingredients": identified_ingredients,
+                    "matched_candidate": None,
+                    "matched_index": -1,
+                },
+                confidence=0.5 if identified_ingredients else 0.0,
             )
         except Exception as e:
             return Evidence(source_module="VisualAnalyzer", evidence_type="ingredient_added",
