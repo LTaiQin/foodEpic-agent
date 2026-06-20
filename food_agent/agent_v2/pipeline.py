@@ -163,6 +163,9 @@ class Pipeline:
         registry.register("query_nutrition_kb", self._tool_query_nutrition_kb)
         registry.register("query_scene_graph", self._tool_query_scene_graph)
         registry.register("query_commonsense", self._tool_query_commonsense)
+        registry.register("estimate_ingredient_weight", self._tool_estimate_ingredient_weight)
+        registry.register("get_cooking_effect", self._tool_get_cooking_effect)
+        registry.register("get_object_info", self._tool_get_object_info)
 
         # --- Control tools ---
         registry.register("check_evidence", self._tool_check_evidence)
@@ -942,6 +945,76 @@ class Pipeline:
         """Query common sense knowledge."""
         results = self.commonsense_kb.get_related_concepts(concept, relation)
         return {"concept": concept, "relation": relation, "related": results}
+
+    def _tool_estimate_ingredient_weight(self, ingredient: str = "", size: str = "medium", **kwargs) -> Dict:
+        """Estimate typical weight for an ingredient based on external knowledge.
+
+        Args:
+            ingredient: Name of the ingredient (e.g., "onion", "chicken breast").
+            size: Size category (small, medium, large, cup, tablespoon, etc.).
+        """
+        from food_agent.knowledge.external_knowledge import IngredientKnowledgeBase
+
+        if isinstance(ingredient, list):
+            ingredient = ingredient[0] if ingredient else ""
+        ingredient = str(ingredient).strip()
+        if isinstance(size, list):
+            size = size[0] if size else "medium"
+        size = str(size).strip().lower()
+
+        weight = IngredientKnowledgeBase.get_typical_weight(ingredient, size)
+        nutrition = IngredientKnowledgeBase.get_nutrition(ingredient, weight or 100)
+
+        return {
+            "ingredient": ingredient,
+            "size": size,
+            "estimated_weight_g": weight,
+            "nutrition_per_100g": IngredientKnowledgeBase.get_nutrition(ingredient, 100),
+            "nutrition_for_weight": nutrition,
+            "note": f"Typical weight for {size} {ingredient}" if weight else f"No data for {ingredient}",
+        }
+
+    def _tool_get_cooking_effect(self, method: str = "", **kwargs) -> Dict:
+        """Get the nutritional effect of a cooking method.
+
+        Args:
+            method: Cooking method (e.g., "frying", "boiling", "steaming").
+        """
+        from food_agent.knowledge.external_knowledge import CookingKnowledgeBase
+
+        if isinstance(method, list):
+            method = method[0] if method else ""
+        method = str(method).strip()
+
+        effect = CookingKnowledgeBase.get_cooking_effect(method)
+        action_info = CookingKnowledgeBase.get_action_info(method)
+
+        return {
+            "method": method,
+            "nutritional_effect": effect,
+            "action_info": action_info,
+            "note": f"Effects of {method} on nutrition" if effect else f"No data for {method}",
+        }
+
+    def _tool_get_object_info(self, object_name: str = "", **kwargs) -> Dict:
+        """Get information about a kitchen object.
+
+        Args:
+            object_name: Name of the kitchen object (e.g., "knife", "pot", "sink").
+        """
+        from food_agent.knowledge.external_knowledge import KitchenObjectKnowledgeBase
+
+        if isinstance(object_name, list):
+            object_name = object_name[0] if object_name else ""
+        object_name = str(object_name).strip()
+
+        info = KitchenObjectKnowledgeBase.get_object_info(object_name)
+
+        return {
+            "object": object_name,
+            "properties": info,
+            "note": f"Info about {object_name}" if info else f"No data for {object_name}",
+        }
 
     def _tool_check_evidence(self, **kwargs) -> Dict:
         """Check evidence sufficiency (placeholder - agent handles this internally)."""

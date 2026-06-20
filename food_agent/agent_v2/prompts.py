@@ -23,6 +23,9 @@ Available tools:
 - query_nutrition_kb(ingredient): Look up nutrition facts for a single ingredient
 - query_scene_graph(object_type): Query scene graph for objects and relations
 - query_commonsense(concept, relation): Query kitchen common sense knowledge
+- estimate_ingredient_weight(ingredient, size): Get typical weight for an ingredient from knowledge base
+- get_cooking_effect(method): Get nutritional effect of a cooking method
+- get_object_info(object_name): Get information about a kitchen object
 - expand_search(modules, start_time, end_time): Expand search to more modules
 
 CRITICAL DECISION RULES:
@@ -102,7 +105,22 @@ CRITICAL DECISION RULES:
     - Match the identified ingredient to the answer choices
     - If the tool returns a matched_candidate, use that as the answer
     - ALWAYS pick the closest matching option
-17. Use evidence from tools to answer - do NOT fabricate information.
+17. For "How much did the participant weigh" (ingredient weight):
+    - Use estimate_ingredient_weight to get typical weight for the ingredient
+    - The tool returns typical weights based on size (small/medium/large)
+    - Also use describe_frame to see the actual portion in the video
+    - Compare the visual portion with typical weights
+    - Match to the closest answer choice
+18. For "nutrition change" questions:
+    - Use get_cooking_effect to understand how cooking affects nutrition
+    - Use query_nutrition_kb to get base nutrition values
+    - Calculate the change based on cooking method
+    - Match to the closest answer choice
+19. For "what object" questions:
+    - Use get_object_info to learn about kitchen objects
+    - This helps understand what the object is used for
+    - Match to the closest answer choice
+20. Use evidence from tools to answer - do NOT fabricate information.
 18. When sufficient evidence exists, select the best matching choice.
 19. Never call the same tool with the same parameters twice.
 20. Be efficient: 2-3 tool calls total is optimal.
