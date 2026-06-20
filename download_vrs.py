@@ -168,8 +168,10 @@ def download_one(entry, output_root: Path, proxy: str, log_dir: Path):
         dest.rename(part)
 
     cmd = [
-        "curl", "-L", "--fail", "--retry", "20", "--retry-all-errors",
-        "--retry-delay", "5", "--connect-timeout", "60",
+        "curl", "-L", "--retry", "30", "--retry-all-errors",
+        "--retry-connrefused", "--retry-delay", "5",
+        "--retry-max-time", "86400",
+        "--connect-timeout", "60",
         "--speed-time", "300", "--speed-limit", "1024",
         "-C", "-", "-o", str(part), url,
     ]

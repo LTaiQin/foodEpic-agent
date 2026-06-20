@@ -45,9 +45,11 @@ CRITICAL REASONING RULES:
    - If gaze says "looking at counter near microwave", match to "counter near microwave" or similar
    - ALWAYS pick the closest matching option
 6. For "which ingredients were used" (retrieval) questions:
-   - Use identify_ingredients evidence to find ingredients in the time range
-   - Match identified ingredients to the choices
-   - If multiple ingredients match, pick the one most clearly visible
+   - Use identify_added_ingredient evidence to find which ingredient was added
+   - If the evidence has matched_candidate, use that as the answer
+   - If no match, use identified_ingredient and match to choices
+   - IMPORTANT: The question asks which ingredient was ADDED, not just visible
+   - Look for evidence about what the person is holding or adding
    - ALWAYS pick the closest matching option
 7. For "where is X located" (fixture location) questions:
    - Use fixture_clock_position evidence for clock direction

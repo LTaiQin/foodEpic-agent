@@ -154,6 +154,7 @@ class Pipeline:
         registry.register("query_motion", self._tool_query_motion)
         registry.register("count_interactions", self._tool_count_interactions)
         registry.register("track_object", self._tool_track_object)
+        registry.register("identify_added_ingredient", self._tool_identify_added_ingredient)
 
         # --- Knowledge tools ---
         registry.register("query_recipe", self._tool_query_recipe)
@@ -692,6 +693,92 @@ class Pipeline:
             )
         except Exception as e:
             return Evidence(source_module="VisualAnalyzer", evidence_type="object_tracking",
+                          content={"error": str(e)}, confidence=0)
+
+    def _tool_identify_added_ingredient(
+        self, start_time: float = 0, end_time: float = 30,
+        candidates: List[str] = None, **kwargs
+    ) -> Evidence:
+        """Identify which ingredient is being added to a dish during a time range.
+
+        Analyzes video frames and hand interactions to determine which ingredient
+        from the candidates is being added.
+
+        Args:
+            start_time: Start of the time range in seconds.
+            end_time: End of the time range in seconds.
+            candidates: List of candidate ingredient names to match against.
+        """
+        ctx = self._get_context(kwargs)
+        try:
+            # Sample frames in the middle of the time range
+            mid_time = (start_time + end_time) / 2
+            timestamps = [mid_time - 2, mid_time, mid_time + 2]
+
+            for ts in timestamps:
+                try:
+                    frame = self.video_loader.get_frame(ctx["video_id"], ts)
+                    if frame is None:
+                        continue
+
+                    # Ask what ingredient is being added
+                    prompt = (
+                        "Look at this egocentric kitchen video frame. "
+                        "The person is adding an ingredient to a dish. "
+                        "What specific ingredient is being added right now? "
+                        "Look at what the person is holding in their hands. "
+                        "Reply with just the ingredient name (1-2 words)."
+                    )
+                    response = self.mimo_client.call_vision(frame, prompt)
+                    identified = response.strip().split('\n')[0].strip()[:30]
+
+                    # Match to candidates if provided
+                    if candidates:
+                        for i, candidate in enumerate(candidates):
+                            candidate_lower = candidate.lower()
+                            identified_lower = identified.lower()
+                            # Check if identified ingredient matches a candidate
+                            if (candidate_lower in identified_lower or
+                                identified_lower in candidate_lower or
+                                any(word in candidate_lower for word in identified_lower.split())):
+                                return Evidence(
+                                    source_module="VisualAnalyzer",
+                                    evidence_type="ingredient_added",
+                                    time_range={"start": start_time, "end": end_time},
+                                    content={
+                                        "identified_ingredient": identified,
+                                        "matched_candidate": candidate,
+                                        "matched_index": i,
+                                        "timestamp": ts,
+                                    },
+                                    confidence=0.7,
+                                )
+
+                    # Return raw identification if no match
+                    return Evidence(
+                        source_module="VisualAnalyzer",
+                        evidence_type="ingredient_added",
+                        time_range={"start": start_time, "end": end_time},
+                        content={
+                            "identified_ingredient": identified,
+                            "matched_candidate": None,
+                            "matched_index": -1,
+                            "timestamp": ts,
+                        },
+                        confidence=0.5,
+                    )
+                except Exception:
+                    continue
+
+            return Evidence(
+                source_module="VisualAnalyzer",
+                evidence_type="ingredient_added",
+                time_range={"start": start_time, "end": end_time},
+                content={"error": "could not identify ingredient", "identified_ingredient": "unknown"},
+                confidence=0.0,
+            )
+        except Exception as e:
+            return Evidence(source_module="VisualAnalyzer", evidence_type="ingredient_added",
                           content={"error": str(e)}, confidence=0)
 
     def _tool_query_recipe(self, recipe_name: str = "", step_number: int = 0, **kwargs) -> Evidence:
