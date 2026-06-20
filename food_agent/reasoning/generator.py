@@ -50,7 +50,7 @@ CRITICAL REASONING RULES:
    - If no match, use identified_ingredient and match to choices
    - IMPORTANT: The question asks which ingredient was ADDED, not just visible
    - Look for evidence about what the person is holding or adding
-   - ALWAYS pick the closest matching option
+   - ALWAYS pick the closest matching option from the choices
 7. For "where is X located" (fixture location) questions:
    - Use fixture_clock_position evidence for clock direction
    - Match clock direction to the choices
