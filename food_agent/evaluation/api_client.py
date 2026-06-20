@@ -48,6 +48,7 @@ class MimoClient:
             self._client = OpenAI(
                 base_url=self.base_url,
                 api_key=self.api_key,
+                timeout=120.0,
             )
         return self._client
 
