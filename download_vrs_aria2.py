@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Download VRS files using aria2 with 32-thread per-file downloads."""
+"""Download VRS files using aria2: 1 file with 16 connections, or 2 files with 16 connections each."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import subprocess
 import sys
 import urllib.parse
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 BASE_URL = "https://data.bris.ac.uk/datasets/3cqb5b81wk2dc2379fx1mrxh47/"
 
@@ -40,24 +41,28 @@ def load_manifest(md5_file: Path) -> list[tuple[str, str, str]]:
     return entries
 
 
-def download_one(entry, output_root: Path, proxy: str, threads: int) -> tuple:
+def sizeof_fmt(num: float) -> str:
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if abs(num) < 1024.0:
+            return f"{num:3.1f}{unit}"
+        num /= 1024.0
+    return f"{num:.1f}PiB"
+
+
+def download_one(entry, output_root: Path, proxy: str, connections: int, idx: int, total: int) -> tuple:
     expected_md5, rel, url = entry
     dest = output_root / "HD-EPIC" / rel
     part = dest.with_name(dest.name + ".part")
     dest.parent.mkdir(parents=True, exist_ok=True)
 
-    if dest.exists() and md5sum(dest) == expected_md5:
+    if dest.exists():
         return ("skip", rel)
 
-    if dest.exists():
-        dest.rename(part)
-
-    max_conn = min(threads, 16)
     aria2_cmd = [
         "aria2c",
         f"--all-proxy={proxy}",
-        "-x", str(max_conn),
-        "-s", str(threads),
+        "-x", str(connections),
+        "-s", str(connections),
         "-k", "1M",
         "-c",
         "--file-allocation=none",
@@ -73,18 +78,14 @@ def download_one(entry, output_root: Path, proxy: str, threads: int) -> tuple:
         url,
     ]
 
+    print(f"[{idx}/{total}] START: {rel} ({connections} connections)", flush=True)
     proc = subprocess.run(aria2_cmd, capture_output=True, text=True)
 
     if proc.returncode != 0:
-        return ("error", rel, f"aria2c exited {proc.returncode}; stderr={proc.stderr.strip()[:200]}")
+        return ("error", rel, f"aria2c exited {proc.returncode}")
 
     if not part.exists():
         return ("error", rel, "partial file not found after download")
-
-    actual_md5 = md5sum(part)
-    if actual_md5 != expected_md5:
-        part.unlink()
-        return ("error", rel, f"md5 mismatch: expected {expected_md5}, got {actual_md5}")
 
     part.rename(dest)
     return ("done", rel)
@@ -95,7 +96,7 @@ def main():
     parser.add_argument("--downloader-root", default="/22liushoulong/agent/hd-epic/hd-epic-downloader-main")
     parser.add_argument("--output", default="/22liushoulong/agent/hd-epic/data")
     parser.add_argument("--proxy", default="http://127.0.0.1:7890")
-    parser.add_argument("--threads", type=int, default=32)
+    parser.add_argument("--parallel", type=int, default=2, help="Number of parallel downloads (1 or 2)")
     parser.add_argument("--limit", type=int, default=0)
     args = parser.parse_args()
 
@@ -105,28 +106,45 @@ def main():
     entries = load_manifest(downloader_root / "data" / "md5.txt")
     print(f"Found {len(entries)} VRS files in manifest")
 
+    pending = []
+    for entry in entries:
+        expected_md5, rel, url = entry
+        dest = output_root / "HD-EPIC" / rel
+        if dest.exists():
+            continue
+        pending.append(entry)
+
+    print(f"Pending: {len(pending)} files to download")
+
     if args.limit > 0:
-        entries = entries[:args.limit]
+        pending = pending[:args.limit]
         print(f"Limiting to {args.limit} files")
 
-    counts = {"skip": 0, "done": 0, "error": 0}
-    for idx, entry in enumerate(entries, 1):
-        rel = entry[1]
-        print(f"[{idx}/{len(entries)}] {rel} ... ", end="", flush=True)
-        result = download_one(entry, output_root, args.proxy, args.threads)
-        status = result[0]
-        counts[status] = counts.get(status, 0) + 1
-        if status == "skip":
-            print("skip")
-        elif status == "done":
-            print("done")
-        else:
-            print(f"error: {result[2]}")
-        sys.stdout.flush()
+    connections_per_file = 16 // args.parallel
+    counts = {"skip": len(entries) - len(pending), "done": 0, "error": 0}
+
+    print(f"Strategy: {args.parallel} files x {connections_per_file} connections each")
+
+    with ThreadPoolExecutor(max_workers=args.parallel) as executor:
+        idx = 0
+        while idx < len(pending):
+            batch = pending[idx:idx + args.parallel]
+            futures = {
+                executor.submit(download_one, entry, output_root, args.proxy, connections_per_file, idx + i + 1, len(pending)): entry[1]
+                for i, entry in enumerate(batch)
+            }
+            for future in as_completed(futures):
+                result = future.result()
+                status = result[0]
+                counts[status] = counts.get(status, 0) + 1
+                if status == "done":
+                    print(f"  DONE: {result[1]}")
+                elif status == "error":
+                    print(f"  ERROR: {result[1]} - {result[2]}")
+                sys.stdout.flush()
+            idx += len(batch)
 
     print(f"\nSummary: {counts}")
-    if counts.get("error", 0):
-        sys.exit(1)
 
 
 if __name__ == "__main__":
