@@ -70,9 +70,11 @@ class MimoClient:
     def _get_anthropic_client(self):
         if self._anthropic_client is None:
             import anthropic
-            self._anthropic_client = anthropic.Anthropic(
-                api_key=self.api_key,
-            )
+            kwargs = {"api_key": self.api_key}
+            # Use custom base URL if provided (for proxies)
+            if self.base_url and "anthropic" in self.base_url.lower():
+                kwargs["base_url"] = self.base_url
+            self._anthropic_client = anthropic.Anthropic(**kwargs)
         return self._anthropic_client
 
     def _cache_key(self, prompt: str, image_hash: str = "") -> str:
