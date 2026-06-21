@@ -7,6 +7,7 @@ Usage:
 
 import argparse
 import json
+import random
 import sys
 import time
 from collections import defaultdict
@@ -94,8 +95,9 @@ def answer_question(q: dict) -> dict:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--category", default=None)
-    parser.add_argument("--limit", type=int, default=3)
-    parser.add_argument("--parallel", type=int, default=4)
+    parser.add_argument("--limit", type=int, default=3, help="Questions per category (0=all)")
+    parser.add_argument("--total", type=int, default=0, help="Total questions (overrides --limit)")
+    parser.add_argument("--parallel", type=int, default=8)
     parser.add_argument("--out", default=None)
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
@@ -107,7 +109,13 @@ def main():
     questions = load_benchmark(args.category)
     print(f"Loaded {len(questions)} questions")
 
-    if args.limit > 0:
+    if args.total > 0:
+        # Sample total questions across all categories
+        random.seed(42)
+        random.shuffle(questions)
+        questions = questions[:args.total]
+        print(f"Sampled {len(questions)} total questions")
+    elif args.limit > 0:
         by_cat = defaultdict(list)
         for q in questions:
             by_cat[q["category"]].append(q)

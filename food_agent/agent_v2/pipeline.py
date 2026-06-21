@@ -170,6 +170,8 @@ class Pipeline:
         # --- Specialized tools for difficult categories ---
         registry.register("generate_scene_graph", self._tool_generate_scene_graph)
         registry.register("analyze_action_sequence", self._tool_analyze_action_sequence)
+        registry.register("recognize_action_detailed", self._tool_recognize_action_detailed)
+        registry.register("localize_action", self._tool_localize_action)
         registry.register("read_scale", self._tool_read_scale)
         registry.register("analyze_container", self._tool_analyze_container)
         registry.register("track_object_trajectory", self._tool_track_object_trajectory)
@@ -1108,6 +1110,119 @@ class Pipeline:
             )
         except Exception as e:
             return Evidence(source_module="ConceptNetKB", evidence_type="action_sequence",
+                          content={"error": str(e)}, confidence=0)
+
+    def _tool_recognize_action_detailed(self, timestamp: float = 0, **kwargs) -> Evidence:
+        """Recognize the detailed action being performed at a timestamp.
+
+        Uses specialized prompting for fine-grained action recognition.
+        Returns detailed action description with tools, objects, and motion patterns.
+
+        Args:
+            timestamp: Time in seconds to capture the frame.
+        """
+        from food_agent.tools.action_analyzer import ActionAnalyzer
+        ctx = self._get_context(kwargs)
+        try:
+            frame = self.video_loader.get_frame(ctx["video_id"], timestamp)
+            if frame is None:
+                return Evidence(source_module="ActionAnalyzer", evidence_type="action_detail",
+                              content={"error": "could not load frame"}, confidence=0)
+
+            prompt = ActionAnalyzer.build_action_recognition_prompt()
+            response = self.mimo_client.call_vision(frame, prompt)
+            if isinstance(response, list):
+                response = response[0] if response else ""
+            response = str(response)
+
+            # Get knowledge about the action
+            knowledge = ActionAnalyzer.format_action_knowledge(response[:50])
+
+            return Evidence(
+                source_module="ActionAnalyzer",
+                evidence_type="action_detail",
+                time_range={"start": timestamp, "end": timestamp},
+                content={
+                    "action_description": response[:300],
+                    "action_knowledge": knowledge,
+                    "timestamp": timestamp,
+                },
+                confidence=0.7,
+            )
+        except Exception as e:
+            return Evidence(source_module="ActionAnalyzer", evidence_type="action_detail",
+                          content={"error": str(e)}, confidence=0)
+
+    def _tool_localize_action(self, action: str = "", timestamp: float = 0,
+                               time_range: float = 30.0, num_samples: int = 10, **kwargs) -> Evidence:
+        """Find when a specific action occurs in a time range.
+
+        Samples frames and checks if the action is happening at each frame.
+
+        Args:
+            action: The action to find (e.g., "hit spatula", "press half orange").
+            timestamp: Center timestamp in seconds.
+            time_range: Seconds before/after timestamp to search.
+            num_samples: Number of frames to sample.
+        """
+        from food_agent.tools.action_analyzer import ActionAnalyzer
+        ctx = self._get_context(kwargs)
+        try:
+            if isinstance(action, list):
+                action = action[0] if action else ""
+            action = str(action).strip()
+
+            # Sample frames across the time range
+            t_start = max(0, timestamp - time_range / 2)
+            t_end = timestamp + time_range / 2
+            timestamps = [t_start + (t_end - t_start) * i / (num_samples - 1) for i in range(num_samples)]
+
+            action_times = []
+            for ts in timestamps:
+                try:
+                    frame = self.video_loader.get_frame(ctx["video_id"], ts)
+                    if frame is None:
+                        continue
+
+                    prompt = ActionAnalyzer.build_action_localization_prompt(action)
+                    response = self.mimo_client.call_vision(frame, prompt)
+                    if isinstance(response, list):
+                        response = response[0] if response else ""
+                    response = str(response).lower().strip()
+
+                    if "yes" in response:
+                        action_times.append(round(ts, 2))
+                except Exception:
+                    continue
+
+            # Find time segments where action is happening
+            segments = []
+            if action_times:
+                start = action_times[0]
+                end = action_times[0]
+                for t in action_times[1:]:
+                    if t - end < 3.0:  # Within 3 seconds = same segment
+                        end = t
+                    else:
+                        segments.append({"start": start, "end": end})
+                        start = t
+                        end = t
+                segments.append({"start": start, "end": end})
+
+            return Evidence(
+                source_module="ActionAnalyzer",
+                evidence_type="action_localization",
+                time_range={"start": t_start, "end": t_end},
+                content={
+                    "action": action,
+                    "action_times": action_times,
+                    "segments": segments,
+                    "num_segments": len(segments),
+                },
+                confidence=0.7 if segments else 0.3,
+            )
+        except Exception as e:
+            return Evidence(source_module="ActionAnalyzer", evidence_type="action_localization",
                           content={"error": str(e)}, confidence=0)
 
     def _tool_read_scale(self, timestamp: float = 0, **kwargs) -> Evidence:
