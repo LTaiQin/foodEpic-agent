@@ -64,7 +64,7 @@ def start_server():
     server.listen(16)  # Allow more pending connections
     server.settimeout(1.0)
 
-    print(f"Server listening on {SOCKET_PATH} (max_workers=4)")
+    print(f"Server listening on {SOCKET_PATH} (max_workers=8)")
 
     running = True
 
@@ -126,7 +126,7 @@ def start_server():
             conn.close()
 
     # Thread pool for handling concurrent requests
-    executor = ThreadPoolExecutor(max_workers=4)
+    executor = ThreadPoolExecutor(max_workers=8)
 
     while running:
         try:
