@@ -174,6 +174,7 @@ class Pipeline:
         registry.register("recognize_action", self._tool_recognize_action)
         registry.register("match_gaze_to_object", self._tool_match_gaze_to_object)
         registry.register("predict_next_interaction", self._tool_predict_next_interaction)
+        registry.register("find_static_period", self._tool_find_static_period)
 
         # --- Control tools ---
         registry.register("check_evidence", self._tool_check_evidence)
@@ -1340,6 +1341,79 @@ class Pipeline:
             )
         except Exception as e:
             return Evidence(source_module="InteractionPredictor", evidence_type="prediction",
+                          content={"error": str(e)}, confidence=0)
+
+    def _tool_find_static_period(self, bbox: List[float] = None, timestamp: float = 0,
+                                   time_range: float = 300.0, num_samples: int = 15,
+                                   min_duration: float = 60.0, **kwargs) -> Evidence:
+        """Find when an object at a bounding box was static for a minimum duration.
+
+        Samples frames across a time range, detects if the object is moving or stationary,
+        and finds periods where it was static for at least min_duration seconds.
+
+        Args:
+            bbox: [x1, y1, x2, y2] bounding box of the object.
+            timestamp: Reference time in seconds.
+            time_range: Seconds to analyze before/after timestamp.
+            num_samples: Number of frames to sample.
+            min_duration: Minimum duration in seconds for a static period.
+        """
+        from food_agent.tools.specialized_tools import ObjectTracker
+        ctx = self._get_context(kwargs)
+        try:
+            if not bbox or len(bbox) < 4:
+                return Evidence(source_module="ObjectTracker", evidence_type="static_period",
+                              content={"error": "bbox required"}, confidence=0)
+
+            center_x = int((bbox[0] + bbox[2]) / 2)
+            center_y = int((bbox[1] + bbox[3]) / 2)
+
+            # Sample frames across the time range (before and after timestamp)
+            t_start = max(0, timestamp - time_range / 2)
+            t_end = timestamp + time_range / 2
+            timestamps = [t_start + (t_end - t_start) * i / (num_samples - 1) for i in range(num_samples)]
+
+            movement_data = []
+            for ts in timestamps:
+                try:
+                    frame = self.video_loader.get_frame(ctx["video_id"], ts)
+                    if frame is None:
+                        continue
+
+                    prompt = ObjectTracker.build_movement_detection_prompt((center_x, center_y))
+                    response = self.mimo_client.call_vision(frame, prompt)
+                    if isinstance(response, list):
+                        response = response[0] if response else ""
+                    response = str(response).lower().strip()
+
+                    if "moving" in response:
+                        state = "moving"
+                    elif "stationary" in response or "still" in response:
+                        state = "stationary"
+                    else:
+                        state = "unknown"
+
+                    movement_data.append({"timestamp": round(ts, 2), "state": state})
+                except Exception:
+                    movement_data.append({"timestamp": ts, "state": "error"})
+
+            # Find static periods
+            static_periods = ObjectTracker.find_static_periods(movement_data, min_duration)
+
+            return Evidence(
+                source_module="ObjectTracker",
+                evidence_type="static_period",
+                time_range={"start": t_start, "end": t_end},
+                content={
+                    "movement_data": movement_data,
+                    "static_periods": static_periods,
+                    "num_static_periods": len(static_periods),
+                    "min_duration": min_duration,
+                },
+                confidence=0.7 if static_periods else 0.3,
+            )
+        except Exception as e:
+            return Evidence(source_module="ObjectTracker", evidence_type="static_period",
                           content={"error": str(e)}, confidence=0)
 
     def _tool_check_evidence(self, **kwargs) -> Dict:

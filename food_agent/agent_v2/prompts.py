@@ -32,6 +32,7 @@ Available tools:
 - recognize_action(timestamp): Recognize what action the person is performing
 - match_gaze_to_object(gaze_direction, timestamp): Match gaze direction to visible objects
 - predict_next_interaction(timestamp): Predict what the person will interact with next
+- find_static_period(bbox, timestamp, time_range, min_duration): Find when an object was static for a minimum duration
 - expand_search(modules, start_time, end_time): Expand search to more modules
 
 CRITICAL DECISION RULES:
@@ -149,7 +150,18 @@ CRITICAL DECISION RULES:
     - The tool uses specialized prompting for action recognition
     - Also call query_hands and query_audio for additional evidence
     - Match to the closest answer choice
-25. Use evidence from tools to answer - do NOT fabricate information.
+25. For "After the object is first moved, from which starting time does it remain static" (stationary object localization):
+    - Extract the bounding box and timestamp from the question
+    - Extract the minimum duration (e.g., "more than 150 seconds")
+    - Call find_static_period with bbox, timestamp, time_range=600, min_duration
+    - The tool samples frames and detects movement vs stationary states
+    - Match the static period start time to the closest answer choice
+    - The answer is the starting time of a static period that lasts at least the minimum duration
+26. For "Where is X located" (fixture location) questions:
+    - Call fixture_clock_position(fixture_name, timestamp) to get clock direction
+    - The tool computes the clock position relative to the wearer
+    - Match the clock direction to the closest answer choice
+27. Use evidence from tools to answer - do NOT fabricate information.
 26. When sufficient evidence exists, select the best matching choice.
 27. Never call the same tool with the same parameters twice.
 28. Be efficient: 2-3 tool calls total is optimal.

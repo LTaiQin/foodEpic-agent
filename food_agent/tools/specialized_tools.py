@@ -189,6 +189,16 @@ class ObjectTracker:
         )
 
     @staticmethod
+    def build_movement_detection_prompt(bbox_center: tuple) -> str:
+        """Build a prompt for detecting if an object at a specific location is moving."""
+        x, y = bbox_center
+        return (
+            f"Look at this egocentric kitchen video frame. Focus on the area around pixel ({x}, {y}). "
+            f"Is there an object at this location? Is it currently being moved by the person, or is it stationary? "
+            f"Reply with: 'moving' if the person is handling it, 'stationary' if it's sitting still, 'not visible' if unclear."
+        )
+
+    @staticmethod
     def analyze_trajectory(locations: List[Dict]) -> Dict:
         """Analyze object movement trajectory."""
         if not locations:
@@ -224,6 +234,54 @@ class ObjectTracker:
                 "status": "unknown",
                 "final_location": "not determined",
             }
+
+    @staticmethod
+    def find_static_periods(movement_data: List[Dict], min_duration: float = 60.0) -> List[Dict]:
+        """Find periods where object was static for at least min_duration seconds.
+
+        Args:
+            movement_data: List of dicts with 'timestamp' and 'state' ('moving'/'stationary')
+            min_duration: Minimum duration in seconds for a static period
+
+        Returns:
+            List of static periods with start_time, end_time, duration
+        """
+        if not movement_data:
+            return []
+
+        static_periods = []
+        current_start = None
+
+        for i, data in enumerate(movement_data):
+            state = data.get("state", "unknown")
+            ts = data.get("timestamp", 0)
+
+            if state == "stationary":
+                if current_start is None:
+                    current_start = ts
+            else:
+                if current_start is not None:
+                    duration = ts - current_start
+                    if duration >= min_duration:
+                        static_periods.append({
+                            "start_time": current_start,
+                            "end_time": ts,
+                            "duration": duration,
+                        })
+                    current_start = None
+
+        # Handle case where object is still stationary at end
+        if current_start is not None and movement_data:
+            last_ts = movement_data[-1].get("timestamp", 0)
+            duration = last_ts - current_start
+            if duration >= min_duration:
+                static_periods.append({
+                    "start_time": current_start,
+                    "end_time": last_ts,
+                    "duration": duration,
+                })
+
+        return static_periods
 
 
 class ActionRecognizer:
