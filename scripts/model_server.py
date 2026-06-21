@@ -48,8 +48,8 @@ def start_server():
 
     from food_agent.agent_v2.pipeline import Pipeline
     pipeline = Pipeline(load_models=False)
-    pipeline.agent.max_iterations = 8
-    pipeline.agent.timeout = 300
+    pipeline.agent.max_iterations = 5
+    pipeline.agent.timeout = 600
 
     print(f"Pipeline loaded in {time.time()-t0:.1f}s")
     print(f"  Recipes: {len(pipeline.recipe_kb._recipes) if hasattr(pipeline.recipe_kb, '_recipes') else 0}")

@@ -109,6 +109,7 @@ CRITICAL DECISION RULES:
     - Use estimate_ingredient_weight to get typical weight for the ingredient
     - The tool returns typical weights based on size (small/medium/large)
     - Also use describe_frame to see the actual portion in the video
+    - Ask specifically: "What weight is shown on the scale?" or "How much does this portion look like?"
     - Compare the visual portion with typical weights
     - Match to the closest answer choice
 18. For "nutrition change" questions:
@@ -120,10 +121,38 @@ CRITICAL DECISION RULES:
     - Use get_object_info to learn about kitchen objects
     - This helps understand what the object is used for
     - Match to the closest answer choice
-20. Use evidence from tools to answer - do NOT fabricate information.
-18. When sufficient evidence exists, select the best matching choice.
-19. Never call the same tool with the same parameters twice.
-20. Be efficient: 2-3 tool calls total is optimal.
+20. For "What is the person looking at" (gaze estimation):
+    - Call query_gaze to get gaze direction data
+    - The gaze data includes yaw/pitch angles and gaze_direction description
+    - Match the gaze direction to visible objects in the scene
+    - Use describe_frame to see what objects are visible
+    - The person is likely looking at the object in their gaze direction
+    - Match to the closest answer choice
+21. For "What object will the person interact with next" (gaze anticipation):
+    - Call query_gaze to see where the person is looking
+    - The person is likely to interact with the object they're looking at
+    - Use describe_frame to see what objects are visible
+    - Match the gaze target to the closest answer choice
+22. For "Which objects did the person put in/take from" (object contents):
+    - Call describe_frame to see what's visible in the container
+    - Ask specifically: "What objects are inside this container?"
+    - Use identify_ingredients to see food items
+    - Match to the closest answer choice
+23. For "Where did I put/take the object" (object location):
+    - Call track_object to track where the object was placed
+    - The tool returns final_location describing where the object ended up
+    - Match the location to the closest answer choice
+    - If track_object returns "not determined", use describe_frame to analyze the scene
+24. For "What action is the person performing" (action recognition):
+    - Call describe_frame to see what the person is doing
+    - Call query_hands to see hand interactions
+    - Call query_audio to hear kitchen sounds
+    - Combine all evidence to identify the action
+    - Match to the closest answer choice
+25. Use evidence from tools to answer - do NOT fabricate information.
+26. When sufficient evidence exists, select the best matching choice.
+27. Never call the same tool with the same parameters twice.
+28. Be efficient: 2-3 tool calls total is optimal.
 """
 
 DECISION_PROMPT_TEMPLATE = """Current state for question answering:

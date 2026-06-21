@@ -81,6 +81,33 @@ CRITICAL REASONING RULES:
     - Match time segment to the choices
     - If evidence says "added at 00:05:33", pick the choice with that time
     - ALWAYS pick the closest matching option
+13. For "what is the person looking at" (gaze estimation) questions:
+    - Use gaze evidence to determine gaze direction
+    - The gaze data includes gaze_direction like "Looking straight ahead, downward"
+    - Match the gaze direction to visible objects in the scene
+    - If gaze says "looking at counter", match to choices with "counter"
+    - ALWAYS pick the closest matching option
+14. For "what object will the person interact with next" (gaze anticipation) questions:
+    - Use gaze evidence to see where the person is looking
+    - The person is likely to interact with the object they're looking at
+    - Match the gaze target to the closest answer choice
+    - ALWAYS pick the closest matching option
+15. For "what action is the person performing" (action recognition) questions:
+    - Use describe_frame and query_hands evidence to understand the action
+    - The action should match what the person is actually doing
+    - Match to the closest answer choice
+    - ALWAYS pick the closest matching option
+16. For "which objects did the person put in/take from" (object contents) questions:
+    - Use describe_frame evidence to see what's in the container
+    - Look for objects mentioned in the evidence
+    - Match to the closest answer choice
+    - If evidence says "Nothing", pick "Nothing" if available
+    - ALWAYS pick the closest matching option
+17. For "where did I put/take the object" (object location) questions:
+    - Use track_object evidence for final_location
+    - Match the location to the closest answer choice
+    - If evidence says "not determined", use describe_frame to infer
+    - ALWAYS pick the closest matching option
 
 {instruction}
 - Be concise and precise.
