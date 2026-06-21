@@ -168,6 +168,8 @@ class Pipeline:
         registry.register("get_object_info", self._tool_get_object_info)
 
         # --- Specialized tools for difficult categories ---
+        registry.register("generate_scene_graph", self._tool_generate_scene_graph)
+        registry.register("analyze_action_sequence", self._tool_analyze_action_sequence)
         registry.register("read_scale", self._tool_read_scale)
         registry.register("analyze_container", self._tool_analyze_container)
         registry.register("track_object_trajectory", self._tool_track_object_trajectory)
@@ -1034,6 +1036,79 @@ class Pipeline:
             "properties": info,
             "note": f"Info about {object_name}" if info else f"No data for {object_name}",
         }
+
+    def _tool_generate_scene_graph(self, timestamp: float = 0, **kwargs) -> Evidence:
+        """Generate a scene graph from a video frame.
+
+        Uses MLLM to create a structured representation of the scene
+        with objects, attributes, spatial relations, and actions.
+
+        Args:
+            timestamp: Time in seconds to capture the frame.
+        """
+        from food_agent.tools.scene_graph import SceneGraphGenerator
+        ctx = self._get_context(kwargs)
+        try:
+            frame = self.video_loader.get_frame(ctx["video_id"], timestamp)
+            if frame is None:
+                return Evidence(source_module="SceneGraphGenerator", evidence_type="scene_graph",
+                              content={"error": "could not load frame"}, confidence=0)
+
+            graph = SceneGraphGenerator.generate(self.mimo_client, frame)
+            formatted = SceneGraphGenerator.format_for_prompt(graph)
+            objects = SceneGraphGenerator.extract_objects(graph)
+
+            return Evidence(
+                source_module="SceneGraphGenerator",
+                evidence_type="scene_graph",
+                time_range={"start": timestamp, "end": timestamp},
+                content={
+                    "scene_graph": formatted,
+                    "objects": objects,
+                    "object_count": len(objects),
+                    "raw_graph": graph,
+                },
+                confidence=0.8 if objects else 0.3,
+            )
+        except Exception as e:
+            return Evidence(source_module="SceneGraphGenerator", evidence_type="scene_graph",
+                          content={"error": str(e)}, confidence=0)
+
+    def _tool_analyze_action_sequence(self, timestamp: float = 0, action: str = "", **kwargs) -> Evidence:
+        """Analyze action sequence using ConceptNet knowledge.
+
+        Provides information about typical action sequences, required tools,
+        and what actions typically follow.
+
+        Args:
+            timestamp: Time in seconds (for context).
+            action: The action to analyze (e.g., "chopping", "stirring").
+        """
+        from food_agent.tools.scene_graph import ConceptNetKB
+        try:
+            if isinstance(action, list):
+                action = action[0] if action else ""
+            action = str(action).strip()
+
+            knowledge = ConceptNetKB.get_action_sequence(action)
+            related = ConceptNetKB.get_related_actions(action)
+
+            return Evidence(
+                source_module="ConceptNetKB",
+                evidence_type="action_sequence",
+                time_range={"start": timestamp, "end": timestamp},
+                content={
+                    "action": action,
+                    "requires": knowledge.get("requires", []),
+                    "follows": knowledge.get("follows", []),
+                    "precedes": knowledge.get("precedes", []),
+                    "related_actions": related,
+                },
+                confidence=0.8 if knowledge else 0.3,
+            )
+        except Exception as e:
+            return Evidence(source_module="ConceptNetKB", evidence_type="action_sequence",
+                          content={"error": str(e)}, confidence=0)
 
     def _tool_read_scale(self, timestamp: float = 0, **kwargs) -> Evidence:
         """Read weight from a kitchen scale display.

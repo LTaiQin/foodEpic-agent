@@ -34,6 +34,8 @@ Available tools:
 - estimate_fixture_clock(fixture_name, timestamp): Estimate clock direction of a fixture using video frame
 - predict_next_interaction(timestamp): Predict what the person will interact with next
 - find_static_period(bbox, timestamp, time_range, min_duration): Find when an object was static for a minimum duration
+- generate_scene_graph(timestamp): Generate a structured scene graph with objects, relations, and actions
+- analyze_action_sequence(action): Get typical action sequence, required tools, and what follows
 - expand_search(modules, start_time, end_time): Expand search to more modules
 
 CRITICAL DECISION RULES:
@@ -164,7 +166,19 @@ CRITICAL DECISION RULES:
     - The tool asks the vision model to determine the clock direction
     - Match the clock direction to the closest answer choice
     - IMPORTANT: Always try both tools if one fails
-27. Use evidence from tools to answer - do NOT fabricate information.
+27. For complex scene understanding questions:
+    - Use generate_scene_graph(timestamp) to get structured scene information
+    - The tool returns objects, spatial relations, and actions
+    - Use this information to answer questions about object locations and relationships
+28. For action sequence questions:
+    - Use analyze_action_sequence(action) to get typical action sequences
+    - The tool returns required tools, what follows, and what precedes
+    - Use this to understand cooking workflows
+29. For "what recipe" questions:
+    - Use list_recipes() to see available recipes
+    - Use query_recipe(recipe_name) to get recipe details
+    - Match recipe steps to what's visible in the video
+30. Use evidence from tools to answer - do NOT fabricate information.
 26. When sufficient evidence exists, select the best matching choice.
 27. Never call the same tool with the same parameters twice.
 28. Be efficient: 2-3 tool calls total is optimal.
