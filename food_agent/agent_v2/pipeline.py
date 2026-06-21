@@ -167,6 +167,14 @@ class Pipeline:
         registry.register("get_cooking_effect", self._tool_get_cooking_effect)
         registry.register("get_object_info", self._tool_get_object_info)
 
+        # --- Specialized tools for difficult categories ---
+        registry.register("read_scale", self._tool_read_scale)
+        registry.register("analyze_container", self._tool_analyze_container)
+        registry.register("track_object_trajectory", self._tool_track_object_trajectory)
+        registry.register("recognize_action", self._tool_recognize_action)
+        registry.register("match_gaze_to_object", self._tool_match_gaze_to_object)
+        registry.register("predict_next_interaction", self._tool_predict_next_interaction)
+
         # --- Control tools ---
         registry.register("check_evidence", self._tool_check_evidence)
         registry.register("expand_search", self._tool_expand_search)
@@ -1024,6 +1032,288 @@ class Pipeline:
             "properties": info,
             "note": f"Info about {object_name}" if info else f"No data for {object_name}",
         }
+
+    def _tool_read_scale(self, timestamp: float = 0, **kwargs) -> Evidence:
+        """Read weight from a kitchen scale display.
+
+        Uses specialized prompting to extract weight readings from video frames.
+
+        Args:
+            timestamp: Time in seconds to capture the frame.
+        """
+        from food_agent.tools.specialized_tools import ScaleReader
+        ctx = self._get_context(kwargs)
+        try:
+            frame = self.video_loader.get_frame(ctx["video_id"], timestamp)
+            if frame is None:
+                return Evidence(source_module="ScaleReader", evidence_type="weight",
+                              content={"error": "could not load frame"}, confidence=0)
+
+            prompt = ScaleReader.build_scale_reading_prompt()
+            response = self.mimo_client.call_vision(frame, prompt)
+            if isinstance(response, list):
+                response = response[0] if response else ""
+            response = str(response)
+
+            weight_info = ScaleReader.parse_weight(response)
+
+            if weight_info:
+                return Evidence(
+                    source_module="ScaleReader",
+                    evidence_type="weight",
+                    time_range={"start": timestamp, "end": timestamp},
+                    content={
+                        "weight_grams": weight_info["grams"],
+                        "weight_value": weight_info["value"],
+                        "weight_unit": weight_info["unit"],
+                        "raw_response": response[:100],
+                    },
+                    confidence=0.7,
+                )
+            else:
+                return Evidence(
+                    source_module="ScaleReader",
+                    evidence_type="weight",
+                    time_range={"start": timestamp, "end": timestamp},
+                    content={"weight_grams": None, "raw_response": response[:100]},
+                    confidence=0.3,
+                )
+        except Exception as e:
+            return Evidence(source_module="ScaleReader", evidence_type="weight",
+                          content={"error": str(e)}, confidence=0)
+
+    def _tool_analyze_container(self, timestamp: float = 0, container_type: str = "container", **kwargs) -> Evidence:
+        """Analyze what's inside a container.
+
+        Uses specialized prompting to identify container contents.
+
+        Args:
+            timestamp: Time in seconds to capture the frame.
+            container_type: Type of container (e.g., "fridge", "cupboard", "drawer").
+        """
+        from food_agent.tools.specialized_tools import ContainerAnalyzer
+        ctx = self._get_context(kwargs)
+        try:
+            frame = self.video_loader.get_frame(ctx["video_id"], timestamp)
+            if frame is None:
+                return Evidence(source_module="ContainerAnalyzer", evidence_type="contents",
+                              content={"error": "could not load frame"}, confidence=0)
+
+            prompt = ContainerAnalyzer.build_container_prompt(container_type)
+            response = self.mimo_client.call_vision(frame, prompt)
+            if isinstance(response, list):
+                response = response[0] if response else ""
+            response = str(response)
+
+            contents = ContainerAnalyzer.parse_contents(response)
+
+            return Evidence(
+                source_module="ContainerAnalyzer",
+                evidence_type="contents",
+                time_range={"start": timestamp, "end": timestamp},
+                content={
+                    "contents": contents,
+                    "content_count": len(contents),
+                    "raw_response": response[:200],
+                },
+                confidence=0.7 if contents else 0.3,
+            )
+        except Exception as e:
+            return Evidence(source_module="ContainerAnalyzer", evidence_type="contents",
+                          content={"error": str(e)}, confidence=0)
+
+    def _tool_track_object_trajectory(self, bbox: List[float] = None, timestamp: float = 0,
+                                       time_range: float = 10.0, num_samples: int = 5, **kwargs) -> Evidence:
+        """Track object trajectory across multiple frames.
+
+        Samples frames and analyzes object movement.
+
+        Args:
+            bbox: [x1, y1, x2, y2] bounding box of the object.
+            timestamp: Start time in seconds.
+            time_range: Seconds to track after timestamp.
+            num_samples: Number of frames to sample.
+        """
+        from food_agent.tools.specialized_tools import ObjectTracker
+        ctx = self._get_context(kwargs)
+        try:
+            if not bbox or len(bbox) < 4:
+                return Evidence(source_module="ObjectTracker", evidence_type="trajectory",
+                              content={"error": "bbox required"}, confidence=0)
+
+            # Identify object at start
+            try:
+                frame = self.video_loader.get_frame(ctx["video_id"], timestamp)
+                center_x = int((bbox[0] + bbox[2]) / 2)
+                center_y = int((bbox[1] + bbox[3]) / 2)
+                prompt = (
+                    f"Look at this kitchen scene. What object is at pixel ({center_x}, {center_y})? "
+                    f"Reply with just the object name (1-2 words)."
+                )
+                response = self.mimo_client.call_vision(frame, prompt)
+                if isinstance(response, list):
+                    response = response[0] if response else ""
+                object_name = str(response).strip().split('\n')[0].strip()[:30]
+            except Exception:
+                object_name = "object"
+
+            # Sample frames after timestamp
+            timestamps = [timestamp + time_range * i / (num_samples - 1) for i in range(num_samples)]
+
+            locations = []
+            for ts in timestamps:
+                try:
+                    frame = self.video_loader.get_frame(ctx["video_id"], ts)
+                    prompt = ObjectTracker.build_tracking_prompt(object_name)
+                    response = self.mimo_client.call_vision(frame, prompt)
+                    if isinstance(response, list):
+                        response = response[0] if response else ""
+                    response = str(response)
+
+                    is_holding = "holding" in response.lower()[:30]
+                    is_placed = "placed" in response.lower()[:30]
+
+                    locations.append({
+                        "timestamp": round(ts, 2),
+                        "location": response[:200],
+                        "holding": is_holding,
+                        "placed": is_placed,
+                    })
+                except Exception:
+                    locations.append({"timestamp": ts, "location": "error", "holding": False, "placed": False})
+
+            # Analyze trajectory
+            trajectory = ObjectTracker.analyze_trajectory(locations)
+
+            return Evidence(
+                source_module="ObjectTracker",
+                evidence_type="trajectory",
+                time_range={"start": timestamp, "end": timestamp + time_range},
+                content={
+                    "object_name": object_name,
+                    "trajectory": trajectory,
+                    "final_location": trajectory.get("final_location", "unknown"),
+                    "locations": locations,
+                },
+                confidence=0.7 if trajectory["status"] != "unknown" else 0.3,
+            )
+        except Exception as e:
+            return Evidence(source_module="ObjectTracker", evidence_type="trajectory",
+                          content={"error": str(e)}, confidence=0)
+
+    def _tool_recognize_action(self, timestamp: float = 0, **kwargs) -> Evidence:
+        """Recognize the action being performed at a timestamp.
+
+        Uses specialized prompting for action recognition.
+
+        Args:
+            timestamp: Time in seconds to capture the frame.
+        """
+        from food_agent.tools.specialized_tools import ActionRecognizer
+        ctx = self._get_context(kwargs)
+        try:
+            frame = self.video_loader.get_frame(ctx["video_id"], timestamp)
+            if frame is None:
+                return Evidence(source_module="ActionRecognizer", evidence_type="action",
+                              content={"error": "could not load frame"}, confidence=0)
+
+            prompt = ActionRecognizer.build_action_prompt()
+            response = self.mimo_client.call_vision(frame, prompt)
+            if isinstance(response, list):
+                response = response[0] if response else ""
+            response = str(response)
+
+            return Evidence(
+                source_module="ActionRecognizer",
+                evidence_type="action",
+                time_range={"start": timestamp, "end": timestamp},
+                content={
+                    "action": response[:200],
+                    "timestamp": timestamp,
+                },
+                confidence=0.7,
+            )
+        except Exception as e:
+            return Evidence(source_module="ActionRecognizer", evidence_type="action",
+                          content={"error": str(e)}, confidence=0)
+
+    def _tool_match_gaze_to_object(self, gaze_direction: str = "", timestamp: float = 0, **kwargs) -> Evidence:
+        """Match gaze direction to visible objects.
+
+        Uses specialized prompting to identify what the person is looking at.
+
+        Args:
+            gaze_direction: Description of gaze direction (e.g., "straight ahead, downward").
+            timestamp: Time in seconds to capture the frame.
+        """
+        from food_agent.tools.specialized_tools import GazeObjectMatcher
+        ctx = self._get_context(kwargs)
+        try:
+            if isinstance(gaze_direction, list):
+                gaze_direction = gaze_direction[0] if gaze_direction else ""
+            gaze_direction = str(gaze_direction).strip()
+
+            frame = self.video_loader.get_frame(ctx["video_id"], timestamp)
+            if frame is None:
+                return Evidence(source_module="GazeObjectMatcher", evidence_type="gaze_target",
+                              content={"error": "could not load frame"}, confidence=0)
+
+            prompt = GazeObjectMatcher.build_gaze_object_prompt(gaze_direction)
+            response = self.mimo_client.call_vision(frame, prompt)
+            if isinstance(response, list):
+                response = response[0] if response else ""
+            response = str(response)
+
+            return Evidence(
+                source_module="GazeObjectMatcher",
+                evidence_type="gaze_target",
+                time_range={"start": timestamp, "end": timestamp},
+                content={
+                    "gaze_direction": gaze_direction,
+                    "gaze_target": response[:200],
+                    "timestamp": timestamp,
+                },
+                confidence=0.7,
+            )
+        except Exception as e:
+            return Evidence(source_module="GazeObjectMatcher", evidence_type="gaze_target",
+                          content={"error": str(e)}, confidence=0)
+
+    def _tool_predict_next_interaction(self, timestamp: float = 0, **kwargs) -> Evidence:
+        """Predict what the person will interact with next.
+
+        Uses specialized prompting for interaction prediction.
+
+        Args:
+            timestamp: Time in seconds to capture the frame.
+        """
+        from food_agent.tools.specialized_tools import InteractionPredictor
+        ctx = self._get_context(kwargs)
+        try:
+            frame = self.video_loader.get_frame(ctx["video_id"], timestamp)
+            if frame is None:
+                return Evidence(source_module="InteractionPredictor", evidence_type="prediction",
+                              content={"error": "could not load frame"}, confidence=0)
+
+            prompt = InteractionPredictor.build_prediction_prompt()
+            response = self.mimo_client.call_vision(frame, prompt)
+            if isinstance(response, list):
+                response = response[0] if response else ""
+            response = str(response)
+
+            return Evidence(
+                source_module="InteractionPredictor",
+                evidence_type="prediction",
+                time_range={"start": timestamp, "end": timestamp},
+                content={
+                    "predicted_object": response[:200],
+                    "timestamp": timestamp,
+                },
+                confidence=0.6,
+            )
+        except Exception as e:
+            return Evidence(source_module="InteractionPredictor", evidence_type="prediction",
+                          content={"error": str(e)}, confidence=0)
 
     def _tool_check_evidence(self, **kwargs) -> Dict:
         """Check evidence sufficiency (placeholder - agent handles this internally)."""

@@ -26,6 +26,12 @@ Available tools:
 - estimate_ingredient_weight(ingredient, size): Get typical weight for an ingredient from knowledge base
 - get_cooking_effect(method): Get nutritional effect of a cooking method
 - get_object_info(object_name): Get information about a kitchen object
+- read_scale(timestamp): Read weight from a kitchen scale display in the video
+- analyze_container(timestamp, container_type): Analyze what's inside a container (fridge, cupboard, drawer)
+- track_object_trajectory(bbox, timestamp, time_range): Track object movement across frames
+- recognize_action(timestamp): Recognize what action the person is performing
+- match_gaze_to_object(gaze_direction, timestamp): Match gaze direction to visible objects
+- predict_next_interaction(timestamp): Predict what the person will interact with next
 - expand_search(modules, start_time, end_time): Expand search to more modules
 
 CRITICAL DECISION RULES:
@@ -106,11 +112,10 @@ CRITICAL DECISION RULES:
     - If the tool returns a matched_candidate, use that as the answer
     - ALWAYS pick the closest matching option
 17. For "How much did the participant weigh" (ingredient weight):
-    - Use estimate_ingredient_weight to get typical weight for the ingredient
-    - The tool returns typical weights based on size (small/medium/large)
-    - Also use describe_frame to see the actual portion in the video
-    - Ask specifically: "What weight is shown on the scale?" or "How much does this portion look like?"
-    - Compare the visual portion with typical weights
+    - Use read_scale(timestamp) to read the weight from the scale display
+    - The tool uses specialized OCR-like prompting to extract numbers
+    - Also use estimate_ingredient_weight for typical weights
+    - Compare the scale reading with typical weights
     - Match to the closest answer choice
 18. For "nutrition change" questions:
     - Use get_cooking_effect to understand how cooking affects nutrition
@@ -123,31 +128,26 @@ CRITICAL DECISION RULES:
     - Match to the closest answer choice
 20. For "What is the person looking at" (gaze estimation):
     - Call query_gaze to get gaze direction data
-    - The gaze data includes yaw/pitch angles and gaze_direction description
-    - Match the gaze direction to visible objects in the scene
-    - Use describe_frame to see what objects are visible
-    - The person is likely looking at the object in their gaze direction
+    - Call match_gaze_to_object(gaze_direction, timestamp) to find what they're looking at
+    - The tool matches gaze direction to visible objects
     - Match to the closest answer choice
 21. For "What object will the person interact with next" (gaze anticipation):
-    - Call query_gaze to see where the person is looking
-    - The person is likely to interact with the object they're looking at
-    - Use describe_frame to see what objects are visible
-    - Match the gaze target to the closest answer choice
+    - Call predict_next_interaction(timestamp) to predict the next interaction
+    - The tool analyzes the scene and predicts based on context
+    - Also call query_gaze to see where the person is looking
+    - Match to the closest answer choice
 22. For "Which objects did the person put in/take from" (object contents):
-    - Call describe_frame to see what's visible in the container
-    - Ask specifically: "What objects are inside this container?"
-    - Use identify_ingredients to see food items
+    - Call analyze_container(timestamp, container_type) to see what's inside
+    - The tool uses specialized prompting to identify contents
     - Match to the closest answer choice
 23. For "Where did I put/take the object" (object location):
-    - Call track_object to track where the object was placed
-    - The tool returns final_location describing where the object ended up
-    - Match the location to the closest answer choice
-    - If track_object returns "not determined", use describe_frame to analyze the scene
+    - Call track_object_trajectory(bbox, timestamp) to track the object
+    - The tool tracks the object across multiple frames
+    - Match the final_location to the closest answer choice
 24. For "What action is the person performing" (action recognition):
-    - Call describe_frame to see what the person is doing
-    - Call query_hands to see hand interactions
-    - Call query_audio to hear kitchen sounds
-    - Combine all evidence to identify the action
+    - Call recognize_action(timestamp) to identify the action
+    - The tool uses specialized prompting for action recognition
+    - Also call query_hands and query_audio for additional evidence
     - Match to the closest answer choice
 25. Use evidence from tools to answer - do NOT fabricate information.
 26. When sufficient evidence exists, select the best matching choice.
