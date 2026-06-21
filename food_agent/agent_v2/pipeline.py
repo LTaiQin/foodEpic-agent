@@ -173,6 +173,7 @@ class Pipeline:
         registry.register("track_object_trajectory", self._tool_track_object_trajectory)
         registry.register("recognize_action", self._tool_recognize_action)
         registry.register("match_gaze_to_object", self._tool_match_gaze_to_object)
+        registry.register("estimate_fixture_clock", self._tool_estimate_fixture_clock)
         registry.register("predict_next_interaction", self._tool_predict_next_interaction)
         registry.register("find_static_period", self._tool_find_static_period)
 
@@ -1291,6 +1292,52 @@ class Pipeline:
             )
         except Exception as e:
             return Evidence(source_module="GazeObjectMatcher", evidence_type="gaze_target",
+                          content={"error": str(e)}, confidence=0)
+
+    def _tool_estimate_fixture_clock(self, fixture_name: str = "", timestamp: float = 0, **kwargs) -> Evidence:
+        """Estimate the clock direction of a fixture using the video frame.
+
+        Uses vision model to determine where a fixture is relative to the person's view.
+        This is an alternative to fixture_clock_position when SLAM data is unavailable.
+
+        Args:
+            fixture_name: Name of the fixture (e.g., "boiler", "sink", "oven").
+            timestamp: Time in seconds to capture the frame.
+        """
+        from food_agent.tools.specialized_tools import GazeObjectMatcher
+        ctx = self._get_context(kwargs)
+        try:
+            if isinstance(fixture_name, list):
+                fixture_name = fixture_name[0] if fixture_name else ""
+            fixture_name = str(fixture_name).strip()
+
+            frame = self.video_loader.get_frame(ctx["video_id"], timestamp)
+            if frame is None:
+                return Evidence(source_module="GazeObjectMatcher", evidence_type="fixture_clock",
+                              content={"error": "could not load frame"}, confidence=0)
+
+            prompt = GazeObjectMatcher.build_clock_direction_prompt(fixture_name)
+            response = self.mimo_client.call_vision(frame, prompt)
+            if isinstance(response, list):
+                response = response[0] if response else ""
+            response = str(response)
+
+            clock = GazeObjectMatcher.parse_clock_direction(response)
+
+            return Evidence(
+                source_module="GazeObjectMatcher",
+                evidence_type="fixture_clock",
+                time_range={"start": timestamp, "end": timestamp},
+                content={
+                    "fixture_name": fixture_name,
+                    "clock_direction": f"{clock} o'clock" if clock else "unknown",
+                    "clock_number": clock,
+                    "raw_response": response[:100],
+                },
+                confidence=0.7 if clock else 0.3,
+            )
+        except Exception as e:
+            return Evidence(source_module="GazeObjectMatcher", evidence_type="fixture_clock",
                           content={"error": str(e)}, confidence=0)
 
     def _tool_predict_next_interaction(self, timestamp: float = 0, **kwargs) -> Evidence:

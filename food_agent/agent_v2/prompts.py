@@ -31,6 +31,7 @@ Available tools:
 - track_object_trajectory(bbox, timestamp, time_range): Track object movement across frames
 - recognize_action(timestamp): Recognize what action the person is performing
 - match_gaze_to_object(gaze_direction, timestamp): Match gaze direction to visible objects
+- estimate_fixture_clock(fixture_name, timestamp): Estimate clock direction of a fixture using video frame
 - predict_next_interaction(timestamp): Predict what the person will interact with next
 - find_static_period(bbox, timestamp, time_range, min_duration): Find when an object was static for a minimum duration
 - expand_search(modules, start_time, end_time): Expand search to more modules
@@ -158,9 +159,11 @@ CRITICAL DECISION RULES:
     - Match the static period start time to the closest answer choice
     - The answer is the starting time of a static period that lasts at least the minimum duration
 26. For "Where is X located" (fixture location) questions:
-    - Call fixture_clock_position(fixture_name, timestamp) to get clock direction
-    - The tool computes the clock position relative to the wearer
+    - First try fixture_clock_position(fixture_name, timestamp) for SLAM-based calculation
+    - If SLAM data is unavailable, use estimate_fixture_clock(fixture_name, timestamp) for vision-based estimation
+    - The tool asks the vision model to determine the clock direction
     - Match the clock direction to the closest answer choice
+    - IMPORTANT: Always try both tools if one fails
 27. Use evidence from tools to answer - do NOT fabricate information.
 26. When sufficient evidence exists, select the best matching choice.
 27. Never call the same tool with the same parameters twice.

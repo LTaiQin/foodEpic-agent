@@ -355,6 +355,40 @@ class GazeObjectMatcher:
         )
 
     @staticmethod
+    def build_clock_direction_prompt(fixture_name: str) -> str:
+        """Build a prompt for determining clock direction of a fixture."""
+        return (
+            f"Look at this egocentric kitchen video frame. "
+            f"The person is looking straight ahead (12 o'clock direction). "
+            f"Where is the {fixture_name} relative to the person's current view? "
+            f"Use clock directions: 12 o'clock is straight ahead, 3 o'clock is right, "
+            f"6 o'clock is behind, 9 o'clock is left. "
+            f"Reply with just the clock direction (e.g., '3 o'clock', '10 o'clock')."
+        )
+
+    @staticmethod
+    def parse_clock_direction(response: str) -> Optional[int]:
+        """Parse clock direction from response."""
+        import re
+        response = response.lower().strip()
+
+        # Match patterns like "3 o'clock", "10 o'clock", "3 oclock"
+        match = re.search(r'(\d{1,2})\s*o\'?clock', response)
+        if match:
+            clock = int(match.group(1))
+            if 1 <= clock <= 12:
+                return clock
+
+        # Match just a number
+        match = re.search(r'\b(\d{1,2})\b', response)
+        if match:
+            num = int(match.group(1))
+            if 1 <= num <= 12:
+                return num
+
+        return None
+
+    @staticmethod
     def match_gaze_to_choices(gaze_target: str, choices: List[str]) -> Tuple[int, float]:
         """Match gaze target to answer choices."""
         gaze_lower = gaze_target.lower()
@@ -378,6 +412,25 @@ class GazeObjectMatcher:
                 best_idx = i
 
         return best_idx, best_score / max(len(gaze_lower.split()), 1)
+
+    @staticmethod
+    def match_clock_to_choices(clock: int, choices: List[str]) -> Tuple[int, float]:
+        """Match clock direction to answer choices."""
+        if clock is None:
+            return -1, 0.0
+
+        clock_str = f"{clock} o'clock"
+        for i, choice in enumerate(choices):
+            if clock_str in choice.lower():
+                return i, 1.0
+
+        # Fuzzy match
+        for i, choice in enumerate(choices):
+            choice_lower = choice.lower()
+            if str(clock) in choice_lower and "clock" in choice_lower:
+                return i, 0.8
+
+        return -1, 0.0
 
 
 class InteractionPredictor:
