@@ -42,15 +42,25 @@ def load_benchmark(category: str = None) -> list:
 
 def answer_question(q: dict) -> dict:
     prompt = q["question"]
-    if q["choices"]:
-        choice_text = "\n".join(f"  {chr(65+j)}. {c}" for j, c in enumerate(q["choices"]))
+
+    # Convert list-type choices to readable strings
+    choices = q["choices"]
+    choice_strings = []
+    for c in choices:
+        if isinstance(c, list):
+            choice_strings.append(", ".join(str(item) for item in c))
+        else:
+            choice_strings.append(str(c))
+
+    if choice_strings:
+        choice_text = "\n".join(f"  {chr(65+j)}. {c}" for j, c in enumerate(choice_strings))
         prompt += f"\n\n{choice_text}\n\nSelect the best option. Reply with ONLY the letter (A, B, C, D, or E), nothing else."
 
     start = time.time()
     try:
         result = send_request({
             "action": "answer", "question": prompt,
-            "video_id": q["video_id"], "choices": q["choices"],
+            "video_id": q["video_id"], "choices": choice_strings,
         })
     except Exception as e:
         result = {"answer": f"Error: {e}", "confidence": 0, "tool_calls": [], "iterations": 0}
@@ -61,14 +71,14 @@ def answer_question(q: dict) -> dict:
         pred_answer = pred_answer[0] if pred_answer else ""
     pred_answer = str(pred_answer).strip()
     pred_idx = -1
-    if q["choices"]:
-        for j, choice in enumerate(q["choices"]):
-            if pred_answer == choice or pred_answer.lower() == str(choice).lower():
+    if choice_strings:
+        for j, choice_str in enumerate(choice_strings):
+            if pred_answer == choice_str or pred_answer.lower() == choice_str.lower():
                 pred_idx = j
                 break
         if pred_idx == -1:
-            for j, choice in enumerate(q["choices"]):
-                if str(choice)[:30].lower() in pred_answer.lower() or pred_answer[:30].lower() in str(choice).lower():
+            for j, choice_str in enumerate(choice_strings):
+                if choice_str[:30].lower() in pred_answer.lower() or pred_answer[:30].lower() in choice_str.lower():
                     pred_idx = j
                     break
 

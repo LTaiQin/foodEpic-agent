@@ -163,8 +163,16 @@ class Generator:
         evidence_summary = "\n".join(lines) if lines else "  No evidence collected."
 
         if choices:
+            # Convert list-type choices to readable strings
+            choice_strings = []
+            for c in choices:
+                if isinstance(c, list):
+                    choice_strings.append(", ".join(str(item) for item in c))
+                else:
+                    choice_strings.append(str(c))
+
             choices_block = CHOICES_BLOCK_MC.format(
-                choices="\n".join(f"  {chr(65+i)}. {c}" for i, c in enumerate(choices))
+                choices="\n".join(f"  {chr(65+i)}. {c}" for i, c in enumerate(choice_strings))
             )
             instruction = "Select the best option by its letter."
         else:
@@ -279,6 +287,11 @@ class Generator:
         best_overlap = 0
 
         for i, choice in enumerate(choices):
+            # Handle list-type choices
+            if isinstance(choice, list):
+                choice = ", ".join(str(item) for item in choice)
+            choice = str(choice)
+
             # Substring match
             if choice[:40].lower() in response_lower:
                 return i
