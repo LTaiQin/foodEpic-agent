@@ -1082,14 +1082,16 @@ class Pipeline:
             return Evidence(source_module="ScaleReader", evidence_type="weight",
                           content={"error": str(e)}, confidence=0)
 
-    def _tool_analyze_container(self, timestamp: float = 0, container_type: str = "container", **kwargs) -> Evidence:
-        """Analyze what's inside a container.
+    def _tool_analyze_container(self, timestamp: float = 0, container_type: str = "container", 
+                                 bbox: List[float] = None, **kwargs) -> Evidence:
+        """Analyze what's inside a container or track what's put in/taken from it.
 
         Uses specialized prompting to identify container contents.
 
         Args:
             timestamp: Time in seconds to capture the frame.
             container_type: Type of container (e.g., "fridge", "cupboard", "drawer").
+            bbox: Optional bounding box to focus on specific area.
         """
         from food_agent.tools.specialized_tools import ContainerAnalyzer
         ctx = self._get_context(kwargs)
@@ -1099,24 +1101,35 @@ class Pipeline:
                 return Evidence(source_module="ContainerAnalyzer", evidence_type="contents",
                               content={"error": "could not load frame"}, confidence=0)
 
-            prompt = ContainerAnalyzer.build_container_prompt(container_type)
+            # If bbox provided, crop to that area
+            if bbox and len(bbox) >= 4:
+                h, w = frame.shape[:2]
+                x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(w, x2), min(h, y2)
+                if x2 > x1 and y2 > y1:
+                    frame = frame[y1:y2, x1:x2]
+
+            # Ask what's being put in or taken from the container
+            prompt = ContainerAnalyzer.build_tracking_prompt(container_type)
             response = self.mimo_client.call_vision(frame, prompt)
             if isinstance(response, list):
                 response = response[0] if response else ""
             response = str(response)
 
-            contents = ContainerAnalyzer.parse_contents(response)
+            tracking = ContainerAnalyzer.parse_tracking(response)
 
             return Evidence(
                 source_module="ContainerAnalyzer",
                 evidence_type="contents",
                 time_range={"start": timestamp, "end": timestamp},
                 content={
-                    "contents": contents,
-                    "content_count": len(contents),
+                    "action": tracking.get("action", "unknown"),
+                    "object": tracking.get("object"),
+                    "container_type": container_type,
                     "raw_response": response[:200],
                 },
-                confidence=0.7 if contents else 0.3,
+                confidence=0.7 if tracking.get("action") != "unknown" else 0.3,
             )
         except Exception as e:
             return Evidence(source_module="ContainerAnalyzer", evidence_type="contents",
@@ -1283,6 +1296,7 @@ class Pipeline:
         """Predict what the person will interact with next.
 
         Uses specialized prompting for interaction prediction.
+        Analyzes current action and scene to predict next interaction.
 
         Args:
             timestamp: Time in seconds to capture the frame.
@@ -1295,7 +1309,19 @@ class Pipeline:
                 return Evidence(source_module="InteractionPredictor", evidence_type="prediction",
                               content={"error": "could not load frame"}, confidence=0)
 
-            prompt = InteractionPredictor.build_prediction_prompt()
+            # First, identify what the person is currently doing
+            action_prompt = (
+                "Look at this egocentric kitchen video frame. "
+                "What is the person currently doing? "
+                "Reply with a brief description (e.g., 'chopping onions', 'stirring the pot')."
+            )
+            action_response = self.mimo_client.call_vision(frame, action_prompt)
+            if isinstance(action_response, list):
+                action_response = action_response[0] if action_response else ""
+            current_action = str(action_response).strip()[:100]
+
+            # Then predict what they'll interact with next
+            prompt = InteractionPredictor.build_anticipation_prompt(current_action)
             response = self.mimo_client.call_vision(frame, prompt)
             if isinstance(response, list):
                 response = response[0] if response else ""
@@ -1306,6 +1332,7 @@ class Pipeline:
                 evidence_type="prediction",
                 time_range={"start": timestamp, "end": timestamp},
                 content={
+                    "current_action": current_action,
                     "predicted_object": response[:200],
                     "timestamp": timestamp,
                 },

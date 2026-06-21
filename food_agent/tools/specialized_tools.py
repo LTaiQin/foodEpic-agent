@@ -101,6 +101,17 @@ class ContainerAnalyzer:
         )
 
     @staticmethod
+    def build_tracking_prompt(container_type: str = "container") -> str:
+        """Build a prompt for tracking what's put in/taken from a container."""
+        return (
+            f"Look at this egocentric kitchen video frame. "
+            f"The person is interacting with a {container_type}. "
+            f"Are they PUTTING something IN/ON the {container_type}, or TAKING something FROM it? "
+            f"What specific object are they putting or taking? "
+            f"Reply with: 'putting [object]' or 'taking [object]' or 'nothing'."
+        )
+
+    @staticmethod
     def parse_contents(response: str) -> List[str]:
         """Parse container contents from vision response."""
         response = response.lower().strip()
@@ -115,9 +126,33 @@ class ContainerAnalyzer:
         return items
 
     @staticmethod
+    def parse_tracking(response: str) -> Dict:
+        """Parse tracking response."""
+        response = response.lower().strip()
+
+        if "nothing" in response:
+            return {"action": "none", "object": None}
+
+        if "putting" in response:
+            # Extract object after "putting"
+            obj = response.replace("putting", "").strip()
+            return {"action": "putting", "object": obj}
+
+        if "taking" in response:
+            # Extract object after "taking"
+            obj = response.replace("taking", "").strip()
+            return {"action": "taking", "object": obj}
+
+        return {"action": "unknown", "object": None}
+
+    @staticmethod
     def match_to_choices(items: List[str], choices: List[str]) -> Tuple[int, float]:
         """Match identified items to answer choices."""
         if not items:
+            # Look for "Nothing" in choices
+            for i, choice in enumerate(choices):
+                if "nothing" in choice.lower():
+                    return i, 1.0
             return -1, 0.0
 
         best_idx = -1
@@ -304,6 +339,18 @@ class InteractionPredictor:
         )
 
     @staticmethod
+    def build_anticipation_prompt(current_action: str = "") -> str:
+        """Build a more specific prompt for interaction anticipation."""
+        action_context = f"They are currently {current_action}. " if current_action else ""
+        return (
+            f"Look at this egocentric kitchen video frame. {action_context}"
+            f"The person is cooking. Based on the current state of the kitchen and what the person is doing, "
+            f"what object will they most likely interact with NEXT? "
+            f"Consider what objects are nearby and what would logically come next in the cooking process. "
+            f"Reply with just the object name (1-2 words)."
+        )
+
+    @staticmethod
     def predict_next_interaction(
         current_action: str,
         gaze_target: str,
@@ -332,3 +379,32 @@ class InteractionPredictor:
             return nearby_objects[0]
 
         return "unknown"
+
+    @staticmethod
+    def match_to_choices(predicted: str, choices: List[str]) -> Tuple[int, float]:
+        """Match predicted object to answer choices."""
+        predicted_lower = predicted.lower().strip()
+        best_idx = -1
+        best_score = 0.0
+
+        for i, choice in enumerate(choices):
+            choice_lower = choice.lower().strip()
+
+            # Remove common prefixes
+            choice_clean = choice_lower.replace("the ", "").strip()
+            predicted_clean = predicted_lower.replace("the ", "").strip()
+
+            # Direct match
+            if predicted_clean in choice_clean or choice_clean in predicted_clean:
+                return i, 1.0
+
+            # Word overlap
+            predicted_words = set(predicted_clean.split())
+            choice_words = set(choice_clean.split())
+            overlap = len(predicted_words & choice_words)
+
+            if overlap > best_score:
+                best_score = overlap
+                best_idx = i
+
+        return best_idx, best_score / max(len(predicted_lower.split()), 1)
