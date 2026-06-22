@@ -128,7 +128,7 @@ def answer_direct(q: dict) -> dict:
         except Exception:
             return {"answer": "Error: could not load frame", "confidence": 0, "tool_calls": 0}
 
-    # Build improved prompt with reasoning instruction
+    # Build improved prompt with category-specific reasoning
     prompt = q["question"]
     if q["choices"]:
         choice_text = "\n".join(f"  {chr(65+j)}. {c}" for j, c in enumerate(q["choices"]))
@@ -137,19 +137,21 @@ def answer_direct(q: dict) -> dict:
         # Add category-specific reasoning instructions
         category = q.get("category", "")
         if "action" in category.lower():
-            prompt += "Look at what the person is doing in this frame. What action are they performing? "
+            prompt += "Look carefully at what the person is doing in this frame. What specific action are they performing? Consider their hand movements, body posture, and what objects they're interacting with. "
         elif "recipe" in category.lower():
-            prompt += "Look at the cooking context. What recipe step or activity is happening? "
+            prompt += "Look at the cooking context. What recipe is being prepared? What step is currently happening? Consider the ingredients, tools, and cooking actions visible. "
         elif "gaze" in category.lower():
-            prompt += "Look at where the person is facing. What are they looking at? "
+            prompt += "Look at where the person's head is facing and what they're likely looking at. Consider the direction of their gaze and what objects are in that direction. "
         elif "ingredient" in category.lower():
-            prompt += "Look at the food items visible. What ingredients are present? "
+            prompt += "Look at the food items visible in the scene. What ingredients are present? Consider their appearance, color, and context. "
         elif "nutrition" in category.lower():
-            prompt += "Consider the nutritional content of the food items. "
+            prompt += "Consider the nutritional content of the food items visible. What nutrients are present? "
         elif "3d_perception" in category.lower() or "object" in category.lower():
-            prompt += "Look at the spatial layout and objects in the scene. "
+            prompt += "Look at the spatial layout and objects in the scene. Where are objects located relative to each other? "
+        elif "motion" in category.lower():
+            prompt += "Look at the movement and position of objects. Have they moved? Where are they now? "
         
-        prompt += "Think carefully about the answer, then select the best option. Reply with ONLY the letter (A, B, C, D, or E), nothing else."
+        prompt += "Think step by step about the answer, then select the BEST option. Reply with ONLY the letter (A, B, C, D, or E), nothing else."
 
     try:
         response = mimo.call_vision(frame, prompt)
