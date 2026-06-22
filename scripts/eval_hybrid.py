@@ -102,7 +102,7 @@ def load_benchmark(category: str = None) -> list:
 
 
 def answer_direct(q: dict) -> dict:
-    """Answer using direct LLM with enhanced context."""
+    """Answer using direct LLM with video input for temporal understanding."""
     from food_agent.loaders import VideoLoader
     from food_agent.evaluation.api_client import MimoClient
     from pathlib import Path
@@ -113,7 +113,20 @@ def answer_direct(q: dict) -> dict:
     video_id = q["video_id"]
     category = q.get("category", "")
 
-    # Extract timestamps - use multiple frames for better context
+    # Categories that benefit from video input (temporal understanding)
+    video_categories = {
+        "fine_grained_action_recognition",
+        "fine_grained_action_localization",
+        "fine_grained_how_recognition",
+        "fine_grained_why_recognition",
+        "gaze_gaze_estimation",
+        "gaze_interaction_anticipation",
+        "object_motion_object_movement_counting",
+        "object_motion_object_movement_itinerary",
+        "object_motion_stationary_object_localization",
+    }
+
+    # Extract timestamps from question
     import re
     time_matches = re.findall(r'TIME\s+(\d+):(\d+):(\d+\.?\d*)', q["question"])
     timestamps = []
@@ -122,44 +135,47 @@ def answer_direct(q: dict) -> dict:
         timestamps.append(ts)
 
     if timestamps:
-        ts = timestamps[0]  # Use first timestamp
+        ts = timestamps[0]
     else:
         ts = 30
 
-    try:
-        frame = vl.get_frame(video_id, ts)
-    except Exception:
-        try:
-            frame = vl.get_frame(video_id, 10)
-        except Exception:
-            return {"answer": "Error: could not load frame", "confidence": 0, "tool_calls": 0}
-
-    # Build optimized prompt
+    # Build prompt
     prompt = q["question"]
     if q["choices"]:
         choice_text = "\n".join(f"  {chr(65+j)}. {c}" for j, c in enumerate(q["choices"]))
         prompt += f"\n\n{choice_text}\n\n"
 
-        # Category-specific analysis instructions
+        # Category-specific analysis
         if "action" in category:
-            prompt += "Analyze: What specific action is the person performing? Look at hand movements, tools used, and body posture. "
+            prompt += "Analyze the person's actions: hand movements, tool usage, body posture. "
         elif "recipe" in category:
-            prompt += "Analyze: What cooking step is happening? What ingredients/tools are visible? What's the recipe context? "
+            prompt += "Consider the cooking context and recipe steps. "
         elif "gaze" in category:
-            prompt += "Analyze: Where is the person looking? Consider head direction and what's in their field of view. "
+            prompt += "Determine where the person is looking based on head direction. "
         elif "ingredient" in category:
-            prompt += "Analyze: What food items are visible? Consider their appearance, state, and context. "
+            prompt += "Identify food items and their properties. "
         elif "nutrition" in category:
-            prompt += "Analyze: What are the nutritional properties of the food items? "
+            prompt += "Consider nutritional content. "
         elif "3d_perception" in category or "object" in category:
-            prompt += "Analyze: Where are objects located? What are their spatial relationships? "
+            prompt += "Analyze spatial layout and object positions. "
         elif "motion" in category:
-            prompt += "Analyze: Have objects moved? Where are they now vs. before? "
-        
-        prompt += "Select the BEST matching option. Reply with ONLY one letter (A, B, C, D, or E)."
+            prompt += "Track object movements and position changes. "
+
+        prompt += "Select the BEST option. Reply with ONLY one letter (A, B, C, D, or E)."
 
     try:
-        response = mimo.call_vision(frame, prompt)
+        # Use video input for temporal categories
+        if category in video_categories:
+            video_path = str(Path("data/HD-EPIC/Videos") / f"{video_id}.mp4")
+            response = mimo.call_video(video_path, prompt, max_frames=16)
+        else:
+            # Use single frame for non-temporal categories
+            try:
+                frame = vl.get_frame(video_id, ts)
+            except Exception:
+                frame = vl.get_frame(video_id, 10)
+            response = mimo.call_vision(frame, prompt)
+
         if isinstance(response, list):
             response = response[0] if response else ""
         response = str(response).strip()

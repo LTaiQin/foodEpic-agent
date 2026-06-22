@@ -171,6 +171,148 @@ class MimoClient:
 
         return "API error: max retries exceeded"
 
+    def call_video(self, video_path: str, prompt: str, system: str = "", max_frames: int = 32) -> str:
+        """Send a video clip to the LLM for temporal understanding.
+
+        This method extracts frames from the video and sends them as a sequence,
+        enabling the model to understand temporal patterns like actions, movements, etc.
+
+        Args:
+            video_path: Path to the video file.
+            prompt: Text prompt about the video.
+            system: System message (optional).
+            max_frames: Maximum number of frames to extract from the video.
+
+        Returns:
+            Response text string.
+        """
+        import cv2
+
+        # Extract frames from video
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return "Error: could not open video"
+
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+
+        # Sample frames evenly
+        frame_indices = [int(i * total_frames / max_frames) for i in range(max_frames)]
+
+        frames_b64 = []
+        for idx in frame_indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ret, frame = cap.read()
+            if ret:
+                _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                frames_b64.append(base64.b64encode(buf).decode("utf-8"))
+
+        cap.release()
+
+        if not frames_b64:
+            return "Error: could not extract frames"
+
+        # Build video content for API
+        video_content = []
+        for i, frame_b64 in enumerate(frames_b64):
+            video_content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{frame_b64}"}
+            })
+
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": f"This is a video with {len(frames_b64)} frames extracted at {fps:.1f} FPS.\n\n{prompt}"},
+                *video_content
+            ],
+        })
+
+        for attempt in range(self.max_retries):
+            try:
+                client = self._get_client()
+                response = client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    max_tokens=2048,
+                )
+                return response.choices[0].message.content or ""
+            except Exception as e:
+                error_str = str(e)
+                if "429" in error_str or "rate" in error_str.lower():
+                    wait_time = min(30, 5 * (2 ** attempt))
+                    print(f"Rate limited, waiting {wait_time}s...")
+                    time.sleep(wait_time)
+                elif attempt < self.max_retries - 1:
+                    time.sleep(2 ** attempt)
+                else:
+                    return f"API error: {e}"
+
+        return "API error: max retries exceeded"
+
+    def call_video_frames(self, frames: list, prompt: str, system: str = "") -> str:
+        """Send multiple frames as a video sequence to the LLM.
+
+        This is more efficient than call_video when frames are already extracted.
+
+        Args:
+            frames: List of BGR numpy arrays (video frames).
+            prompt: Text prompt about the video.
+            system: System message (optional).
+
+        Returns:
+            Response text string.
+        """
+        # Encode all frames
+        frames_b64 = []
+        for frame in frames:
+            _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            frames_b64.append(base64.b64encode(buf).decode("utf-8"))
+
+        # Build content
+        video_content = []
+        for frame_b64 in frames_b64:
+            video_content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{frame_b64}"}
+            })
+
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": f"This is a sequence of {len(frames_b64)} video frames.\n\n{prompt}"},
+                *video_content
+            ],
+        })
+
+        for attempt in range(self.max_retries):
+            try:
+                client = self._get_client()
+                response = client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    max_tokens=2048,
+                )
+                return response.choices[0].message.content or ""
+            except Exception as e:
+                error_str = str(e)
+                if "429" in error_str or "rate" in error_str.lower():
+                    wait_time = min(30, 5 * (2 ** attempt))
+                    print(f"Rate limited, waiting {wait_time}s...")
+                    time.sleep(wait_time)
+                elif attempt < self.max_retries - 1:
+                    time.sleep(2 ** attempt)
+                else:
+                    return f"API error: {e}"
+
+        return "API error: max retries exceeded"
+
     def call_with_tools(
         self,
         messages: List[Dict],
