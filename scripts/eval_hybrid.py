@@ -128,10 +128,28 @@ def answer_direct(q: dict) -> dict:
         except Exception:
             return {"answer": "Error: could not load frame", "confidence": 0, "tool_calls": 0}
 
+    # Build improved prompt with reasoning instruction
     prompt = q["question"]
     if q["choices"]:
         choice_text = "\n".join(f"  {chr(65+j)}. {c}" for j, c in enumerate(q["choices"]))
-        prompt += f"\n\n{choice_text}\n\nSelect the best option. Reply with ONLY the letter (A, B, C, D, or E), nothing else."
+        prompt += f"\n\n{choice_text}\n\n"
+        
+        # Add category-specific reasoning instructions
+        category = q.get("category", "")
+        if "action" in category.lower():
+            prompt += "Look at what the person is doing in this frame. What action are they performing? "
+        elif "recipe" in category.lower():
+            prompt += "Look at the cooking context. What recipe step or activity is happening? "
+        elif "gaze" in category.lower():
+            prompt += "Look at where the person is facing. What are they looking at? "
+        elif "ingredient" in category.lower():
+            prompt += "Look at the food items visible. What ingredients are present? "
+        elif "nutrition" in category.lower():
+            prompt += "Consider the nutritional content of the food items. "
+        elif "3d_perception" in category.lower() or "object" in category.lower():
+            prompt += "Look at the spatial layout and objects in the scene. "
+        
+        prompt += "Think carefully about the answer, then select the best option. Reply with ONLY the letter (A, B, C, D, or E), nothing else."
 
     try:
         response = mimo.call_vision(frame, prompt)
