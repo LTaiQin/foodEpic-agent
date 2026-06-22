@@ -128,30 +128,30 @@ def answer_direct(q: dict) -> dict:
         except Exception:
             return {"answer": "Error: could not load frame", "confidence": 0, "tool_calls": 0}
 
-    # Build improved prompt with category-specific reasoning
+    # Build improved prompt
     prompt = q["question"]
     if q["choices"]:
         choice_text = "\n".join(f"  {chr(65+j)}. {c}" for j, c in enumerate(q["choices"]))
         prompt += f"\n\n{choice_text}\n\n"
         
-        # Add category-specific reasoning instructions
+        # Add category-specific reasoning
         category = q.get("category", "")
         if "action" in category.lower():
-            prompt += "Look carefully at what the person is doing in this frame. What specific action are they performing? Consider their hand movements, body posture, and what objects they're interacting with. "
+            prompt += "Analyze what the person is doing: their hand movements, body posture, and interactions with objects. "
         elif "recipe" in category.lower():
-            prompt += "Look at the cooking context. What recipe is being prepared? What step is currently happening? Consider the ingredients, tools, and cooking actions visible. "
+            prompt += "Consider the cooking context: what recipe is being prepared, what step is happening, what ingredients and tools are visible. "
         elif "gaze" in category.lower():
-            prompt += "Look at where the person's head is facing and what they're likely looking at. Consider the direction of their gaze and what objects are in that direction. "
+            prompt += "Determine where the person is looking by analyzing their head direction and what objects are in that direction. "
         elif "ingredient" in category.lower():
-            prompt += "Look at the food items visible in the scene. What ingredients are present? Consider their appearance, color, and context. "
+            prompt += "Identify the food items visible and consider their properties. "
         elif "nutrition" in category.lower():
-            prompt += "Consider the nutritional content of the food items visible. What nutrients are present? "
+            prompt += "Consider the nutritional properties of the food items. "
         elif "3d_perception" in category.lower() or "object" in category.lower():
-            prompt += "Look at the spatial layout and objects in the scene. Where are objects located relative to each other? "
+            prompt += "Analyze the spatial layout and object positions in the scene. "
         elif "motion" in category.lower():
-            prompt += "Look at the movement and position of objects. Have they moved? Where are they now? "
+            prompt += "Observe the movement and position changes of objects. "
         
-        prompt += "Think step by step about the answer, then select the BEST option. Reply with ONLY the letter (A, B, C, D, or E), nothing else."
+        prompt += "Select the single best option. Reply with ONLY one letter (A, B, C, D, or E). No explanation, no punctuation, just the letter."
 
     try:
         response = mimo.call_vision(frame, prompt)
@@ -200,14 +200,25 @@ def answer_question(q: dict) -> dict:
 
     if q["choices"]:
         # Try letter match first (A, B, C, D, E)
-        if len(pred_answer) <= 3 and pred_answer:
-            letter = pred_answer.upper().strip()[0]
-            if letter in "ABCDE":
-                pred_idx = ord(letter) - ord("A")
+        if pred_answer:
+            # Clean up the response - extract just the letter
+            import re
+            # Try to find a single letter at the start
+            letter_match = re.match(r'^([A-E])', pred_answer.upper().strip())
+            if letter_match:
+                pred_idx = ord(letter_match.group(1)) - ord("A")
                 if pred_idx >= len(q["choices"]):
                     pred_idx = -1
+            
+            # If no letter at start, try to find "option X" or "answer is X" pattern
+            if pred_idx == -1:
+                option_match = re.search(r'(?:option|answer|choice)\s*(?:is)?\s*([A-E])', pred_answer, re.IGNORECASE)
+                if option_match:
+                    pred_idx = ord(option_match.group(1).upper()) - ord("A")
+                    if pred_idx >= len(q["choices"]):
+                        pred_idx = -1
 
-        # Try text match
+        # Text match fallback
         if pred_idx == -1:
             for j, choice_str in enumerate(q["choices"]):
                 if pred_answer == choice_str or pred_answer.lower() == choice_str.lower():
