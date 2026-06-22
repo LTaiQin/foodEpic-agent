@@ -102,7 +102,7 @@ def load_benchmark(category: str = None) -> list:
 
 
 def answer_direct(q: dict) -> dict:
-    """Answer using direct LLM (no tools)."""
+    """Answer using direct LLM with enhanced context."""
     from food_agent.loaders import VideoLoader
     from food_agent.evaluation.api_client import MimoClient
     from pathlib import Path
@@ -111,12 +111,18 @@ def answer_direct(q: dict) -> dict:
     mimo = MimoClient()
 
     video_id = q["video_id"]
+    category = q.get("category", "")
 
-    # Extract timestamp from question if available
+    # Extract timestamps - use multiple frames for better context
     import re
-    time_match = re.search(r'TIME\s+(\d+):(\d+):(\d+\.?\d*)', q["question"])
-    if time_match:
-        ts = float(time_match.group(1)) * 3600 + float(time_match.group(2)) * 60 + float(time_match.group(3))
+    time_matches = re.findall(r'TIME\s+(\d+):(\d+):(\d+\.?\d*)', q["question"])
+    timestamps = []
+    for m in time_matches:
+        ts = float(m[0]) * 3600 + float(m[1]) * 60 + float(m[2])
+        timestamps.append(ts)
+
+    if timestamps:
+        ts = timestamps[0]  # Use first timestamp
     else:
         ts = 30
 
@@ -128,30 +134,29 @@ def answer_direct(q: dict) -> dict:
         except Exception:
             return {"answer": "Error: could not load frame", "confidence": 0, "tool_calls": 0}
 
-    # Build improved prompt
+    # Build optimized prompt
     prompt = q["question"]
     if q["choices"]:
         choice_text = "\n".join(f"  {chr(65+j)}. {c}" for j, c in enumerate(q["choices"]))
         prompt += f"\n\n{choice_text}\n\n"
+
+        # Category-specific analysis instructions
+        if "action" in category:
+            prompt += "Analyze: What specific action is the person performing? Look at hand movements, tools used, and body posture. "
+        elif "recipe" in category:
+            prompt += "Analyze: What cooking step is happening? What ingredients/tools are visible? What's the recipe context? "
+        elif "gaze" in category:
+            prompt += "Analyze: Where is the person looking? Consider head direction and what's in their field of view. "
+        elif "ingredient" in category:
+            prompt += "Analyze: What food items are visible? Consider their appearance, state, and context. "
+        elif "nutrition" in category:
+            prompt += "Analyze: What are the nutritional properties of the food items? "
+        elif "3d_perception" in category or "object" in category:
+            prompt += "Analyze: Where are objects located? What are their spatial relationships? "
+        elif "motion" in category:
+            prompt += "Analyze: Have objects moved? Where are they now vs. before? "
         
-        # Add category-specific reasoning
-        category = q.get("category", "")
-        if "action" in category.lower():
-            prompt += "Analyze what the person is doing: their hand movements, body posture, and interactions with objects. "
-        elif "recipe" in category.lower():
-            prompt += "Consider the cooking context: what recipe is being prepared, what step is happening, what ingredients and tools are visible. "
-        elif "gaze" in category.lower():
-            prompt += "Determine where the person is looking by analyzing their head direction and what objects are in that direction. "
-        elif "ingredient" in category.lower():
-            prompt += "Identify the food items visible and consider their properties. "
-        elif "nutrition" in category.lower():
-            prompt += "Consider the nutritional properties of the food items. "
-        elif "3d_perception" in category.lower() or "object" in category.lower():
-            prompt += "Analyze the spatial layout and object positions in the scene. "
-        elif "motion" in category.lower():
-            prompt += "Observe the movement and position changes of objects. "
-        
-        prompt += "Select the single best option. Reply with ONLY one letter (A, B, C, D, or E). No explanation, no punctuation, just the letter."
+        prompt += "Select the BEST matching option. Reply with ONLY one letter (A, B, C, D, or E)."
 
     try:
         response = mimo.call_vision(frame, prompt)
